@@ -181,6 +181,9 @@ Windows audio control CLI/GUI tool (pycaw-based). List devices, set default endp
 - Launch the GUI:
   - Double-click `dist\audioctl.exe` (no arguments), or run it without command-line options.
 
+<img width="1367" height="332" alt="image" src="https://github.com/user-attachments/assets/bc739e2f-e488-429d-ad8d-3aeabf6a468a" />
+
+
 - Features:
   - Visual list of playback and recording devices, grouped and sorted.
   - Toggle “Show disabled/disconnected.”
@@ -190,8 +193,20 @@ Windows audio control CLI/GUI tool (pycaw-based). List devices, set default endp
     - “Mute” / “Unmute”
     - “Toggle Listen (capture only)”
 
+
+      <img width="328" height="169" alt="image" src="https://github.com/user-attachments/assets/3488adbf-b5cc-475c-9efd-0bf2e47acfa5" />
+
+
+
 - Print CLI Commands:
   - Enable “Print CLI commands” in the top bar. Actions performed in the GUI will print the equivalent `audioctl.exe` command to stdout (useful for learning and scripting).
+
+    <img width="419" height="71" alt="image" src="https://github.com/user-attachments/assets/c1cd3a37-2da9-42a5-9020-a65de7f7a4f3" />
+    <br>
+    <br>
+    <img width="1006" height="191" alt="image" src="https://github.com/user-attachments/assets/1f52d28b-71fa-4343-abde-728b164d2a99" />
+
+
 
 - Refresh Devices:
   - Click “Refresh” or press `F5`.
