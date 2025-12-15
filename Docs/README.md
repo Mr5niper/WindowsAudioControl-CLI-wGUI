@@ -181,7 +181,8 @@ Windows audio control CLI/GUI tool (pycaw-based). List devices, set default endp
 - Launch the GUI:
   - Double-click `dist\audioctl.exe` (no arguments), or run it without command-line options.
 
-<img width="1367" height="332" alt="image" src="https://github.com/user-attachments/assets/bc739e2f-e488-429d-ad8d-3aeabf6a468a" />
+
+<img width="1367" height="332" alt="image" src="https://github.com/user-attachments/assets/522bef9d-3d14-42f9-a6a4-3bec3f4e7683" />
 
 
 - Features:
@@ -201,7 +202,7 @@ Windows audio control CLI/GUI tool (pycaw-based). List devices, set default endp
 - Print CLI Commands:
   - Enable “Print CLI commands” in the top bar. Actions performed in the GUI will print the equivalent `audioctl.exe` command to stdout (useful for learning and scripting).
 
-    <img width="419" height="71" alt="image" src="https://github.com/user-attachments/assets/c1cd3a37-2da9-42a5-9020-a65de7f7a4f3" />
+    <img width="413" height="68" alt="image" src="https://github.com/user-attachments/assets/6efbdb05-e54e-4b1d-b0d7-6c28033817cb" />
     <br>
     <br>
     <img width="1006" height="191" alt="image" src="https://github.com/user-attachments/assets/1f52d28b-71fa-4343-abde-728b164d2a99" />
