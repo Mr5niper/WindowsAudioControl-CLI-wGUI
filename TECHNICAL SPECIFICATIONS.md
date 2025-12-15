@@ -1,4 +1,4 @@
-# Technical Specification: audioctl.py — Windows Audio Control Utility
+# Technical Specifications: audioctl.py — Windows Audio Control Utility
 
 ## 1. Introduction
 
