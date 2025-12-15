@@ -291,4 +291,3 @@ Full text: https://github.com/pyinstaller/pyinstaller/blob/develop/COPYING.txt
 Project page: https://www.pyinstaller.org/
 
 ---
-```
