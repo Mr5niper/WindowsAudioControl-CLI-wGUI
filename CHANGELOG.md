@@ -1,0 +1,224 @@
+# AUDIOCTL.PY CHANGELOG
+
+## v1.2.1 - [Current]
+
+### Consistency, Safety, and CLI/GUI Parity
+- **CLI/GUI Index Parity:** The CLI device list is now sorted by name within each flow (Render/Capture) exactly like the GUI, and shows the same per‑flow indices. All commands that accept `--name` together with `--index` interpret the index in this same GUI order.
+- **Active‑Only Operations:** All mutating commands now operate only on active endpoints (`DEVICE_STATE_ACTIVE`). This prevents accidental interaction with disabled, not-present, or unplugged devices. Affected commands: `set-default`, `set-volume` (incl. mute/unmute), `listen`, and `wait`.
+- **Better Disambiguation:** When multiple active devices match a name, the CLI now prints the candidates in GUI order (with per‑flow indices) and asks for `--index` to disambiguate.
+- **COM Initialization in CLI:** COM is now initialized and uninitialized in the CLI path (`CoInitialize`/`CoUninitialize`), improving reliability outside the GUI.
+
+### Improvements
+- **Default Device Setting:** `set-default` refuses to act on inactive devices and reports failures per role when setting all roles. Error messages are more informative.
+- **Device Listing:** `list_devices` gathers default endpoints once and still returns `isDefault` for each device; when `--all` is used, the state field shows a decoded combination of `active`/`disabled`/`notpresent`/`unplugged`.
+- **Index Validation:** `set-volume`, `listen`, and `wait` now explicitly validate `--index` ranges and return a clear error when out of bounds.
+
+### Bug Fixes
+- **CLI/GUI index mismatch:** CLI list is now name-sorted per flow (Render/Capture) exactly like the GUI, and shows the same per‑flow indices. `--index` is interpreted in that same GUI order.
+- **Active‑only operations:** Commands no longer select or act on disabled/not-present/unplugged devices. Affected: `set-default`, `set-volume` (incl. mute/unmute), `listen`, `wait`.
+- **Listen command bugs:**
+  - **CLI:** fixed passing a device dict instead of the boolean `enable` flag; now reliably uses `args.enable`.
+  - **GUI:** fixed variable misuse and a stray “===” comparison; now passes the computed boolean `enable` and the correct device `id`.
+- **`list_devices` regression:** restored `isDefault` so both CLI and GUI display default flags reliably.
+- **`resource_path` helper:** restored to ensure the GUI loads its icon consistently.
+- **COM lifetime in low-level Listen helpers:** removed per-call `CoInitialize`/`CoUninitialize` from `set_listen_to_device_ps` and `_get_listen_to_device_status_ps`. These helpers now rely on the top‑level COM initialization performed by the GUI/CLI entry points. This prevents the intermittent “UNRAISABLE: ValueError: COM method call without VTable” from comtypes’ finalizer while still applying the toggle successfully.
+
+### Behavioral changes
+- **Disambiguation and index validation:** When multiple active devices match a name, the CLI prints candidates in GUI order and requires `--index`. All commands validate `--index` ranges and return clear errors if out of bounds.
+- **`set-default` safety:** Refuses to operate on inactive devices and reports per‑role success/failure when setting “all” roles (more actionable errors than a generic failure).
+- **COM in CLI:** The CLI path now explicitly calls `CoInitialize`/`CoUninitialize` to match the GUI’s COM handling and improve reliability.
+- **Volume/mute helpers:** Enumerate only `DEVICE_STATE_ACTIVE` endpoints to avoid interacting with inactive devices.
+
+---
+
+## v1.2.0
+
+### New Features
+#### Enhanced Volume Control Dialog:
+- Implemented a new, intuitive volume control dialog for the GUI, featuring a side-by-side 3-digit entry box and a 0-100 slider that are synchronized in real-time. This provides more precise and visual control over device volume.
+
+#### Improved Application Diagnostic Capabilities:
+- Introduced a robust, centralized logging system to capture comprehensive diagnostic information about application behavior and any form of termination. Logs are written to a user-writable directory (e.g., `%LOCALAPPDATA%\audioctl\audioctl_gui.log`) for easy access. This includes:
+  - Global uncaught Python exception handling (`sys.excepthook`) with full traceback logging.
+  - Logging of Python unraisable exceptions (`sys.unraisablehook`) for Python 3.8+.
+  - Integration with fault handler to capture stack traces for hard/native crashes (e.g., access violations).
+  - Logging of explicit `sys.exit()` calls and normal interpreter shutdown events (`atexit`).
+  - Logging of Tkinter window close requests (`WM_DELETE_WINDOW` protocol) and root widget destruction events.
+  - Best-effort logging for Windows console control events (e.g., Ctrl+C, logoff, shutdown).
+  - Lifecycle breadcrumbs are logged at key GUI startup/shutdown points for a clear execution timeline.
+  - Detailed logging added around 'Listen to this device' toggle operations to aid in correlating actions with any potential issues.
+
+### Improvements
+#### Core Stability & Device Name Resolution:
+- **Crash Fix:** Resolved a critical native crash during device enumeration (specifically from `comtypes` object releases) by eliminating the problematic `AudioUtilities.GetAllDevices()` call for building the device ID-to-name map.
+- **Robust Friendly Name Retrieval:** Replaced the previous name mapping logic with direct, raw `IPropertyStore` (ctypes vtable) access for `PKEY_Device_FriendlyName` (and `PKEY_Device_DeviceDesc` as fallback) for each `IMMDevice`. This ensures device names are displayed reliably and prevents the previous crash path.
+- **`PROPVARIANT` String Handling:** Enhanced the internal `_pv_read_lpwstr` helper to robustly handle `PROPVARIANT` structures where `pwszVal` might be exposed as either a C pointer or a Python string by `comtypes`, preventing errors during string property reading.
+
+#### GUI Usability & Interactivity:
+- **Streamlined Mute/Unmute:** The GUI context menu now features a single "Toggle Mute" option. Its label dynamically switches between "Mute" and "Unmute" based on the device's actual mute state, providing a more intuitive user experience.
+- **Reliable Mute State Detection:** The `get_endpoint_mute` helper was corrected to reliably retrieve the device's mute status by directly interpreting the output of `IAudioEndpointVolume.GetMute()`, removing the need for a fallback prompt if the state is unknown. If the state is still unreadable, the menu defaults to "Unmute" as a safe action.
+- **Non-Interactive Headers:** clicks on header regions are explicitly ignored, improving visual clarity and separating interactive elements from display-only ones.
+
+#### COM Management:
+- Ensured proper COM apartment initialization (`CoInitialize()`) at the start of the GUI thread and corresponding cleanup (`CoUninitialize()`) at its exit, aligning with COM best practices for Tkinter applications and preventing potential resource issues.
+
+---
+
+## v1.1.1
+
+### New Features
+#### Graphical User Interface (GUI):
+- Introduced a new interactive GUI for Windows audio control, launching automatically when the script is run without command-line arguments.
+- The GUI allows users to visually list audio devices (playback and recording).
+- Provides GUI controls for setting default devices (all roles).
+- Enables setting volume, muting, and unmuting audio endpoints via the GUI.
+- Adds functionality to toggle the "Listen to this device" setting for capture devices directly from the GUI.
+- Includes a "Print CLI commands" option in the GUI to display the equivalent command-line instruction for each action performed.
+
+#### Automatic GUI Launch:
+- The `audioctl.py` script will now automatically launch the GUI if executed without any command-line arguments.
+
+### Improvements
+#### GUI Device Display:
+- Devices in the GUI are now logically grouped into "Playback (Render)" and "Recording (Capture)" sections for better organization.
+- Implemented dynamic column width and window sizing in the GUI to adjust to content, improving readability and user experience.
+- Added logic to prevent selection of group header rows in the device list and ensure proper selection behavior.
+- Improved Treeview styling, including attempts to bold column headers and remove default expand/collapse indicators for a cleaner look.
+
+#### GUI Usability:
+- Added an `F5` key binding to refresh the device list in the GUI.
+- Enhanced error handling for GUI startup, falling back to CLI help if the GUI fails to launch.
+
+#### Dependency Loading:
+- `tkinter` and `tkfont` imports are now localized within the `launch_gui()` function or `AudioGUI` class, ensuring that the CLI portion of the script remains free of GUI dependencies and can run without them.
+
+---
+
+## v1.0.1
+
+### Improvements
+#### Enhanced `set-default` Device Selection Logic:
+- Refactored the device selection for `--playback-name` and `--recording-name` arguments in the `set-default` command into a new `select_by_name` helper function.
+- Implemented an "active-first" matching strategy: the script now prioritizes matching device names against currently active devices. If multiple active matches are found, the `--index` argument becomes mandatory. If no active matches are found, it then falls back to searching all devices (including disabled/disconnected). This significantly improves the user experience by favoring operational devices.
+
+### Minor Changes
+- **`cmd_list` Output Formatting:** Adjusted internal print statements in `cmd_list` to remove trailing `\n` characters within f-strings, relying on explicit `print()` calls for line breaks. This does not alter the visible output structure.
+
+---
+
+## v1.0.0
+
+### Major Features
+#### Completely Reworked "Listen to this device" Functionality:
+- **Switched to COM `IPropertyStore` Interface:** The method for enabling/disabling "Listen to this device" (`cmd_listen` command) has been fundamentally rewritten. It now uses raw ctypes vtable calls to directly interact with the `IPropertyStore` COM interface (via new `set_listen_to_device_ps` and `_get_listen_to_device_status_ps` functions).
+- **No Admin Required (Typically):** This new COM-based approach bypasses direct registry manipulation (which previously required Administrator privileges) and instead operates as a per-user setting, generally not requiring elevated permissions.
+- **Playback Target ID:** The `listen` command now supports an optional `--playback-target-id` argument, allowing users to specify a render endpoint for the audio to play through. Using `''` sets it to the "Default Playback Device."
+- **Robust Verification:** The `cmd_listen` command now includes sophisticated verification logic, attempting to read the updated status via COM, and falling back to robust registry polling (`_verify_listen_via_registry`) if COM read is inconclusive.
+
+### Compatibility & Robustness
+- **`comtypes` Compatibility Shim:** A critical compatibility shim has been added at the very top of the script. This addresses known PyInstaller bundling issues with `comtypes.automation` by ensuring core constants (like `PROPVARIANT`, `VT_LPWSTR`, `VT_BOOL`, `VARIANT_TRUE`/`FALSE`) are available, improving overall reliability, especially in bundled executables.
+- **Enhanced `_get_policy_config` Fallback:** The helper function responsible for obtaining the `IPolicyConfig` COM interface (used by `set-default`) now includes multiple fallback mechanisms, including a local definition of `IPolicyConfigVista`. This improves the `set-default` command's reliability across different Python environments and `pycaw` versions.
+- **Improved Registry Reading for Listen Status:** The internal registry reading logic for "Listen to this device" (`_read_listen_enable_from_registry`) has been rewritten for increased robustness, parsing different registry value types (`REG_DWORD`, `REG_BINARY` `PROPVARIANT`, `REG_SZ`).
+
+### Error Handling & Output
+- **Captured Stderr:** Introduced `io` and `contextlib.redirect_stderr` to capture stderr output generated by COM interactions during the `listen` command.
+- **Selective Stderr Re-emission:** Added `_reemit_non_error_stderr` to intelligently re-emit only non-error messages from the captured stderr, providing cleaner feedback to the user.
+
+### Removed
+- **Registry-based `set_listen_to_device`:** The old registry-writing function (`set_listen_to_device`) for controlling "Listen to this device" has been removed, replaced by the new COM-based implementation.
+- **`winreg` global import:** The direct top-level import of `winreg` has been removed; `winreg` is now imported conditionally within functions that use it.
+
+---
+
+## v0.9.9
+
+### Features
+- **Initial `set-volume` Command:** Introduced `--level`, `--mute`, and `--unmute` arguments for controlling endpoint volume and mute state.
+- **Initial `listen` Command (Admin Required):** Implemented an initial version of the `listen` command using direct registry manipulation (requiring Administrator privileges) to enable/disable "Listen to this device." This version relied on the script owner's `_get_listen_to_device_status` helper for verification and explicitly warned about the admin requirement.
+- **`id_to_friendly_name_map`:** A helper function to build a mapping from device IDs to friendly names, suppressing `pycaw` `COMError` warnings during device enumeration.
+- **`parse_guid_from_device_id` and `get_listen_reg_path_for_capture`:** Helpers for extracting GUIDs and constructing registry paths for the `listen` command.
+- **`set_default_endpoint`:** Function to set default playback/recording devices, using `AudioUtilities._get_policy_config()`. This version also included a warning about potential Administrator privileges being required.
+- **`list_devices` and `find_devices_by_selector`:** Core functions for enumerating and filtering audio devices.
+- **`cmd_wait`:** Command to wait for a device to appear by name or ID.
+
+### Bug Fixes
+- **`set_listen_to_device` Registry Keys:** Corrected the registry keys targeted for "Listen to this device" to write to `"{24dbb0fc-9311-4b3d-9cf0-18ff155639d4},1"` and `"{24dbb0fc-9311-4b3d-9cf0-18ff155639d4},2"` with specific `REG_BINARY` data structures for proper functionality.
+- **`get_default_ids` Default Assignment:** Ensured `None` is assigned to the string `role_name` key (e.g., "console") rather than the numeric `role_val` when a default audio endpoint cannot be retrieved.
+
+---
+
+## v0.9.8
+
+### Stabilization & UX
+- **Friendly Name Resolution Priority:** Prefer `id_to_friendly_name_map` (pycaw) for names; fall back to registry; finally fall back to raw device ID.
+- **State Visibility:** Consistent display of decoded device state tags next to each device entry.
+- **Error Messages:** Clearer fatal error text for enumeration failures and permission hints for “Listen” changes.
+- **Resilience:** Graceful handling when a device exposes incomplete properties or name lookups fail.
+
+---
+
+## v0.9.7
+
+### Refactors & Helpers
+- **Consolidated Listing:** `list_and_get_devices` returns structured lists (playback/recording) with `{name, id, interface, state}` and prints aligned sections with indices.
+- **Selection UX:** Streamlined interactive prompts; improved “press Enter to skip” flow.
+
+---
+
+## v0.9.6
+
+### Registry Helpers
+- **GUID/Path Utilities:** Introduced `parse_guid_from_device_id` and `get_listen_reg_path_for_capture` to centralize GUID extraction and registry path generation.
+- **Robust Registry Writes:** Switched to `winreg.CreateKeyEx` and added `KEY_WOW64_64KEY` to avoid 32/64-bit redirection issues.
+- **Admin Feedback:** Better warnings when elevation is required for registry operations.
+
+---
+
+## v0.9.5
+
+### Device State & Filters
+- **Disconnected Filter:** Added `include_all` flag to toggle `EnumAudioEndpoints` mask between `DEVICE_STATE_ACTIVE` (0x1) and `DEVICE_STATE_ALL` (0xF).
+- **State Decoding:** Added `decode_state` to show “active/disabled/notpresent/unplugged” for each endpoint in listings.
+
+---
+
+## v0.9.4
+
+### Friendly Names Without Admin
+- **Name Mapping via `pycaw`:** Added `id_to_friendly_name_map` using `AudioUtilities.GetAllDevices` to obtain friendly names without touching the registry.
+- **Noise Reduction:** Suppressed non-critical COM warnings during map-building for cleaner output.
+
+---
+
+## v0.9.3
+
+### Registry Name Fallback
+- **Registry Lookup:** Implemented registry-based fallback for friendly names:
+  - `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\{Render|Capture}\{GUID}\Properties`
+  - `{a45c254e-df1c-4efd-8020-67d146a850e0},14` (`PKEY_Device_FriendlyName`)
+- **64-bit View:** Opened `HKLM` with `KEY_WOW64_64KEY` to avoid redirection on 64-bit Windows when applicable.
+
+---
+
+## v0.9.2
+
+### GUID Parsing Fix
+- **Correct GUID Extraction:** Fixed device ID parsing to take the second GUID via `rfind('{')`/`rfind('}')`, preventing malformed registry paths.
+- **Safer Fallbacks:** If name retrieval fails, the script now reliably falls back to the raw device ID.
+
+---
+
+## v0.9.1
+
+### Initial Friendly Name Attempt
+- **First Pass Names:** Attempted to read friendly names from registry using a naive split-based GUID extraction (worked on some devices).
+- **Error Messaging:** Added explicit `try/except` around registry reads with fallback to raw IDs if anything fails.
+
+---
+
+## v0.9.0
+
+### Initial Prototype
+- **Basic Enumeration:** Listed playback (Render) and recording (Capture) devices using `IMMDeviceEnumerator` with `DEVICE_STATE_ACTIVE` only.
+- **“Listen” Toggle (Admin):** Initial registry-based enable/disable of “Listen to this device” for capture endpoints (admin required).
+- **Admin Check:** `is_admin` helper added to warn when elevation is required.
