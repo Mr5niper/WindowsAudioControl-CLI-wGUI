@@ -92,6 +92,16 @@ Windows audio control CLI/GUI tool (pycaw-based). List devices, set default endp
 
 ## “Listen to this device” (Capture Only)
 
+- Enable “Listen”:
+  ```
+  dist\audioctl.exe listen --name "Microphone" --enable
+  ```
+  
+- Disable “Listen”:
+  ```
+  dist\audioctl.exe listen --name "Microphone" --disable
+  ```
+  
 - Enable “Listen” to Default Playback Device:
   ```
   dist\audioctl.exe listen --name "Microphone" --enable --playback-target-id ""
@@ -102,7 +112,7 @@ Windows audio control CLI/GUI tool (pycaw-based). List devices, set default endp
   dist\audioctl.exe listen --name "Microphone" --enable --playback-target-id "{render-endpoint-id}"
   ```
 
-- Disable “Listen” by ID:
+- Disable\Enable “Listen” by ID can be used as well for all commands:
   ```
   dist\audioctl.exe listen --id "{capture-endpoint-id}" --disable
   ```
