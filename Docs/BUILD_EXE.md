@@ -31,4 +31,4 @@ pyinstaller --clean --onefile --console --name audioctl --collect-all pycaw --co
 Notes:
 - Ensure `requirements.txt`, `audio.ico`, and `version.txt` are present in the project folder.
 - After activation, your prompt will show `(venv)`. Run all build commands while it’s active.
-```
+
