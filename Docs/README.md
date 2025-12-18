@@ -9,7 +9,7 @@ Windows audio control CLI/GUI tool (pycaw-based). List devices, set default endp
 
 - Help:
   ```
-  dist\audioctl.exe -h
+  audioctl.exe -h
   ```
 
 ### Selectors (used by most commands)
@@ -25,22 +25,22 @@ Windows audio control CLI/GUI tool (pycaw-based). List devices, set default endp
 
 - Human-readable:
   ```
-  dist\audioctl.exe list
+  audioctl.exe list
   ```
 
 - Include disabled/disconnected:
   ```
-  dist\audioctl.exe list --all
+  audioctl.exe list --all
   ```
 
 - JSON output:
   ```
-  dist\audioctl.exe list --json
+  audioctl.exe list --json
   ```
 
 - Tip: grab an ID for later use:
   ```
-  dist\audioctl.exe list --json
+  audioctl.exe list --json
   ```
 
 ---
@@ -49,22 +49,22 @@ Windows audio control CLI/GUI tool (pycaw-based). List devices, set default endp
 
 - Set playback default for all roles by name:
   ```
-  dist\audioctl.exe set-default --playback-name "Speakers (Realtek)" --playback-role all
+  audioctl.exe set-default --playback-name "Speakers (Realtek)" --playback-role all
   ```
 
 - Set recording default for communications role by name:
   ```
-  dist\audioctl.exe set-default --recording-name "Headset Mic"
+  audioctl.exe set-default --recording-name "Headset Mic"
   ```
 
 - Target by ID:
   ```
-  dist\audioctl.exe set-default --playback-id "{render-endpoint-id}" --playback-role multimedia
+  audioctl.exe set-default --playback-id "{render-endpoint-id}" --playback-role multimedia
   ```
 
 - When multiple name matches:
   ```
-  dist\audioctl.exe set-default --playback-name "Speakers" --index 0
+  audioctl.exe set-default --playback-name "Speakers" --index 0
   ```
 
 - Note: setting defaults may require running an elevated PowerShell (Run as Administrator).
@@ -75,17 +75,17 @@ Windows audio control CLI/GUI tool (pycaw-based). List devices, set default endp
 
 - Set volume to 30% for a playback device:
   ```
-  dist\audioctl.exe set-volume --name "Speakers" --flow Render --level 30
+  audioctl.exe set-volume --name "Speakers" --flow Render --level 30
   ```
 
 - Mute a capture device by ID:
   ```
-  dist\audioctl.exe set-volume --id "{capture-endpoint-id}" --mute
+  audioctl.exe set-volume --id "{capture-endpoint-id}" --mute
   ```
 
 - Unmute by name (add `--index` when multiple matches):
   ```
-  dist\audioctl.exe set-volume --name "USB Mic" --flow Capture --unmute
+  audioctl.exe set-volume --name "USB Mic" --flow Capture --unmute
   ```
 
 ---
@@ -94,31 +94,31 @@ Windows audio control CLI/GUI tool (pycaw-based). List devices, set default endp
 
 - Enable “Listen”:
   ```
-  dist\audioctl.exe listen --name "Microphone" --enable
+  audioctl.exe listen --name "Microphone" --enable
   ```
   
 - Disable “Listen”:
   ```
-  dist\audioctl.exe listen --name "Microphone" --disable
+  audioctl.exe listen --name "Microphone" --disable
   ```
   
 - Enable “Listen” to Default Playback Device:
   ```
-  dist\audioctl.exe listen --name "Microphone" --enable --playback-target-id ""
+  audioctl.exe listen --name "Microphone" --enable --playback-target-id ""
   ```
 
 - Enable and route to a specific playback endpoint:
   ```
-  dist\audioctl.exe listen --name "Microphone" --enable --playback-target-id "{render-endpoint-id}"
+  audioctl.exe listen --name "Microphone" --enable --playback-target-id "{render-endpoint-id}"
   ```
 
 - Disable\Enable “Listen” by ID can be used as well for all commands:
   ```
-  dist\audioctl.exe listen --id "{capture-endpoint-id}" --disable
+  audioctl.exe listen --id "{capture-endpoint-id}" --disable
   ```
 
 - Notes:
-  - Use `dist\audioctl.exe list --json` to find endpoint IDs.
+  - Use `audioctl.exe list --json` to find endpoint IDs.
   - When multiple “Microphone” matches exist, add `--index N`.
   - When `--playback-target-id` is omitted, the current target is preserved; when enabling and no target exists, `""` (Default Playback Device) is used.
 
@@ -128,12 +128,12 @@ Windows audio control CLI/GUI tool (pycaw-based). List devices, set default endp
 
 - Wait up to 60 seconds for a capture device by name:
   ```
-  dist\audioctl.exe wait --name "USB Microphone" --flow Capture --timeout 60
+  audioctl.exe wait --name "USB Microphone" --flow Capture --timeout 60
   ```
 
 - Wait by ID:
   ```
-  dist\audioctl.exe wait --id "{endpoint-id}" --timeout 30
+  audioctl.exe wait --id "{endpoint-id}" --timeout 30
   ```
 
 ---
@@ -153,7 +153,7 @@ Windows audio control CLI/GUI tool (pycaw-based). List devices, set default endp
 
 - Example:
   ```
-  dist\audioctl.exe set-volume --name "Speakers" --flow Render --level 20
+  audioctl.exe set-volume --name "Speakers" --flow Render --level 20
   ```
   Output:
   ```
@@ -189,7 +189,7 @@ Windows audio control CLI/GUI tool (pycaw-based). List devices, set default endp
 ## GUI (Graphical User Interface)
 
 - Launch the GUI:
-  - Double-click `dist\audioctl.exe` (no arguments), or run it without command-line options.
+  - Double-click `audioctl.exe` (no arguments), or run it without command-line options.
 
 
 <img width="1367" height="332" alt="image" src="https://github.com/user-attachments/assets/522bef9d-3d14-42f9-a6a4-3bec3f4e7683" />
