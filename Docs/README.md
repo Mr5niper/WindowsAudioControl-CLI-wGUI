@@ -1,7 +1,8 @@
 # Windows Audio Control CLI + GUI
 ## `audioctl.exe`
 
-Windows audio control CLI/GUI tool (pycaw-based);
+Windows audio control CLI/GUI tool (pycaw-based)
+
 List devices
 set default endpoints
 adjust volume/mute
