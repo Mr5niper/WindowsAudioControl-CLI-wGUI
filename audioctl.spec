@@ -1,17 +1,15 @@
 # -*- mode: python ; coding: utf-8 -*-
-from PyInstaller.utils.hooks import collect_submodules
 from PyInstaller.utils.hooks import collect_all
 
 datas = [('audio.ico', '.')]
 binaries = []
-hiddenimports = ['comtypes', 'comtypes.gen', 'comtypes.automation']
-hiddenimports += collect_submodules('comtypes')
+hiddenimports = ['comtypes.automation']
 tmp_ret = collect_all('pycaw')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 
 
 a = Analysis(
-    ['audioctl_v1.2.1.py'],
+    ['audioctl.py'],
     pathex=[],
     binaries=binaries,
     datas=datas,
@@ -35,7 +33,7 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    upx=False,
     upx_exclude=[],
     runtime_tmpdir=None,
     console=True,
