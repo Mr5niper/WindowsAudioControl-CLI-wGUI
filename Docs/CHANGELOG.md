@@ -1,6 +1,55 @@
 # AUDIOCTL.PY CHANGELOG
 
-## v1.2.1 - [Current]
+## v1.4.0.0 (Current)
+### Refactor (no behavior change)
+- Split the single `audioctl.py` file from v1.3.0.17 into a package:
+  - `audioctl/compat.py` – comtypes/pycaw shim and shared constants.
+  - `audioctl/logging_setup.py` – logging, faulthandler, exception hooks, `resource_path`.
+  - `audioctl/devices.py` – all device/COM/pycaw logic (list, default, volume/mute, listen, Windows Enhancements path).
+  - `audioctl/vendor_db.py` – Enhancements vendor toggles and INI learn system.
+  - `audioctl/gui.py` – Tkinter GUI.
+  - `audioctl/cli.py` – argparse and CLI commands.
+- Kept CLI and GUI behavior the same as v1.3.0.17.
+- Kept the top-level `audioctl.py` shim so PyInstaller usage and the EXE name don’t change.
+
+---
+
+## v1.3.0.17
+### New: Enhancements (SysFx) and Vendor Support
+- Added full support for toggling **Audio Enhancements (SysFx)**:
+  - Can read and write the Windows `Disable_SysFx` property via:
+    - COM (`IPolicyConfig` / PolicyConfigFx).
+    - Endpoint `IPropertyStore`.
+    - MMDevices registry (HKCU/HKLM).
+- Added **vendor-specific Enhancements toggles**:
+  - Built-in Realtek/Waves DWORD toggle support (e.g. `{1da5d803-d492-4edd-8c23-e0c0ffee7f0e},5`).
+  - INI-based vendor definitions in `vendor_toggles.ini`:
+    - `value_name`, `dword_enable`, `dword_disable`, `hives`, `flows`, and `notes`.
+  - Vendor priority:
+    - INI vendors (user-learned) are used first.
+    - Built-in code vendors (Realtek/Waves) used next.
+- Added ways to **inspect and discover** how Enhancements toggle:
+  - `diag-sysfx` command:
+    - Shows Enhancements state from COM, PropertyStore, and the first matching vendor entry.
+  - `discover-enhancements` command:
+    - Interactively capture “Enhancements ON” and “Enhancements OFF” snapshots.
+    - Diffs MMDevices registry keys.
+    - Writes a TXT report and JSON bundle with registry diffs and candidates.
+  - Vendor “learn”:
+    - CLI: `enhancements --learn` for a target device.
+    - GUI: “Learn Enhancements” context menu item.
+    - Both modes:
+      - Capture registry before/after you toggle Enhancements in Windows Sound UI.
+      - Detect a simple DWORD flip under FxProperties.
+      - Append a new section to `vendor_toggles.ini` describing that vendor toggle.
+- Normal Enhancements toggles:
+  - CLI: `audioctl enhancements --id/--name --flow {Render|Capture} --enable|--disable`
+  - GUI: context-menu “Enable/Disable Enhancements” item.
+  - Use **only vendor methods** when available (INI or built-in); Windows `Disable_SysFx` path is kept for diagnosis and learn workflows, not for normal runtime toggling.
+
+---
+
+## v1.2.1
 
 ### Consistency, Safety, and CLI/GUI Parity
 - **CLI/GUI Index Parity:** The CLI device list is now sorted by name within each flow (Render/Capture) exactly like the GUI, and shows the same per‑flow indices. All commands that accept `--name` together with `--index` interpret the index in this same GUI order.
@@ -222,3 +271,4 @@
 - **Basic Enumeration:** Listed playback (Render) and recording (Capture) devices using `IMMDeviceEnumerator` with `DEVICE_STATE_ACTIVE` only.
 - **“Listen” Toggle (Admin):** Initial registry-based enable/disable of “Listen to this device” for capture endpoints (admin required).
 - **Admin Check:** `is_admin` helper added to warn when elevation is required.
+
