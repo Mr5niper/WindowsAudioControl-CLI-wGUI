@@ -334,7 +334,7 @@ Examples:
   - “Learn Enhancements” (discover a vendor DWORD for that device)
 
 
-<img width="344" height="224" alt="image" src="https://github.com/user-attachments/assets/8745eae7-b9d8-415a-bb7a-3feebd739300" />
+    <img width="344" height="224" alt="image" src="https://github.com/user-attachments/assets/8745eae7-b9d8-415a-bb7a-3feebd739300" />
 
 
 ### Print CLI Commands
@@ -344,8 +344,8 @@ Examples:
 
 
 <img width="418" height="71" alt="image" src="https://github.com/user-attachments/assets/f93e952f-a0a1-4a3a-ae9b-3610d0c2c966" />
-
-
+    <br>
+    <br>
 
 ![CLI Output](https://github.com/user-attachments/assets/1f52d28b-71fa-4343-abde-728b164d2a99)
 
