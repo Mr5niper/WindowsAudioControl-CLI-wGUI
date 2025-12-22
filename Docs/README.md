@@ -1,15 +1,16 @@
 # Windows Audio Control CLI + GUI
-## `audioctl.exe`
-
-Windows audio control CLI/GUI tool (pycaw-based)
-
+## audioctl.exe (pycaw-based)
 List devices
+<BR>
 set default endpoints
+<BR>
 adjust volume/mute
+<BR>
 toggle “Listen to this device”
+<BR>
 toggle “Audio Enhancements” for devices that support vendor toggles.
+<BR>
 
----
 
 ## Quick Start
 
