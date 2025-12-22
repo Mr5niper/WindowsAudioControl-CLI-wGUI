@@ -192,7 +192,8 @@ Windows audio control CLI/GUI tool (pycaw-based). List devices, set default endp
   - Double-click `audioctl.exe` (no arguments), or run it without command-line options.
 
 
-<img width="1367" height="332" alt="image" src="https://github.com/user-attachments/assets/522bef9d-3d14-42f9-a6a4-3bec3f4e7683" />
+<img width="1367" height="332" alt="image" src="https://github.com/user-attachments/assets/96dbaeda-3463-4a3a-b7dc-4c92df8df03d" />
+
 
 
 - Features:
