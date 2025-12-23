@@ -8,6 +8,33 @@ try:
     import faulthandler
 except Exception:
     faulthandler = None
+import threading
+_DEBUG = bool(int(os.environ.get("AUDIOCTL_DEBUG", "0")))
+def set_debug(on: bool = True):
+    global _DEBUG
+    _DEBUG = bool(on)
+    try:
+        _log(f"DEBUG {'enabled' if _DEBUG else 'disabled'}")
+    except Exception:
+        pass
+def _dbg(msg: str):
+    if not _DEBUG:
+        return
+    try:
+        ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        tid = threading.get_ident()
+        pid = os.getpid()
+        with open(_LOG_PATH, "a", encoding="utf-8", errors="replace") as f:
+            f.write(f"[{ts}] [DBG pid={pid} tid={tid}] {msg}\n")
+    except Exception:
+        pass
+def enable_gc_debug():
+    try:
+        import gc
+        gc.set_debug(gc.DEBUG_SAVEALL)
+        _dbg("GC debug flags enabled (DEBUG_SAVEALL)")
+    except Exception:
+        pass
 def _exe_dir():
     try:
         if getattr(sys, "frozen", False):  # PyInstaller/py2exe
