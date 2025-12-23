@@ -809,8 +809,16 @@ class AudioGUI:
 def launch_gui():
     try:
         CoInitialize()
+    except Exception:
+        pass
+    # Disable GC for the GUI lifetime to avoid comtypes Release() AV during cleanup
+    try:
+        import gc
+        if gc.isenabled():
+            gc.disable()
         from .logging_setup import _dbg
         _dbg("GUI CoInitialize called")
+        _dbg("GC globally disabled (GUI)")
     except Exception:
         pass
     _log("launch_gui: creating Tk root")
@@ -868,7 +876,15 @@ def launch_gui():
     except Exception:
         _log_exc("MAINLOOP EXCEPTION")
     _log("launch_gui: mainloop exited")
-    
+    # Re-enable GC on shutdown (optional, neatness)
+    try:
+        import gc
+        if not gc.isenabled():
+            gc.enable()
+        from .logging_setup import _dbg
+        _dbg("GC re-enabled (GUI shutdown)")
+    except Exception:
+        pass
     try:
         CoUninitialize()
     except Exception:
