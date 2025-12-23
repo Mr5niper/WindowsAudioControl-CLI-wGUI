@@ -1371,130 +1371,148 @@ def get_default_ids(enumerator):
 def _safe_friendly_name_from_device(dev):
     """
     Read PKEY_Device_FriendlyName from an IMMDevice via IPropertyStore using raw vtable.
+    Hardened so GC doesn't interfere and COM refcounts are balanced.
     """
     try:
-        import sys
+        import sys, gc
         if not sys.platform.startswith("win"):
             return None
         import ctypes
-        
-        CALL = ctypes.WINFUNCTYPE if ctypes.sizeof(ctypes.c_void_p) == 4 else ctypes.CFUNCTYPE
-        
-        if hasattr(automation, "PROPVARIANT"):
-            PROPVARIANT = automation.PROPVARIANT
-        elif hasattr(automation, "tagPROPVARIANT"):
-            PROPVARIANT = automation.tagPROPVARIANT
-        else:
-            class _PVU(ctypes.Union):
-                _fields_ = [
-                    ("pwszVal", ctypes.c_wchar_p),
-                    ("boolVal", ctypes.c_short),
-                ]
-            class PROPVARIANT(ctypes.Structure):
-                _anonymous_ = ("data",)
-                _fields_ = [
-                    ("vt", ctypes.c_ushort),
-                    ("wReserved1", ctypes.c_ushort),
-                    ("wReserved2", ctypes.c_ushort),
-                    ("wReserved3", ctypes.c_ushort),
-                    ("data", _PVU),
-                ]
-
-        VT_LPWSTR = getattr(automation, "VT_LPWSTR", 31)
-        
-        class PROPERTYKEY(ctypes.Structure):
-            _fields_ = (("fmtid", GUID), ("pid", wintypes.DWORD))
-        
-        class IPropertyStoreRaw(ctypes.Structure):
-            pass
-        PIPS = POINTER(IPropertyStoreRaw)
-        
+        # Pause GC so comtypes __del__ won't run Release while we hold raw pointers
+        gc_was_enabled = gc.isenabled()
+        if gc_was_enabled:
+            try:
+                gc.disable()
+            except Exception:
+                gc_was_enabled = False
         try:
-            HRESULT_T = wintypes.HRESULT
-        except Exception:
-            HRESULT_T = ctypes.c_long
-            
-        GetValueProto = CALL(HRESULT_T, PIPS, POINTER(PROPERTYKEY), POINTER(PROPVARIANT))
-        
-        class IPropertyStoreVTBL(ctypes.Structure):
-            _fields_ = [
-                ("QueryInterface", ctypes.c_void_p),
-                ("AddRef", ctypes.c_void_p),
-                ("Release", ctypes.c_void_p),
-                ("GetCount", ctypes.c_void_p),
-                ("GetAt", ctypes.c_void_p),
-                ("GetValue", GetValueProto),
-                ("SetValue", ctypes.c_void_p),
-                ("Commit", ctypes.c_void_p),
-            ]
-        IPropertyStoreRaw._fields_ = [("lpVtbl", POINTER(IPropertyStoreVTBL))]
-        
-        ps_unknown = dev.OpenPropertyStore(STGM_READ)
-        ps_ptr_val = ctypes.cast(ps_unknown, ctypes.c_void_p).value
-        if not ps_ptr_val:
-            return None
-        ps_iface = ctypes.cast(ctypes.c_void_p(ps_ptr_val), PIPS)
-        
-        PKEY_Device_FriendlyName = PROPERTYKEY(GUID("{a45c254e-df1c-4efd-8020-67d146a850e0}"), 14)
-        PKEY_Device_DeviceDesc   = PROPERTYKEY(GUID("{a45c254e-df1c-4efd-8020-67d146a850e0}"), 2)
-        
-        ole32 = ctypes.OleDLL("ole32.dll")
-        PropVariantClear = ole32.PropVariantClear
-        PropVariantClear.restype = HRESULT_T
-        PropVariantClear.argtypes = (POINTER(PROPVARIANT),)
-        
-        def _read_ptr_or_str(val):
-            if isinstance(val, str):
-                return val
-            if val:
+            CALL = ctypes.WINFUNCTYPE if ctypes.sizeof(ctypes.c_void_p) == 4 else ctypes.CFUNCTYPE
+            if hasattr(automation, "PROPVARIANT"):
+                PROPVARIANT = automation.PROPVARIANT
+            elif hasattr(automation, "tagPROPVARIANT"):
+                PROPVARIANT = automation.tagPROPVARIANT
+            else:
+                class _PVU(ctypes.Union):
+                    _fields_ = [
+                        ("pwszVal", ctypes.c_wchar_p),
+                        ("boolVal", ctypes.c_short),
+                    ]
+                class PROPVARIANT(ctypes.Structure):
+                    _anonymous_ = ("data",)
+                    _fields_ = [
+                        ("vt", ctypes.c_ushort),
+                        ("wReserved1", ctypes.c_ushort),
+                        ("wReserved2", ctypes.c_ushort),
+                        ("wReserved3", ctypes.c_ushort),
+                        ("data", _PVU),
+                    ]
+            VT_LPWSTR = getattr(automation, "VT_LPWSTR", 31)
+            class PROPERTYKEY(ctypes.Structure):
+                _fields_ = (("fmtid", GUID), ("pid", wintypes.DWORD))
+            class IPropertyStoreRaw(ctypes.Structure):
+                pass
+            PIPS = POINTER(IPropertyStoreRaw)
+            try:
+                HRESULT_T = wintypes.HRESULT
+            except Exception:
+                HRESULT_T = ctypes.c_long
+            GetValueProto = CALL(HRESULT_T, PIPS, POINTER(PROPERTYKEY), POINTER(PROPVARIANT))
+            class IPropertyStoreVTBL(ctypes.Structure):
+                _fields_ = [
+                    ("QueryInterface", ctypes.c_void_p),
+                    ("AddRef", ctypes.c_void_p),
+                    ("Release", ctypes.c_void_p),
+                    ("GetCount", ctypes.c_void_p),
+                    ("GetAt", ctypes.c_void_p),
+                    ("GetValue", GetValueProto),
+                    ("SetValue", ctypes.c_void_p),
+                    ("Commit", ctypes.c_void_p),
+                ]
+            IPropertyStoreRaw._fields_ = [("lpVtbl", POINTER(IPropertyStoreVTBL))]
+            ps_unknown = dev.OpenPropertyStore(STGM_READ)
+            # Balance COM refcount explicitly while we use the raw vtable
+            did_addref = False
+            try:
                 try:
-                    return ctypes.wstring_at(val)
-                except Exception:
-                    return None
-            return None
-            
-        def _pv_read_lpwstr(pv):
-            try:
-                s = _read_ptr_or_str(getattr(pv, "pwszVal", None))
-                if s: return s
-            except Exception: pass
-            try:
-                val = getattr(pv, "value", None)
-                if val is not None:
-                    s = _read_ptr_or_str(getattr(val, "pwszVal", None))
-                    if s: return s
-            except Exception: pass
-            try:
-                data = getattr(pv, "data", None)
-                if data is not None:
-                    s = _read_ptr_or_str(getattr(data, "pwszVal", None))
-                    if s: return s
-            except Exception: pass
-            return None
-
-        def _get_string_prop(pkey):
-            pv = PROPVARIANT()
-            try:
-                hr = ps_iface.contents.lpVtbl.contents.GetValue(ps_iface, byref(pkey), byref(pv))
-                if hr == 0 and pv.vt == VT_LPWSTR:
-                    s = _pv_read_lpwstr(pv)
-                    if s:
-                        return s.strip("\x00 ").strip()
-            finally:
-                try:
-                    PropVariantClear(byref(pv))
+                    ps_unknown.AddRef()
+                    did_addref = True
                 except Exception:
                     pass
-            return None
-            
-        name = _get_string_prop(PKEY_Device_FriendlyName)
-        if not name:
-            name = _get_string_prop(PKEY_Device_DeviceDesc)
-        if name:
-            return name
+                ps_ptr_val = ctypes.cast(ps_unknown, ctypes.c_void_p).value
+                if not ps_ptr_val:
+                    return None
+                ps_iface = ctypes.cast(ctypes.c_void_p(ps_ptr_val), PIPS)
+                PKEY_Device_FriendlyName = PROPERTYKEY(GUID("{a45c254e-df1c-4efd-8020-67d146a850e0}"), 14)
+                PKEY_Device_DeviceDesc   = PROPERTYKEY(GUID("{a45c254e-df1c-4efd-8020-67d146a850e0}"), 2)
+                ole32 = ctypes.OleDLL("ole32.dll")
+                PropVariantClear = ole32.PropVariantClear
+                PropVariantClear.restype = HRESULT_T
+                PropVariantClear.argtypes = (POINTER(PROPVARIANT),)
+                def _read_ptr_or_str(val):
+                    if isinstance(val, str):
+                        return val
+                    if val:
+                        try:
+                            return ctypes.wstring_at(val)
+                        except Exception:
+                            return None
+                    return None
+                def _pv_read_lpwstr(pv):
+                    try:
+                        s = _read_ptr_or_str(getattr(pv, "pwszVal", None))
+                        if s: return s
+                    except Exception: pass
+                    try:
+                        val = getattr(pv, "value", None)
+                        if val is not None:
+                            s = _read_ptr_or_str(getattr(val, "pwszVal", None))
+                            if s: return s
+                    except Exception: pass
+                    try:
+                        data = getattr(pv, "data", None)
+                        if data is not None:
+                            s = _read_ptr_or_str(getattr(data, "pwszVal", None))
+                            if s: return s
+                    except Exception: pass
+                    return None
+                def _get_string_prop(pkey):
+                    pv = PROPVARIANT()
+                    try:
+                        hr = ps_iface.contents.lpVtbl.contents.GetValue(ps_iface, byref(pkey), byref(pv))
+                        if hr == 0 and getattr(pv, "vt", 0) == VT_LPWSTR:
+                            s = _pv_read_lpwstr(pv)
+                            if s:
+                                return s.strip("\x00 ").strip()
+                    finally:
+                        try:
+                            PropVariantClear(byref(pv))
+                        except Exception:
+                            pass
+                    return None
+                name = _get_string_prop(PKEY_Device_FriendlyName)
+                if not name:
+                    name = _get_string_prop(PKEY_Device_DeviceDesc)
+                if name:
+                    return name
+            finally:
+                # Balance the AddRef we did above so refcount is correct no matter when GC runs
+                if did_addref:
+                    try:
+                        ps_unknown.Release()
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        finally:
+            # Re-enable GC if it was enabled initially
+            if gc_was_enabled:
+                try:
+                    gc.enable()
+                except Exception:
+                    pass
     except Exception:
         pass
-    
+    # Fallbacks: ID or None
     try:
         return dev.GetId()
     except Exception:
@@ -1724,4 +1742,5 @@ def _verify_effect_only(device_id, flow, expected_enabled, timeout=2.5, interval
         else:
             ok_streak = 0
         _time.sleep(interval)
+
     return False, None, last_state
