@@ -1387,6 +1387,28 @@ def get_default_ids(enumerator):
                 defaults[flow_name][role_name] = None
     return defaults
 
+def _friendly_names_by_id():
+    """
+    Build {device_id: FriendlyName} using pycaw objects.
+    Avoids the raw IPropertyStore path that can trigger COM cleanup crashes.
+    """
+    names = {}
+    try:
+        for dev in AudioUtilities.GetAllDevices():
+            try:
+                dev_id = getattr(dev, "id", None) or dev.GetId()
+            except Exception:
+                continue
+            try:
+                fn = getattr(dev, "FriendlyName", None)
+            except Exception:
+                fn = None
+            if dev_id and fn:
+                names[dev_id] = fn
+    except Exception:
+        pass
+    return names
+
 def _safe_friendly_name_from_device(dev):
     """
     Read PKEY_Device_FriendlyName from an IMMDevice via IPropertyStore using raw vtable.
@@ -1398,7 +1420,7 @@ def _safe_friendly_name_from_device(dev):
         if not sys.platform.startswith("win"):
             return None
         import ctypes
-        # Pause GC so comtypes __del__ won't run Release while we hold raw pointers
+        # Pause GC so comtypes __del__ won’t run Release while we hold raw pointers
         gc_was_enabled = gc.isenabled()
         if gc_was_enabled:
             try:
@@ -1561,6 +1583,10 @@ def list_devices(include_all=False):
         enumerator_for_defaults = CoCreateInstance(CLSID_MMDeviceEnumerator, IMMDeviceEnumerator, CLSCTX_ALL)
         defaults = get_default_ids(enumerator_for_defaults)
         state_mask = DEVICE_STATE_ALL if include_all else DEVICE_STATE_ACTIVE
+        
+        # Build the name map once per call
+        name_map = _friendly_names_by_id()
+        
         out = []
         
         for flow_name, flow in [("Render", E_RENDER), ("Capture", E_CAPTURE)]:
@@ -1569,7 +1595,10 @@ def list_devices(include_all=False):
             for i in range(coll.GetCount()):
                 dev = coll.Item(i)
                 dev_id = dev.GetId()
-                name = _safe_friendly_name_from_device(dev) or dev_id
+                
+                # Use name map lookup instead of raw COM call
+                name = name_map.get(dev_id) or dev_id
+                
                 state_str = "active"
                 
                 if include_all:
