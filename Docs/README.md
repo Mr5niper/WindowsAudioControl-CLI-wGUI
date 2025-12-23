@@ -8,7 +8,7 @@ adjust volume/mute
 <BR>
 toggle “Listen to this device”
 <BR>
-toggle “Audio Enhancements” for devices that support vendor toggles.
+toggle (Enable/Disable) “Audio Enhancements” for devices that support vendor toggles.
 <BR>
 
 
