@@ -1,92 +1,82 @@
-# Technical Specifications: audioctl.py — Windows Audio CLI Utility
+
+# Technical Specifications: audioctl.py — Windows Audio CLI/GUI Utility (v1.4.1.0)
 
 ## 1. Introduction
 
-`audioctl.py` is a versatile Python script designed to provide comprehensive control over Windows audio devices. It offers both a robust command-line interface (CLI) for scripting and automation, and a user-friendly graphical user interface (GUI) built with Tkinter for interactive management. The script leverages low-level Windows COM APIs through `ctypes` and `comtypes` to achieve reliable and precise audio manipulation, addressing common challenges and stability issues encountered with higher-level abstractions, especially when packaged as a standalone executable.
+`audioctl.py` is a Windows audio control utility offering:
+- A command‑line interface (CLI) for scripting, automation, and diagnostics.
+- A Tkinter‑based graphical user interface (GUI) for interactive control.
 
-This document details the script's core functionalities, underlying technologies, architectural decisions, and specific deployment considerations using PyInstaller.
+It targets reliable control of Windows Core Audio endpoints (Render/Capture) using COM via `comtypes`, and low‑level `ctypes` where needed. The application is designed to run both from source and as a standalone PyInstaller executable, with care taken to keep COM usage robust and packaging‑friendly.
+
+This document describes the current architecture, technologies, and behavior of version 1.4.1.0. It is a technical guide to the system as it exists in this release (not a change log).
 
 ---
 
 ## 2. Core Technologies & Dependencies
 
-- Python 3.x  
-  The primary programming language.
+- Python 3.13.x
 
-- `comtypes`  
-  A Python package providing a lightweight Python wrapper around Microsoft COM interfaces. It simplifies interaction with many Windows APIs.
+- comtypes  
+  COM automation from Python, including generated wrappers for Core Audio interfaces.
 
-- `ctypes`  
-  Python's foreign function interface library, used here for direct low-level interaction with Windows DLLs and COM interfaces, particularly where `comtypes` abstractions proved insufficient or problematic or for improved robustness.
+- ctypes  
+  Low‑level FFI for:
+  - Raw IPropertyStore vtable calls (Listen/Enhancements paths, robust friendly‑name reads).
+  - Direct PROPVARIANT handling and Windows helper calls (PropVariantClear, InitPropVariantFromX).
 
-- `pycaw`  
-  A Python library building on `comtypes` to provide a more convenient interface for Windows Core Audio APIs (MMDevice API, EndpointVolume API). Note that this script implements several functionalities around or instead of `pycaw`'s direct methods due to stability and robustness concerns with `comtypes` in certain deployment scenarios (e.g., PyInstaller).
+- pycaw  
+  Convenience interfaces for IMMDevice, IAudioEndpointVolume, and utilities used for enumeration helpers and diagnostics.
 
-- `tkinter`  
-  Python's standard GUI library, used for the optional graphical interface.
+- tkinter  
+  GUI (Treeview device listing, context menus, status UI).
 
-- `argparse`  
-  Python's standard library for parsing command-line arguments.
+- argparse, json, re, os, sys, time, io, warnings  
+  CLI parsing, structured output, matching, and utilities.
 
-- `json`  
-  For structured output in CLI and data exchange.
+- winreg  
+  Windows registry access (MMDevices keys for verification, diagnostics, and vendor toggles).
 
-- `re`  
-  Regular expressions for device name matching.
-
-- `os`, `sys`, `time`, `warnings`, `io`, `contextlib`, `tempfile`, `datetime`, `traceback`, `atexit`, `faulthandler`, `winreg`  
-  Standard Python libraries and Windows-specific modules for system interaction, logging, and error handling.
-
-- Windows COM (Component Object Model) APIs  
-  The underlying technology used, including:
-  - `IMMDeviceEnumerator`: For enumerating audio endpoint devices.
-  - `IMMDevice`: For representing individual audio endpoint devices.
-  - `IAudioEndpointVolume`: For controlling volume and mute state.
-  - `IPropertyStore`: For reading/writing device properties, notably "Listen to this device."
-  - `IPolicyConfigVista` (or similar `IPolicyConfig`): For setting default audio endpoints.
+- Windows Core Audio COM APIs  
+  - IMMDeviceEnumerator, IMMDevice
+  - IAudioEndpointVolume
+  - IPropertyStore
+  - PolicyConfig (Vista/Client variants, Fx‑capable for SysFX and SetDefault)
 
 - PyInstaller  
-  The tool used to package the script into a standalone Windows executable. Its specific configuration is detailed in Section 8.
+  Produces a single‑file executable, integrates version metadata and icon (via `.spec`).
 
 - External Assets
-  - `audio.ico`: The icon file used for the generated executable and Tkinter windows.
-  - `version.txt`: A text file containing version information for the executable's metadata.
+  - audio.ico: application/executable icon
+  - version.txt: PE version resource for the built executable
 
 ---
 
 ## 3. Dependency Management (Virtual Environment)
 
-The development and deployment of this script utilize a Python virtual environment (`venv`). This practice ensures that project dependencies are isolated from the system-wide Python installation, preventing conflicts and ensuring consistent environments across development, testing, and deployment.
+Use a dedicated virtual environment:
 
-To set up the environment and install dependencies:
-
-a) Create a virtual environment (if not already done):
-
+a) Create:
 ```bash
 python -m venv venv
 ```
 
-b) Activate the virtual environment:
-
-- Windows (Command Prompt):
+b) Activate:
+- CMD
   ```bat
   .\venv\Scripts\activate.bat
   ```
-- Windows (PowerShell):
+- PowerShell
   ```powershell
   .\venv\Scripts\Activate.ps1
   ```
 
-c) Install dependencies:
-
-To get a precise list of all installed packages and their versions within your active virtual environment, use the following command to generate a `requirements.txt` file:
-
+c) Capture the environment:
 ```bash
 pip freeze > requirements.txt
 ```
 
-As of this document the requirements are:
-
+Example requirements for this build:
 ```
 altgraph==0.17.4
 comtypes==1.4.13
@@ -101,304 +91,276 @@ setuptools==80.9.0
 wheel==0.45.1
 ```
 
-To install these dependencies on another system or fresh environment:
-
+Install on a new machine:
 ```bash
 pip install -r requirements.txt
 ```
 
-Note: The exact list of packages and their versions was generated from a specific `venv` using `pip freeze`.
+Note: exact versions depend on the build environment used for v1.4.1.0.
 
 ---
 
 ## 4. Architectural Overview
 
-The script is structured into two main parts:
+The application is a Python package (`audioctl/`) with:
 
-a) Core Audio Logic  
-A set of functions that interacts directly with Windows COM APIs to query and control audio devices. These functions are designed to be robust and handle potential `comtypes`/`ctypes` interactions gracefully.
+- Entry points
+  - audioctl.py (console entry to CLI/GUI)
+  - audioctl/__main__.py (package entry)
 
-b) User Interfaces
-- Command-Line Interface (CLI)  
-  Implemented using `argparse`, providing distinct commands (`list`, `set-default`, `set-volume`, `listen`, `wait`).
-- Graphical User Interface (GUI)  
-  A Tkinter application that provides an interactive way to view devices and perform common actions, invoking the same core audio logic.
+- Core modules
+  - audioctl/cli.py: CLI parser and command handlers
+  - audioctl/gui.py: Tkinter GUI (device listing and actions)
+  - audioctl/devices.py: Core Windows audio operations (COM/ctypes/pycaw)
+  - audioctl/vendor_db.py: Vendor Enhancements toggle logic and “learn” helpers
+  - audioctl/compat.py: comtypes/Windows compatibility shims, constants
+  - audioctl/logging_setup.py: logging subsystem, fault/exit hooks, optional debug
 
-The script defaults to launching the GUI if no command-line arguments are provided; otherwise, it executes the specified CLI command.
+Behavior:
+- If launched without arguments, the GUI starts by default.
+- With arguments, the CLI executes the requested command.
+
+Key design points:
+- COM is initialized at process entry (CLI and GUI) and released at exit.
+- Sensitive COM operations use raw `ctypes` vtable calls where that’s proved more robust (Listen, PropertyStore, SysFX operations).
+- CLI and GUI share core logic; the same enumeration and selection/order rules are applied (GUI‑order indices, consistent naming).
 
 ---
 
 ## 5. Key Design Patterns & Rationale
 
-### 5.1. COM Interoperability and Robustness
+### 5.1. COM Interop Strategy
+- `comtypes` for high‑level convenience where stable (e.g., IAudioEndpointVolume).
+- `ctypes` raw vtable calls for critical operations (IPropertyStore Set/Get, PROPVARIANT) to:
+  - Avoid dynamic wrapper friction when packaged.
+  - Precisely control memory and lifetime.
 
-Interfacing with Windows COM APIs from Python, especially when bundled with PyInstaller, can be challenging due to `comtypes` sometimes exhibiting unexpected behavior or missing definitions. The script employs a layered approach:
+COM lifecycle:
+- `CoInitialize()` at CLI/GUI startup; `CoUninitialize()` at shutdown.
+- Core helpers assume COM is already initialized by the caller.
 
-- `comtypes` as Primary  
-  For most standard operations (device enumeration, `IAudioEndpointVolume`), `comtypes` is used for its convenience and Pythonic wrappers.
+### 5.2. Compatibility Shim (compat.py)
+- Ensures `comtypes.automation` exposes:
+  - PROPVARIANT alias to tagPROPVARIANT when missing.
+  - VT_* constants (VT_LPWSTR, VT_BOOL, VT_UI2, VT_UI4).
+  - VARIANT_TRUE/FALSE constants.
+- Provides constants for endpoint flows (Render/Capture), roles, device states, and STGM flags.
 
-- `ctypes` for Critical Paths  
-  For highly sensitive or problematic areas, particularly the "Listen to this device" functionality and robust property store access (`IPropertyStore`), the script reverts to direct `ctypes` VTABLE calls.
+### 5.3. Device Enumeration and Naming
+Enumeration:
+- Uses `IMMDeviceEnumerator.EnumAudioEndpoints` for Render and Capture, honoring:
+  - `DEVICE_STATE_ACTIVE` (operations)
+  - `DEVICE_STATE_ALL` (list `--all`)
 
-- Rationale  
-  This bypasses potential `comtypes.gen` issues (especially in bundled executables) and ensures maximum control and stability by manually defining COM interface structures (`IPropertyStoreRaw`, `IPropertyStoreVTBL`) and method prototypes (`CALL`). This is a critical design choice to enhance reliability.
+Naming:
+- `_safe_friendly_name_from_device(dev)` obtains `PKEY_Device_FriendlyName` (fallback `PKEY_Device_DeviceDesc`) via raw IPropertyStore `GetValue`, with:
+  - Explicit PROPVARIANT clear
+  - Balanced AddRef/Release on IPropertyStore
+  - A short GC guard during the direct vtable call (to avoid destructor‑time Release races)
 
-- `CoInitialize()` / `CoUninitialize()`  
-  Called explicitly in both the GUI and the CLI entry points. Low-level helpers (e.g., Listen via IPropertyStore) assume COM is already initialized by their caller. This avoids per-call COM teardown and prevents benign comtypes finalizer warnings.
+Ordering:
+- Devices are sorted by friendly name within each flow (“GUI order”); this order is mirrored by CLI selection to keep indices consistent across UI/CLI.
 
-### 5.2. `comtypes` Compatibility Shim
+### 5.4. Default Endpoint Management
+- PolicyConfig (Fx‑capable) interface is used for `SetDefaultEndpoint`.
+- A lightweight singleton of PolicyConfig is kept alive (process‑wide) to avoid repeated create/release cycles.
+- GUI and CLI route their internal `_get_policy_config` to this stable provider.
+- Roles supported: `console`, `multimedia`, `communications`, and `all` (sets all three).
 
-A minimal shim is placed at the very top of the script.
+### 5.5. “Listen to this device” (Capture)
+- COM path: raw IPropertyStore `SetValue/Commit` of:
+  - `PKEY_LISTEN_ENABLE` (`{24dbb0fc-9311-4b3d-9cf0-18ff155639d4}`, pid 1)
+  - `PKEY_LISTEN_PLAYBACKTHROUGH` (same GUID, pid 2) to target a render endpoint or `""` for “Default Playback Device”
+- Verification:
+  - First via COM (GetValue)
+  - Fallback via registry polling (`HKCU\...\MMDevices\Audio\Capture\{endpointGUID}\(FxProperties|Properties)`)
+  - Boolean parsing supports `REG_DWORD`, `REG_BINARY` (PROPVARIANT), `REG_SZ`
 
-- Purpose  
-  To address known PyInstaller bundling issues where `comtypes.automation` might not correctly expose `PROPVARIANT` or standard `VT_` constants (like `VT_LPWSTR`, `VT_BOOL`, `VARIANT_TRUE`/`FALSE`).
+### 5.6. Volume and Mute (Render/Capture)
+- `IAudioEndpointVolume` via `IMMDevice.Activate`.
+- Get/Set guard both tuple returns and out‑params (ctypes.byref fallbacks), producing integer % 0..100 and boolean mute values.
 
-- Mechanism  
-  It checks for the existence of these attributes and defines them with their known integer values if missing. It also ensures `_automation.PROPVARIANT` points to `_automation.tagPROPVARIANT` if the former is not directly present.
+### 5.7. Enhancements (SysFX) — Vendor‑Aware Toggle & Learn (overview)
+- Live status readers:
+  - PropertyStore (Disable_SysFx via IPropertyStore)
+  - PolicyConfig (Fx and normal stores) for Disable_SysFx
+- Vendor toggles:
+  - INI‑driven (user‑learned) and built‑in vendor entries (e.g., Realtek/Waves)
+  - Toggle writes DWORDs in endpoint `FxProperties/Properties` under HKCU/HKLM as configured
+- Learn modes: see Section 10 for full details (manual learn and discovery, INI format, and runtime application)
 
-- Rationale  
-  Ensures foundational types and constants required for manual `PROPVARIANT` construction and parsing (used in the raw `ctypes` sections) are always available, even if `comtypes`'s dynamic generation fails or is incomplete in a bundled environment.
+### 5.8. Logging, Diagnostics, and Debug
+- `audioctl_gui.log` written next to the executable (fallback `%TEMP%\audioctl\audioctl_gui.log`)
+- Global hooks:
+  - `sys.excepthook`, `sys.unraisablehook`
+  - `faulthandler` (where available)
+  - `atexit` exit breadcrumbs
+  - `sys.exit` wrapper logs exit codes
+  - Console control handler logs Ctrl+C/Close/etc.
+- Optional debug logging (`_dbg`):
+  - Enabled via `AUDIOCTL_DEBUG=1` environment variable
+  - Emits structured debug lines (timestamp, pid, tid) around COM operations, refresh, and actions
 
-### 5.3. Robust Device Enumeration and Naming
-
-- `list_devices()`  
-  Avoids `AudioUtilities.GetAllDevices()` (a `pycaw` utility) due to reported `comtypes` `Release()` crashes in certain scenarios. Instead, it directly uses `IMMDeviceEnumerator.EnumAudioEndpoints()` for enumeration.
-
-- `_safe_friendly_name_from_device(dev)`  
-  Retrieves the device's friendly name (`PKEY_Device_FriendlyName`) or device description (`PKEY_Device_DeviceDesc`) via direct `IMMDevice.OpenPropertyStore()` and `IPropertyStore::GetValue()` calls using `ctypes`.
-
-- Rationale  
-  Provides robust retrieval of human-readable device names, bypassing potentially fragile `comtypes` property accessors or Python `UserWarning`s, and handles multiple `PROPVARIANT` memory layouts.
-
-### 5.4. "Listen to this Device" Implementation (Advanced `ctypes`)
-
-This is one of the most technically involved sections.
-
-- `set_listen_to_device_ps(capture_device_id, enable, render_device_id=None)`
-  - Direct `IPropertyStore` Access  
-    Opens the device's `IPropertyStore` (with `STGM_WRITE` permission) using `IMMDevice.OpenPropertyStore()`.
-  - Raw `ctypes` VTABLE Calls  
-    Casts the underlying COM pointer to a `POINTER(IPropertyStoreRaw)` and manually calls methods like `SetValue()` and `Commit()` through the VTABLE.
-  - `PROPERTYKEY`  
-    Defines:
-    - `PKEY_LISTEN_ENABLE` — GUID `{24dbb0fc-9311-4b3d-9cf0-18ff155639d4}`, PID `1`
-    - `PKEY_LISTEN_PLAYBACKTHROUGH` — same GUID, PID `2`
-  - `PROPVARIANT` Management  
-    Utilizes Windows `propsys.dll` functions (`InitPropVariantFromBoolean`, `InitPropVariantFromString`) if available, or falls back to manual `PROPVARIANT` struct population. Uses `PropVariantClear` from `ole32.dll` for cleanup.
-
-- `_get_listen_to_device_status_ps(device_id)`  
-  Reads the `PKEY_LISTEN_ENABLE` property using raw `ctypes` `IPropertyStore::GetValue()`.
-
-- Registry Fallback (`_read_listen_enable_from_registry`, `_verify_listen_via_registry`)
-  - Purpose  
-    Secondary verification mechanism when COM results are delayed or ambiguous.
-  - Mechanism  
-    Probes:
-    ```
-    HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Capture\{GUID}\(FxProperties|Properties)
-    ```
-    for the AudioEndpointSettings GUID (`{24dbb0fc-9311-4b3d-9cf0-18ff155639d4}`), handling `REG_DWORD`, `REG_BINARY` (PROPVARIANT), and `REG_SZ`.
-  - Rationale  
-    Registry provides a persistent view to confirm effective state changes.
-
-_Thread/apartment model: helpers do not call `CoInitialize`/`CoUninitialize`; they rely on initialization done by GUI/CLI entry._
-
-### 5.5. Default Endpoint Management
-
-- `_get_policy_config()`  
-  Attempts to acquire an `IPolicyConfig` or `IPolicyConfigVista` COM interface.
-  - Multi-tier Fallback  
-    Tries `AudioUtilities.GetPolicyConfig`, then `pycaw.policyconfig`, and finally a locally defined minimal `IPolicyConfigVista` interface via `ctypes`.
-  - Rationale  
-    Ensures compatibility across environments and `pycaw` versions.
-- `set_default_endpoint(device_id, role)`  
-  Invokes `SetDefaultEndpoint()` via `IPolicyConfigVista`.
-- Administrator Privileges  
-  Often required; the script warns in both GUI and CLI when not elevated.
-
-### 5.6. Volume and Mute Control
-
-- `set_endpoint_mute()`, `get_endpoint_mute()`, `set_endpoint_volume()`, `get_endpoint_volume()`  
-  Interact with `IAudioEndpointVolume` obtained by `IMMDevice.Activate`.
-
-- Robust Return Value Handling  
-  Handles both direct return values and out-params exposed as tuples by `comtypes`, with `ctypes.byref` fallbacks.
-
-### 5.7. Comprehensive Error Handling and Logging
-
-- Global `sys.excepthook`  
-  Logs unhandled exceptions with tracebacks to `audioctl_gui.log`.
-
-- `sys.unraisablehook` (Python 3.8+)  
-  Logs unraisable exceptions.
-
-- `faulthandler` Integration  
-  Dumps tracebacks on fatal crashes to the same log.
-
-- `atexit` Hooks  
-  Logs normal exits and flushes/cleans up `faulthandler` file handle.
-
-- `sys.exit` Hook  
-  Logs `sys.exit(code)` calls.
-
-- Windows Console Control Handler  
-  Logs control events (Ctrl+C/Break, logoff, shutdown).
-
-- Dedicated Log File  
-  `audioctl_gui.log` in the application directory (or temp folder as fallback).
-
-- GUI Error Dialogs  
-  `report_callback_exception` logs and shows user-friendly error popups with the log path.
+### 5.9. Stability Guards
+- PolicyConfig kept as a singleton to reduce COM churn.
+- Friendly‑name read uses AddRef/Release and a short GC guard during low‑level IPropertyStore calls.
+- GUI and CLI wrap long enumerations with brief GC pauses to avoid destructor‑time Release races on sensitive drivers.
 
 ---
 
 ## 6. CLI Command Reference
 
-The script exposes the following commands:
+Device selection semantics:
+- Operates on active endpoints unless stated otherwise.
+- When selecting by name and multiple matches exist, `--index` is interpreted in the same per‑flow order as the GUI (name‑sorted within each flow).
+- `--regex` switches name matching to regular expressions.
 
 - list  
-  The list output is name-sorted within each flow (Render/Capture) to match the GUI and uses the same per‑flow indices. Supports human-readable and JSON output.
+  Lists devices in GUI order, optionally including disabled/disconnected and/or JSON output.
   ```bash
   audioctl list [--all] [--json]
   ```
 
 - set-default  
-  Sets the default playback/recording device for the specified roles. Requires the target device to be active. When selecting by name, `--index` refers to the same per‑flow (GUI) order; providing `--flow` is recommended when disambiguating.
+  Sets default playback/recording device for one or more roles. Device must be active.
   ```bash
   audioctl set-default
     (--playback-id <ID> | --playback-name <NAME>) [--playback-role <ROLE>]
     (--recording-id <ID> | --recording-name <NAME>) [--recording-role <ROLE>]
     [--index <N>] [--regex]
   ```
+  Roles: `console`, `multimedia`, `communications`, `all` (sets all three)
 
 - set-volume  
-  Sets master volume or mutes/unmutes the target device. Operates only on active endpoints. When multiple matches exist, `--index` is interpreted in the GUI’s per‑flow order; providing `--flow` is recommended with `--name + --index`.
+  Sets master volume (0–100) or mutes/unmutes the target device (render or capture).
   ```bash
   audioctl set-volume
-    (--id <ID> | --name <NAME>) [--flow <FLOW>]
-    (--level <LEVEL> | --mute | --unmute)
+    (--id <ID> | --name <NAME>) [--flow <Render|Capture>]
+    (--level <0..100> | --mute | --unmute)
     [--index <N>] [--regex]
   ```
 
 - listen  
-  Enables or disables “Listen to this device” for an active capture device. Writes via `IPropertyStore` and verifies via COM, falling back to a short registry poll if needed. Use `--playback-target-id ""` to select the Default Playback Device.
+  Enables/disables “Listen to this device” for an active capture device; optional playback target endpoint ID or `""` for “Default Playback Device”.
   ```bash
   audioctl listen
     (--id <ID> | --name <NAME>)
     (--enable | --disable)
-    [--playback-target-id <ID>] [--index <N>] [--regex]
+    [--playback-target-id <RenderEndpointID-or-empty>]
+    [--index <N>] [--regex]
   ```
 
-- wait  
-  Waits for a device to become active (appear) within the given timeout and outputs its details if found.
+- enhancements — vendor toggles and learn  
+  Enables/disables Enhancements (SysFX) using vendor toggles (if configured), or runs a manual learn to append an INI vendor entry for this endpoint.
+  ```bash
+  # Enable/Disable via vendor toggles
+  audioctl enhancements
+    (--id <ID> | --name <NAME>) [--flow <Render|Capture>]
+    (--enable | --disable)
+    [--index <N>] [--regex]
+    [--prefer-hklm] [--vendor-ini <path>]
+
+  # Manual learn (append an INI vendor entry)
+  audioctl enhancements
+    (--id <ID> | --name <NAME>) [--flow <Render|Capture>]
+    --learn
+    [--index <N>] [--regex]
+    [--vendor-ini <path>]
+  ```
+  Notes:
+  - `--learn` guides you to toggle Windows’ Enhancements UI, captures A/B, and appends a vendor section to `vendor_toggles.ini` (or `--vendor-ini` path).
+  - After learn, `--enable/--disable` will write the device‑specific DWORD across the configured hives and verify.
+
+- diag-sysfx (diagnostic)  
+  Dumps Enhancements (SysFX) status from:
+  - PropertyStore (live)
+  - PolicyConfig (Fx/normal stores)
+  - First applicable vendor entry (if any)
+  ```bash
+  audioctl diag-sysfx
+    (--id <ID> | --name <NAME>) [--flow <Render|Capture>]
+    [--index <N>] [--regex]
+  ```
+
+- diag-mmdevices (diagnostic)  
+  Dumps all MMDevices registry values for an endpoint under HKCU/HKLM (FxProperties/Properties), useful for debugging drivers and Learn results.
+  ```bash
+  audioctl diag-mmdevices
+    (--id <ID> | --name <NAME>) [--flow <Render|Capture>]
+    [--index <N>] [--regex]
+  ```
+
+- discover-enhancements (diagnostic + learn helper)  
+  Interactive A/B capture while you toggle Enhancements in Windows UI; saves TXT/JSON report and can write a suggested INI section.
+  ```bash
+  audioctl discover-enhancements
+    (--id <ID> | --name <NAME>) [--flow <Render|Capture>]
+    [--index <N>] [--regex]
+    [--output-dir <path>] [--ini-snippet <path>]
+  ```
+
+- wait (diagnostic/automation)  
+  Waits for a device to appear (become active) within timeout and prints its descriptor.
   ```bash
   audioctl wait
-    (--id <ID> | --name <NAME>)
-    [--flow <FLOW>] [--timeout <SECONDS>] [--index <N>] [--regex]
+    (--id <ID> | --name <NAME>) [--flow <Render|Capture>]
+    [--timeout <seconds>] [--index <N>] [--regex]
   ```
-
-_Note: Mutating commands operate only on active endpoints (`DEVICE_STATE_ACTIVE`). The list command’s `--all` option affects visibility, not mutating behavior._
 
 ---
 
 ## 7. GUI Application Structure
 
-The `AudioGUI` class handles:
+The `AudioGUI` class provides:
+- A Treeview listing in two groups: “Playback (Render)” and “Recording (Capture)”.
+- Per‑flow name‑sorted ordering, consistent with CLI indexing.
+- Context menu actions:
+  - Set as Default (all roles)
+  - Set Volume…
+  - Mute/Unmute
+  - Toggle Listen (capture only)
+  - Enable/Disable Enhancements (when a vendor toggle is available)
+  - Learn Enhancements (guided vendor learning; appends to INI — see Section 10)
+- View options:
+  - Show disabled/disconnected endpoints
+  - Print CLI commands (echo the exact CLI for any action)
+- Status bar updates and guarded error dialogs.
 
-- Initialization (`__init__`)  
-  Sets up the main window, Treeview, scrollbar, status bar, and context menu. Applies custom styling.
-
-- Device Management (`refresh_devices`)  
-  Populates the Treeview with devices, categorizing them into "Playback (Render)" and "Recording (Capture)" groups. The device list is name-sorted within each flow (Render/Capture). The CLI mirrors this order and the per‑flow indices, so GUI and CLI indexing are consistent.
-
-- User Interaction
-  - `on_right_click()`  
-    Displays a context menu for the selected device, dynamically adjusting menu item labels and states.
-  - `on_left_click()`, `on_select_change()`  
-    Custom handlers for Treeview selection to ensure only device rows (not group headers) are selectable.
-  - `on_double_click()`  
-    Displays a context menu for the selected device, dynamically adjusting menu item labels and states.
-
-- Action Handlers (`on_set_default`, `on_set_volume`, `on_toggle_mute`, `on_toggle_listen`)  
-  - Retrieve the selected device.  
-  - Construct and optionally print the equivalent CLI command (`maybe_print_cli`).  
-  - Call the appropriate core audio logic functions (`set_default_endpoint`, `set_endpoint_volume`, `set_endpoint_mute`, `set_listen_to_device_ps`).  
-  - Update the status bar and refresh the device list as needed.  
-  - Wrap calls in `try-except` blocks to display user-friendly error messages via `messagebox`.
-
-- `open_volume_dialog()`  
-  Creates a `tk.Toplevel` window for precise volume adjustment with a slider and entry box.
-
-- `resource_path()` and `iconbitmap()`  
-  The `resource_path` helper function intelligently locates bundled assets, ensuring that `audio.ico` is correctly set as the icon for both the main `Tk` root window and any `tk.Toplevel` dialogs, whether the script runs from source or as a PyInstaller executable.
+Stability and behavior notes:
+- COM is initialized at startup and uninitialized on exit.
+- Device refresh and critical COM vtable operations are guarded (short GC pauses, AddRef/Release balance) to avoid destructor‑time Release races on sensitive drivers.
+- Icons for the root and dialogs are resolved via `resource_path("audio.ico")`, working both from source and in a frozen build.
 
 ---
 
 ## 8. Deployment Considerations (PyInstaller)
 
-The script is deployed as a standalone Windows executable using PyInstaller. The build process integrates version metadata and the application icon.
+This project uses a `.spec` file (`audioctl.spec`) for deterministic builds.
 
-### 8.1. PyInstaller Command
+### 8.1. Build
 
-The following command is used for building the executable:
-
+Invoke:
 ```bash
-pyinstaller --clean --onefile --console --name audioctl \
-  --collect-all pycaw \
-  --collect-submodules comtypes \
-  --hidden-import comtypes \
-  --hidden-import comtypes.gen \
-  --hidden-import comtypes.automation \
-  --icon audio.ico \
-  --add-data "audio.ico;." \
-  --version-file version.txt \
-  audioctl.py
+pyinstaller audioctl.spec
 ```
 
-Breakdown of arguments:
-
-- `--clean`  
-  Cleans PyInstaller's cache and temporary files before building.
-
-- `--onefile`  
-  Packages the application into a single executable file.
-
-- `--console`  
-  Creates a console window for the application. Important for viewing `stdout`/`stderr` output (including CLI commands and logged warnings/errors) even when the GUI is launched.
-
-- `--name audioctl`  
-  Sets the name of the executable to `audioctl.exe`.
-
-- `--collect-all pycaw`  
-  Automatically collects all modules related to the `pycaw` package.
-
-- `--collect-submodules comtypes`  
-  Ensures all submodules of `comtypes` are collected.
-
-- `--hidden-import comtypes`, `--hidden-import comtypes.gen`, `--hidden-import comtypes.automation`  
-  Explicitly include these `comtypes` modules to accommodate dynamic code generation that static analysis can miss, directly supporting the `comtypes` compatibility shim.
-
-- `--icon audio.ico`  
-  Specifies `audio.ico` as the icon for the generated `audioctl.exe`.
-
-- `--add-data "audio.ico;."`  
-  Includes `audio.ico` as a data file accessible at runtime. The `;.` places the icon at the root of the temporary execution folder, making it accessible via `resource_path("audio.ico")` in the GUI.
-
-- `--version-file version.txt`  
-  Integrates version information from `version.txt` into the executable's metadata.
-
-- `audioctl.py`  
-  The main script file to be bundled.
+Key spec elements:
+- `collect_all('pycaw')` to bundle pycaw’s generated modules and data.
+- `hiddenimports = ['comtypes.automation']` to ensure automation types are present.
+- `datas = [('audio.ico', '.')]` so the icon is available at runtime via `resource_path`.
+- `version='version.txt'` to embed PE version info.
+- `console=True` to allow CLI usage and to surface stderr/stdout for diagnostics.
+- `icon=['audio.ico']` for the executable icon.
 
 ### 8.2. Version File (`version.txt`)
 
-The `version.txt` file contains the `VSVersionInfo` structure, which populates the "Details" tab in the `audioctl.exe` file properties in Windows Explorer.
+PE version resource for v1.4.1.0, example:
 
 ```text
 VSVersionInfo(
   ffi=FixedFileInfo(
-    filevers=(1, 2, 1, 0),
-    prodvers=(1, 2, 1, 0),
+    filevers=(1, 4, 1, 0),
+    prodvers=(1, 4, 1, 0),
     mask=0x3f,
     flags=0x0,
     OS=0x40004,
@@ -408,64 +370,163 @@ VSVersionInfo(
   ),
   kids=[
     StringFileInfo([
-      StringTable(
-        '040904B0',
-        [
-          StringStruct('CompanyName', ''),
+      StringTable('040904E4', [
+          StringStruct('CompanyName', 'Mr5niper5oft'),
           StringStruct('FileDescription', 'Windows Audio Control CLI'),
-          StringStruct('FileVersion', '1.2.1.0'),
+          StringStruct('FileVersion', '1.4.1.0'),
           StringStruct('InternalName', 'audioctl'),
-          StringStruct('LegalCopyright', ''),
+          StringStruct('LegalCopyright', 'Copyright (c) 2025 Mr5niper5oft'),
           StringStruct('OriginalFilename', 'audioctl.exe'),
           StringStruct('ProductName', 'Windows Audio Control CLI'),
-          StringStruct('ProductVersion', '1.2.1.0'),
+          StringStruct('ProductVersion', '1.4.1.0'),
         ]
       )
     ]),
-    VarFileInfo([VarStruct('Translation', [1033][1200])])
+    VarFileInfo([VarStruct('Translation', [1033, 1252])])
   ]
 )
 ```
 
-Key fields and their significance:
-
-- `filevers=(1, 2, 1, 0)` / `FileVersion`  
-  Specifies the binary file version.
-
-- `prodvers=(1, 2, 1, 0)` / `ProductVersion`  
-  Specifies the product version this file belongs to.
-
-- `CompanyName`  
-  Identifies the organization that produced the application.
-
-- `FileDescription`  
-  A brief description of the file's purpose.
-
-- `InternalName`  
-  The internal name of the file (usually without extension).
-
-- `LegalCopyright`  
-  Copyright notice for the product.
-
-- `OriginalFilename`  
-  The original name of the file, typically used for comparison.
-
-- `ProductName`  
-  The name of the product this file is part of.
-
-- `StringTable('040904B0', ...)`  
-  Specifies language and character set (0409 is US English, 04B0 is Unicode).
-
-- `VarStruct('Translation', [1033, 1200])`  
-  Defines the translation information (1033 = US English, 1200 = Unicode codepage).
+Notes:
+- `FileVersion`/`ProductVersion` reflect the application’s release (1.4.1.0).
+- Language table `040904E4` corresponds to U.S. English, Unicode.
 
 ### 8.3. Output
 
-Upon successful execution of the PyInstaller command, the `audioctl.exe` executable will be generated in the `dist/` directory, ready for distribution. A `build/` directory will also be created containing intermediate build files.
+On success:
+- `dist\audioctl.exe` contains the single‑file binary.
+- `build\` contains intermediates for inspection.
 
 ---
 
-## 9. Conclusion
+## 9. Diagnostics & Debug Tools
 
-`audioctl.py` is a robust and flexible solution for Windows audio control. Its careful implementation of COM interoperability, including strategic use of raw `ctypes` VTABLE calls and a `comtypes` compatibility shim, addresses many common stability issues encountered with Python-COM interactions, particularly in packaged applications. The dual CLI/GUI interface provides broad utility for both automation and interactive use. Coupled with a disciplined virtual environment for dependency management and a thoroughly configured PyInstaller build process, this utility is designed for reliable deployment and operation in Windows environments. The comprehensive error handling and logging further enhance its reliability and debuggability in production.
+- AUDIOCTL_DEBUG (environment variable)  
+  Set to `1` to enable verbose debug lines in `audioctl_gui.log`.
+  - CMD:
+    ```bat
+    set AUDIOCTL_DEBUG=1
+    audioctl.exe
+    ```
+  - PowerShell:
+    ```powershell
+    $env:AUDIOCTL_DEBUG = 1
+    .\audioctl.exe
+    ```
+
+- diag-sysfx (CLI)  
+  Dumps Enhancements state from PropertyStore, PolicyConfig (Fx/normal), and vendor toggle status. Useful to see “live” Windows state vs. vendor‑mapped state.
+
+- diag-mmdevices (CLI)  
+  Dumps all MMDevices values (HKCU/HKLM) under FxProperties/Properties for an endpoint to help identify vendor toggles or diagnose driver behavior.
+
+- discover-enhancements (CLI)  
+  Guided A/B snapshot and diff for Enhancements. Produces TXT/JSON bundle and can write a suggested INI section.
+
+- wait (CLI)  
+  Polls for device appearance; useful for scripting sequences where a device is hot‑plugged.
+
+- GUI “Print CLI commands”  
+  Option to echo exact CLI equivalents of actions taken via GUI.
+
+---
+
+## 10. Learn: Vendor Enhancements Discovery, INI, and Runtime Behavior
+
+### 10.1. Purpose
+
+Some drivers (e.g., Realtek/Waves) handle “Audio Enhancements” via vendor‑specific registry values rather than Windows’ Disable_SysFx property alone. Learn captures how your device actually toggles Enhancements and stores a small, safe mapping so future enable/disable operations work reliably on that device.
+
+### 10.2. Where data is stored
+
+- Default INI path: `vendor_toggles.ini` next to the executable (or package root when running from source).
+- Override with `--vendor-ini <path>` (CLI). GUI Learn writes to the default path.
+
+### 10.3. INI format
+
 ```
+[vendor_{guid},pid]
+value_name = {GUID},pid
+dword_enable = 0
+dword_disable = 1
+hives = HKCU,HKLM
+flows = Render,Capture
+notes = Context about the device/flow and capture (optional)
+```
+
+- `value_name`: An MMDevices FxProperties/Properties key (e.g. `{1da5d803-d492-4edd-8c23-e0c0ffee7f0e},5`)
+- `dword_enable`/`dword_disable`: DWORD values used for enable/disable.
+- `hives`: Where to write (order is the precedence).
+- `flows`: `Render`, `Capture`, or both.
+
+### 10.4. How to Learn
+
+- CLI manual learn:
+  ```bash
+  audioctl enhancements --id "<endpoint-id>" --flow Render --learn [--vendor-ini "<path>"]
+  ```
+  The tool prompts you to toggle Windows’ Enhancements, captures A/B snapshots, diffs MMDevices, and appends a vendor section if a single DWORD flip candidate is found.
+
+- GUI learn:
+  - Right‑click a device → “Learn Enhancements”
+  - Follow prompts; the section is appended to the INI if a good candidate is found.
+
+- CLI guided discovery (report + optional INI snippet):
+  ```bash
+  audioctl discover-enhancements \
+    --id "<endpoint-id>" --flow Render \
+    --output-dir "C:\out" \
+    --ini-snippet "C:\path\to\vendor_toggles.ini"
+  ```
+
+Safety note:
+- Learn persists a vendor mapping. Subsequent `enhancements --enable/--disable` will write this DWORD for the endpoint. Remove the INI section to undo.
+
+### 10.5. Runtime toggle behavior
+
+- On `audioctl enhancements --enable/--disable` (or GUI toggle):
+  1) The first applicable vendor entry (INI first, then built‑in code vendors) is selected for the endpoint/flow.
+  2) The tool writes the corresponding DWORD to the configured hives.
+  3) It verifies by reading back the same entry (with short retries for consistency).
+
+- Diagnostics:
+  - `audioctl diag-sysfx` shows:
+    - PropertyStore Enhancements state (live)
+    - PolicyConfig (Fx and normal) state
+    - Vendor toggle status (the applied vendor entry’s current reading)
+
+### 10.6. Permissions and precedence
+
+- HKCU writes: no admin required.
+- HKLM writes: admin required.
+- Write order follows the INI’s `hives` field for vendor entries set during Learn.
+
+### 10.7. Example manual INI entry
+
+```
+[vendor_{1da5d803-d492-4edd-8c23-e0c0ffee7f0e},5]
+value_name = {1da5d803-d492-4edd-8c23-e0c0ffee7f0e},5
+dword_enable = 0
+dword_disable = 1
+hives = HKCU,HKLM
+flows = Render,Capture
+notes = Learned on "Speakers (Realtek(R) Audio)" (A=enabled, B=disabled)
+```
+
+After saving:
+```bash
+audioctl enhancements --name "Speakers" --flow Render --disable
+```
+
+### 10.8. Troubleshooting Learn
+
+- No DWORD flip found:
+  - Driver may use non‑DWORD or binary blob. Keep the TXT/JSON from `discover-enhancements` for deeper analysis.
+- Verification timing:
+  - Some drivers update asynchronously; the tool’s verification loop already retries briefly.
+
+---
+
+## 11. Conclusion
+
+`audioctl.py` (v1.4.1.0) provides a robust, scriptable and interactive way to manage Windows audio endpoints. Its COM interaction approach blends `comtypes` convenience with targeted `ctypes` vtable calls for reliability in sensitive areas, and it is structured to work consistently from source and as a frozen executable. Diagnostics and optional debug logging make it practical to deploy and support in varied Windows environments, while the GUI and CLI share a consistent selection model and device ordering. Learn mode enables vendor‑aware Enhancements toggling that is reliable across different driver implementations.
