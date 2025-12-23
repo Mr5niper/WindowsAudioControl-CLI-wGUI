@@ -228,7 +228,15 @@ class AudioGUI:
             
     def refresh_devices(self):
         try:
-            self.devices = list_devices(include_all=self.include_all.get())
+            import gc
+            gc_enabled = gc.isenabled()
+            if gc_enabled:
+                gc.disable()
+            try:
+                self.devices = list_devices(include_all=self.include_all.get())
+            finally:
+                if gc_enabled:
+                    gc.enable()
             self.item_to_device.clear()
             for item in self.tree.get_children():
                 self.tree.delete(item)
