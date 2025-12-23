@@ -28,12 +28,10 @@ from .vendor_db import (
     _apply_enhancements,
     _enhancements_supported
 )
-# Tiny safety patch: route "Set as Default" to the stable PolicyConfig (lazy)
+# Tiny safety patch: route "Set as Default" to a single, stable PolicyConfig (lazy singleton)
 try:
     from . import devices as _dev
-    # Important: do NOT call it here (no parentheses). Just point to the function,
-    # so it will be called later when COM is initialized.
-    _dev._get_policy_config = _dev._get_policy_config_fx
+    _dev._get_policy_config = _dev._get_policy_config_fx_singleton  # note: no parentheses
 except Exception:
     pass
 
