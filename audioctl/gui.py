@@ -80,6 +80,7 @@ class AudioGUI:
         self.print_cmd = tk.BooleanVar(value=False)  # When checked, print exact CLI command for actions
         self.devices = []
         self.item_to_device = {}
+        self._needs_quiet_exit = False
         # Layout
         self.container = ttk.Frame(self.root, padding=10)
         self.container.pack(fill="both", expand=True)
@@ -506,6 +507,7 @@ class AudioGUI:
             self.maybe_print_cli(cmd)
             self.set_status(f"Set default ({d['flow']}) device: {d['name']} (all roles)")
             self.refresh_devices()
+            self._needs_quiet_exit = True
             _dbg(f"GUI: on_set_default successful")
         except Exception as e:
             messagebox.showerror("Error", f"Failed to set default:\n{e}")
@@ -830,13 +832,35 @@ def launch_gui():
     except Exception:
         pass
         
+    gui = AudioGUI(root)
     def _on_root_close():
         try:
             _log("WM_DELETE_WINDOW received: root close requested (user/system)")
         except Exception:
             pass
+        import os
+        # Quiet path if Set Default was used (or if forced by env)
+        if getattr(gui, "_needs_quiet_exit", False) or os.environ.get("AUDIOCTL_QUIET_EXIT", "0") == "1":
+            try:
+                from .logging_setup import _dbg
+                from . import devices as _dev
+                _dbg("WM_DELETE_WINDOW: quiet shutdown path (preemptive)")
+                # Release COM singletons now
+                _dev._release_singletons_quiet()
+                # Optional: one GC sweep while COM is still initialized
+                try:
+                    import gc
+                    if not gc.isenabled():
+                        gc.enable()
+                    gc.collect()
+                except Exception:
+                    pass
+                _dbg("WM_DELETE_WINDOW: os._exit(0)")
+            except Exception:
+                pass
+            os._exit(0)
+        # Normal path
         root.destroy()
-        
     try:
         root.protocol("WM_DELETE_WINDOW", _on_root_close)
     except Exception:
@@ -869,7 +893,6 @@ def launch_gui():
     except Exception:
         pass
         
-    gui = AudioGUI(root)
     _log("launch_gui: entering mainloop")
     try:
         root.mainloop()
