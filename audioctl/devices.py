@@ -570,6 +570,25 @@ def _get_policy_config_fx_singleton():
             pass
     return _policy_cfg_singleton
 
+def _release_singletons_quiet():
+    """
+    Release COM singletons we keep, so they don't get finalized after COM is uninitialized.
+    Safe to call multiple times.
+    """
+    global _policy_cfg_singleton
+    try:
+        pc = _policy_cfg_singleton
+        _policy_cfg_singleton = None
+        if pc is not None:
+            try:
+                # Many comtypes wrappers expose Release(); guard just in case.
+                if hasattr(pc, "Release"):
+                    pc.Release()
+            except Exception:
+                pass
+    except Exception:
+        pass
+
 def _pkey_disable_sysfx():
     # PKEY_AudioEndpoint_Disable_SysFx {E4870E26-3CC5-4CD2-BA46-CA0A9A70ED04}, pid 2
     IPolicyConfigFx, CLSID_PolicyConfigClient, PROPERTYKEY, PROPVARIANT = _define_policyconfig_fx_interfaces()
@@ -637,19 +656,15 @@ def _set_boolish_in_propvariant(pv, zero_or_one):
     return False
 
 def _get_enhancements_status_com(device_id):
-    """
-    Returns True if enhancements are enabled, False if disabled, or None if unknown.
-    Tries both FX store (bFxStore=True) and normal store (bFxStore=False).
-    """
     try:
         IPolicyConfigFx, CLSID_PolicyConfigClient, PROPERTYKEY, PROPVARIANT = _define_policyconfig_fx_interfaces()
         pkey = _pkey_disable_sysfx()
-        pc = _get_policy_config_fx()
+        pc = _get_policy_config_fx_singleton()  # use singleton
         for bfx in (True, False):
             pv = PROPVARIANT()
             try:
                 pc.GetPropertyValue(device_id, bfx, byref(pkey), byref(pv))
-                raw = _parse_boolish_from_propvariant(pv)  # Disable_SysFx: 0=enh on, 1=off
+                raw = _parse_boolish_from_propvariant(pv)
                 if raw is None:
                     continue
                 return False if raw == 1 else True
@@ -660,28 +675,22 @@ def _get_enhancements_status_com(device_id):
         return None
 
 def _set_enhancements_com(device_id, enable):
-    """
-    Set Disable_SysFx to desired value in both stores (FX and normal).
-    enable=True -> Disable_SysFx=0
-    Returns True if any write succeeded.
-    """
     try:
         IPolicyConfigFx, CLSID_PolicyConfigClient, PROPERTYKEY, PROPVARIANT = _define_policyconfig_fx_interfaces()
         pkey = _pkey_disable_sysfx()
-        pc = _get_policy_config_fx()
+        pc = _get_policy_config_fx_singleton()  # use singleton
         desired_disable = 0 if enable else 1
         ok_any = False
         for bfx in (True, False):
             try:
                 pv = PROPVARIANT()
-                # Read current (to get correct VT), ignore errors
                 try:
                     pc.GetPropertyValue(device_id, bfx, byref(pkey), byref(pv))
                 except Exception:
                     pass
                 if not _set_boolish_in_propvariant(pv, desired_disable):
                     try:
-                        pv.vt = 19  # VT_UI4
+                        pv.vt = 19
                         pv.ulVal = desired_disable
                     except Exception:
                         pass
@@ -1420,7 +1429,7 @@ def _safe_friendly_name_from_device(dev):
         if not sys.platform.startswith("win"):
             return None
         import ctypes
-        # Pause GC so comtypes __del__ won’t run Release while we hold raw pointers
+        # Pause GC so comtypes __del__ won't run Release while we hold raw pointers
         gc_was_enabled = gc.isenabled()
         if gc_was_enabled:
             try:
@@ -1545,7 +1554,7 @@ def _safe_friendly_name_from_device(dev):
                 if not name:
                     name = _get_string_prop(PKEY_Device_DeviceDesc)
                 if name:
-                    _dbg(f"FriendlyName: got='{name}')")
+                    _dbg(f"FriendlyName: got='{name}'")
                     return name
             finally:
                 # Balance the AddRef we did above so refcount is correct no matter when GC runs
