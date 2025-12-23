@@ -555,6 +555,14 @@ def _get_policy_config_fx():
     IPolicyConfigFx, CLSID_PolicyConfigClient, PROPERTYKEY, PROPVARIANT = _define_policyconfig_fx_interfaces()
     return CoCreateInstance(CLSID_PolicyConfigClient, interface=IPolicyConfigFx, clsctx=CLSCTX_ALL)
 
+# Keep one PolicyConfig object alive for the whole process
+_policy_cfg_singleton = None
+def _get_policy_config_fx_singleton():
+    global _policy_cfg_singleton
+    if _policy_cfg_singleton is None:
+        _policy_cfg_singleton = _get_policy_config_fx()
+    return _policy_cfg_singleton
+
 def _pkey_disable_sysfx():
     # PKEY_AudioEndpoint_Disable_SysFx {E4870E26-3CC5-4CD2-BA46-CA0A9A70ED04}, pid 2
     IPolicyConfigFx, CLSID_PolicyConfigClient, PROPERTYKEY, PROPVARIANT = _define_policyconfig_fx_interfaces()
