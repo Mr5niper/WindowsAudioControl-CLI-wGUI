@@ -28,6 +28,15 @@ from .vendor_db import (
     _apply_enhancements,
     _enhancements_supported
 )
+# Tiny safety patch: route "Set as Default" to the stable PolicyConfig (lazy)
+try:
+    from . import devices as _dev
+    # Important: do NOT call it here (no parentheses). Just point to the function,
+    # so it will be called later when COM is initialized.
+    _dev._get_policy_config = _dev._get_policy_config_fx
+except Exception:
+    pass
+
 # tkfont is imported locally where needed, as per instruction to prevent issues
 class AudioGUI:
     def __init__(self, root):
@@ -846,4 +855,3 @@ def launch_gui():
         pass
         
     return 0
-
