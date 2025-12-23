@@ -32,7 +32,7 @@ from .vendor_db import (
 class AudioGUI:
     def __init__(self, root):
         self.root = root
-        self.root.title("Audio Control v1.4.0.0 12-22-2025")
+        self.root.title("Audio Control v1.4.1.0 12-22-2025")
         try:
             pass
         except Exception:
@@ -846,3 +846,4 @@ def launch_gui():
         pass
         
     return 0
+
