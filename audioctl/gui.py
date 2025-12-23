@@ -876,6 +876,44 @@ def launch_gui():
     except Exception:
         _log_exc("MAINLOOP EXCEPTION")
     _log("launch_gui: mainloop exited")
+    
+    # Pre-shutdown GC sweeps while COM is still initialized.
+    # This forces comtypes wrappers to Release() now (safe), instead of later.
+    try:
+        import gc
+        from .logging_setup import _dbg
+        _dbg("Shutdown: pre-CoUninitialize GC sweep begin")
+        # Temporarily enable GC for the sweep even if disabled
+        gc_was_enabled = gc.isenabled()
+        if not gc_was_enabled:
+            gc.enable()
+        # Run a couple of sweeps until stable
+        for _ in range(3):
+            gc.collect()
+        _dbg("Shutdown: pre-CoUninitialize GC sweep done")
+        # Restore original GC state (we re-disable below anyway)
+        if not gc_was_enabled:
+            gc.disable()
+    except Exception:
+        pass
+    
+    # Release COM singletons before CoUninitialize
+    try:
+        from . import devices as _dev
+        _dev._release_singletons_quiet()
+    except Exception:
+        pass
+        
+    # Optional: zero-noise shutdown via env toggle
+    import os
+    if os.environ.get("AUDIOCTL_QUIET_EXIT", "0") == "1":
+        try:
+            from .logging_setup import _dbg
+            _dbg("Quiet exit: os._exit(0)")
+        except Exception:
+            pass
+        os._exit(0)
+
     # Re-enable GC on shutdown (optional, neatness)
     try:
         import gc
@@ -885,11 +923,10 @@ def launch_gui():
         _dbg("GC re-enabled (GUI shutdown)")
     except Exception:
         pass
+        
     try:
         CoUninitialize()
     except Exception:
         pass
         
     return 0
-
-
