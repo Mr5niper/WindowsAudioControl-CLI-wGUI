@@ -17,7 +17,7 @@ from .compat import (
     ROLES, DEVICE_STATE_ACTIVE, DEVICE_STATE_ALL, DEVICE_STATES,
     STGM_READ, STGM_WRITE, is_admin, _guid_from_parts,
 )
-from .logging_setup import _log, _log_exc
+from .logging_setup import _log, _log_exc, _dbg
 # Removed: from .vendor_db import ...
 import comtypes.automation as automation
 import copy
@@ -560,7 +560,14 @@ _policy_cfg_singleton = None
 def _get_policy_config_fx_singleton():
     global _policy_cfg_singleton
     if _policy_cfg_singleton is None:
+        _dbg("Creating PolicyConfigFx COM object (singleton)")
         _policy_cfg_singleton = _get_policy_config_fx()
+        try:
+            import ctypes
+            ptr = ctypes.cast(_policy_cfg_singleton, ctypes.c_void_p).value
+            _dbg(f"PolicyConfigFx COM pointer = 0x{ptr:016X}")
+        except Exception:
+            pass
     return _policy_cfg_singleton
 
 def _pkey_disable_sysfx():
@@ -1318,7 +1325,9 @@ def set_default_endpoint(device_id, role):
     """
     role in ROLES keys or 'all'. Requires the device to be active.
     """
+    _dbg(f"SetDefaultEndpoint start: id={device_id} role={role}")
     if not _is_device_active(device_id):
+        _dbg("SetDefaultEndpoint abort: device not active")
         raise RuntimeError("Target device is not active; refusing to set default.")
     policy = _get_policy_config()
     
@@ -1340,10 +1349,12 @@ def set_default_endpoint(device_id, role):
                 ok_all = False
                 last_err = err
         if not ok_all:
+            _dbg(f"SetDefaultEndpoint failed for some roles: {results}")
             details = ", ".join([f"{k}={'ok' if v else 'fail'}" for k, v in results.items()])
             raise RuntimeError(f"SetDefaultEndpoint failed for roles: {details}. Underlying error: {last_err}")
     else:
         policy.SetDefaultEndpoint(device_id, ROLES[role])
+    _dbg("SetDefaultEndpoint done")
 
 def _is_device_active(device_id):
     for flow in (E_RENDER, E_CAPTURE):
@@ -1381,6 +1392,7 @@ def _safe_friendly_name_from_device(dev):
     Read PKEY_Device_FriendlyName from an IMMDevice via IPropertyStore using raw vtable.
     Hardened so GC doesn't interfere and COM refcounts are balanced.
     """
+    _dbg("FriendlyName: enter (_safe_friendly_name_from_device)")
     try:
         import sys, gc
         if not sys.platform.startswith("win"):
@@ -1449,6 +1461,16 @@ def _safe_friendly_name_from_device(dev):
                 ps_ptr_val = ctypes.cast(ps_unknown, ctypes.c_void_p).value
                 if not ps_ptr_val:
                     return None
+                
+                # --- New debug log after OpenPropertyStore ---
+                try:
+                    import ctypes
+                    ptr = ctypes.cast(ps_unknown, ctypes.c_void_p).value
+                    _dbg(f"FriendlyName: IPropertyStore raw=0x{ptr:016X} (AddRef before use)")
+                except Exception:
+                    pass
+                # ---------------------------------------------
+                
                 ps_iface = ctypes.cast(ctypes.c_void_p(ps_ptr_val), PIPS)
                 PKEY_Device_FriendlyName = PROPERTYKEY(GUID("{a45c254e-df1c-4efd-8020-67d146a850e0}"), 14)
                 PKEY_Device_DeviceDesc   = PROPERTYKEY(GUID("{a45c254e-df1c-4efd-8020-67d146a850e0}"), 2)
@@ -1501,6 +1523,7 @@ def _safe_friendly_name_from_device(dev):
                 if not name:
                     name = _get_string_prop(PKEY_Device_DeviceDesc)
                 if name:
+                    _dbg(f"FriendlyName: got='{name}'")
                     return name
             finally:
                 # Balance the AddRef we did above so refcount is correct no matter when GC runs
@@ -1518,6 +1541,7 @@ def _safe_friendly_name_from_device(dev):
                     gc.enable()
                 except Exception:
                     pass
+            _dbg("FriendlyName: leave (released, GC re-enabled)")
     except Exception:
         pass
     # Fallbacks: ID or None
@@ -1530,6 +1554,7 @@ def list_devices(include_all=False):
     """
     Returns list of devices with fields: id, name, flow, state, isDefault flags.
     """
+    _dbg(f"list_devices: include_all={include_all}")
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", UserWarning)
         
@@ -1539,6 +1564,7 @@ def list_devices(include_all=False):
         out = []
         
         for flow_name, flow in [("Render", E_RENDER), ("Capture", E_CAPTURE)]:
+            _dbg(f"Enum flow={flow_name}")
             enumerator, coll = enum_endpoints(flow, state_mask)
             for i in range(coll.GetCount()):
                 dev = coll.Item(i)
@@ -1567,6 +1593,7 @@ def list_devices(include_all=False):
                     "state": state_str,
                     "isDefault": is_default,
                 })
+        _dbg(f"list_devices: total={len(out)}")
         return out
 
 def find_devices_by_selector(devices, dev_id=None, name_substr=None, flow=None, regex=False):
