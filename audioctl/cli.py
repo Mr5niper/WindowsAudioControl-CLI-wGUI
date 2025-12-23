@@ -532,10 +532,10 @@ def main(argv=None):
         CoInitialize()
     except Exception:
         pass
-    # Make CLI use the stable PolicyConfig path for SetDefault (lazy override)
+    # Make CLI use a single stable PolicyConfig for SetDefault (lazy singleton)
     try:
         from . import devices as _dev
-        _dev._get_policy_config = _dev._get_policy_config_fx  # note: no parentheses
+        _dev._get_policy_config = _dev._get_policy_config_fx_singleton  # note: no parentheses
     except Exception:
         pass
     parser = build_parser()
