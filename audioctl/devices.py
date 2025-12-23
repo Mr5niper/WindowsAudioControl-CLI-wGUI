@@ -1523,7 +1523,7 @@ def _safe_friendly_name_from_device(dev):
                 if not name:
                     name = _get_string_prop(PKEY_Device_DeviceDesc)
                 if name:
-                    _dbg(f"FriendlyName: got='{name}'")
+                    _dbg(f"FriendlyName: got='{name}')")
                     return name
             finally:
                 # Balance the AddRef we did above so refcount is correct no matter when GC runs
