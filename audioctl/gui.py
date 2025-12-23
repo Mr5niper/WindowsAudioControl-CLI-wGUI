@@ -841,23 +841,7 @@ def launch_gui():
         import os
         # Quiet path if Set Default was used (or if forced by env)
         if getattr(gui, "_needs_quiet_exit", False) or os.environ.get("AUDIOCTL_QUIET_EXIT", "0") == "1":
-            try:
-                from .logging_setup import _dbg
-                from . import devices as _dev
-                _dbg("WM_DELETE_WINDOW: quiet shutdown path (preemptive)")
-                # Release COM singletons now
-                _dev._release_singletons_quiet()
-                # Optional: one GC sweep while COM is still initialized
-                try:
-                    import gc
-                    if not gc.isenabled():
-                        gc.enable()
-                    gc.collect()
-                except Exception:
-                    pass
-                _dbg("WM_DELETE_WINDOW: os._exit(0)")
-            except Exception:
-                pass
+            # Do NOT log, do NOT GC, do NOT Release COM — exit immediately.
             os._exit(0)
         # Normal path
         root.destroy()
