@@ -32,6 +32,8 @@ from .vendor_db import (
 try:
     from . import devices as _dev
     _dev._get_policy_config = _dev._get_policy_config_fx_singleton  # note: no parentheses
+    from .logging_setup import _dbg
+    _dbg("GUI patched _get_policy_config -> singleton")
 except Exception:
     pass
 
@@ -227,6 +229,10 @@ class AudioGUI:
     def refresh_devices(self):
         try:
             import gc
+            from .logging_setup import _dbg
+            
+            _dbg("GUI: refresh_devices begin")
+            
             gc_enabled = gc.isenabled()
             if gc_enabled:
                 gc.disable()
@@ -235,6 +241,8 @@ class AudioGUI:
             finally:
                 if gc_enabled:
                     gc.enable()
+                _dbg("GUI: refresh_devices end")
+
             self.item_to_device.clear()
             for item in self.tree.get_children():
                 self.tree.delete(item)
@@ -480,6 +488,9 @@ class AudioGUI:
         if not d:
             return
         try:
+            from .logging_setup import _dbg
+            _dbg(f"GUI: on_set_default for id={d['id']} flow={d['flow']}")
+            
             if d["flow"] == "Render":
                 cmd = f'audioctl set-default --playback-id "{d["id"]}" --playback-role all'
             else:
@@ -495,6 +506,7 @@ class AudioGUI:
             self.maybe_print_cli(cmd)
             self.set_status(f"Set default ({d['flow']}) device: {d['name']} (all roles)")
             self.refresh_devices()
+            _dbg(f"GUI: on_set_default successful")
         except Exception as e:
             messagebox.showerror("Error", f"Failed to set default:\n{e}")
             self.set_status("Failed to set default")
@@ -797,6 +809,8 @@ class AudioGUI:
 def launch_gui():
     try:
         CoInitialize()
+        from .logging_setup import _dbg
+        _dbg("GUI CoInitialize called")
     except Exception:
         pass
     _log("launch_gui: creating Tk root")
