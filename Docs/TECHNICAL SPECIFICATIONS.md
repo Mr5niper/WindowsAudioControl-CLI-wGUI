@@ -335,22 +335,13 @@ Stability and behavior notes:
 
 ## 8. Deployment Considerations (PyInstaller)
 
-This project uses a `.spec` file (`audioctl.spec`) for deterministic builds.
-
 ### 8.1. Build
 
 Invoke:
-```bash
-pyinstaller audioctl.spec
-```
 
-Key spec elements:
-- `collect_all('pycaw')` to bundle pycaw’s generated modules and data.
-- `hiddenimports = ['comtypes.automation']` to ensure automation types are present.
-- `datas = [('audio.ico', '.')]` so the icon is available at runtime via `resource_path`.
-- `version='version.txt'` to embed PE version info.
-- `console=True` to allow CLI usage and to surface stderr/stdout for diagnostics.
-- `icon=['audio.ico']` for the executable icon.
+```powershell
+pyinstaller -F --noupx --clean --onefile --console --name audioctl --collect-all pycaw --hidden-import comtypes.automation --icon audio.ico --add-data "audio.ico;." --version-file version.txt .\audioctl.py
+```
 
 ### 8.2. Version File (`version.txt`)
 
