@@ -42,7 +42,6 @@ from .vendor_db import (
     _read_vendor_entry_state,
 )
 from .gui import launch_gui
-
 def cmd_list(args):
     devices = list_devices(include_all=args.all)
     buckets = _sort_and_tag_gui_indices(devices)
@@ -533,7 +532,12 @@ def main(argv=None):
         CoInitialize()
     except Exception:
         pass
-        
+    # Make CLI use the stable PolicyConfig path for SetDefault (lazy override)
+    try:
+        from . import devices as _dev
+        _dev._get_policy_config = _dev._get_policy_config_fx  # note: no parentheses
+    except Exception:
+        pass
     parser = build_parser()
     args = parser.parse_args(argv)
     
