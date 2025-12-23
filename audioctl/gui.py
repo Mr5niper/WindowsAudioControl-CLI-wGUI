@@ -28,11 +28,20 @@ from .vendor_db import (
     _apply_enhancements,
     _enhancements_supported
 )
+# Tiny safety patch: route "Set as Default" to a single, stable PolicyConfig (lazy singleton)
+try:
+    from . import devices as _dev
+    _dev._get_policy_config = _dev._get_policy_config_fx_singleton  # note: no parentheses
+    from .logging_setup import _dbg
+    _dbg("GUI patched _get_policy_config -> singleton")
+except Exception:
+    pass
+
 # tkfont is imported locally where needed, as per instruction to prevent issues
 class AudioGUI:
     def __init__(self, root):
         self.root = root
-        self.root.title("Audio Control v1.4.0.0 12-22-2025")
+        self.root.title("Audio Control v1.4.1.0 12-22-2025")
         try:
             pass
         except Exception:
@@ -219,7 +228,21 @@ class AudioGUI:
             
     def refresh_devices(self):
         try:
-            self.devices = list_devices(include_all=self.include_all.get())
+            import gc
+            from .logging_setup import _dbg
+            
+            _dbg("GUI: refresh_devices begin")
+            
+            gc_enabled = gc.isenabled()
+            if gc_enabled:
+                gc.disable()
+            try:
+                self.devices = list_devices(include_all=self.include_all.get())
+            finally:
+                if gc_enabled:
+                    gc.enable()
+                _dbg("GUI: refresh_devices end")
+
             self.item_to_device.clear()
             for item in self.tree.get_children():
                 self.tree.delete(item)
@@ -465,6 +488,9 @@ class AudioGUI:
         if not d:
             return
         try:
+            from .logging_setup import _dbg
+            _dbg(f"GUI: on_set_default for id={d['id']} flow={d['flow']}")
+            
             if d["flow"] == "Render":
                 cmd = f'audioctl set-default --playback-id "{d["id"]}" --playback-role all'
             else:
@@ -480,6 +506,7 @@ class AudioGUI:
             self.maybe_print_cli(cmd)
             self.set_status(f"Set default ({d['flow']}) device: {d['name']} (all roles)")
             self.refresh_devices()
+            _dbg(f"GUI: on_set_default successful")
         except Exception as e:
             messagebox.showerror("Error", f"Failed to set default:\n{e}")
             self.set_status("Failed to set default")
@@ -784,6 +811,16 @@ def launch_gui():
         CoInitialize()
     except Exception:
         pass
+    # Disable GC for the GUI lifetime to avoid comtypes Release() AV during cleanup
+    try:
+        import gc
+        if gc.isenabled():
+            gc.disable()
+        from .logging_setup import _dbg
+        _dbg("GUI CoInitialize called")
+        _dbg("GC globally disabled (GUI)")
+    except Exception:
+        pass
     _log("launch_gui: creating Tk root")
     root = tk.Tk()
     
@@ -839,7 +876,15 @@ def launch_gui():
     except Exception:
         _log_exc("MAINLOOP EXCEPTION")
     _log("launch_gui: mainloop exited")
-    
+    # Re-enable GC on shutdown (optional, neatness)
+    try:
+        import gc
+        if not gc.isenabled():
+            gc.enable()
+        from .logging_setup import _dbg
+        _dbg("GC re-enabled (GUI shutdown)")
+    except Exception:
+        pass
     try:
         CoUninitialize()
     except Exception:
