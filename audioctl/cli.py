@@ -532,12 +532,26 @@ def main(argv=None):
         CoInitialize()
     except Exception:
         pass
-    # Make CLI use a single stable PolicyConfig for SetDefault (lazy singleton)
+    
+    # Disable GC for the CLI run to avoid comtypes Release() AV noise
+    gc_was_enabled = False
+    try:
+        import gc
+        gc_was_enabled = gc.isenabled()
+        if gc_was_enabled:
+            gc.disable()
+        from .logging_setup import _dbg
+        _dbg("GC globally disabled (CLI)")
+    except Exception:
+        pass
+    
+    # Use the stable PolicyConfig (lazy singleton)
     try:
         from . import devices as _dev
         _dev._get_policy_config = _dev._get_policy_config_fx_singleton  # note: no parentheses
     except Exception:
         pass
+        
     parser = build_parser()
     args = parser.parse_args(argv)
     
@@ -579,6 +593,15 @@ def main(argv=None):
     except KeyboardInterrupt:
         rc = 130
     finally:
+        # Re-enable GC at the end (optional)
+        try:
+            import gc
+            if gc_was_enabled and not gc.isenabled():
+                gc.enable()
+            from .logging_setup import _dbg
+            _dbg("GC re-enabled (CLI end)")
+        except Exception:
+            pass
         try:
             CoUninitialize()
         except Exception:
