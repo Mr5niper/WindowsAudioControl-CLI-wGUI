@@ -29,16 +29,6 @@ from .vendor_db import (
     _enhancements_supported
 )
 
-# Route "Set as Default" to a single, stable PolicyConfig (lazy singleton)
-try:
-    from . import devices as _dev
-    _dev._get_policy_config = _dev._get_policy_config_fx_singleton  # note: no parentheses
-    from .logging_setup import _dbg
-    _dbg("GUI patched _get_policy_config -> singleton")
-except Exception:
-    pass
-
-
 class AudioGUI:
     def __init__(self, root):
         self.root = root
@@ -863,4 +853,5 @@ def launch_gui():
         pass
 
     return 0
+
 
