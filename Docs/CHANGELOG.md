@@ -1,5 +1,21 @@
 # AUDIOCTL.PY CHANGELOG
 
+## v1.4.2.0
+### Improvements
+- GUI shutdown and COM finalization:
+  - Added an optional “quiet exit” path after setting defaults (or when `AUDIOCTL_QUIET_EXIT=1`) that bypasses normal teardown to avoid release‑time noise on some drivers.
+  - Introduced a pre‑shutdown GC sweep (while COM is still initialized) to force `comtypes` releases before `CoUninitialize()`.
+  - Added `_release_singletons_quiet()` to proactively release COM singletons before COM teardown.
+- Build and docs:
+  - Standardized the build command (PowerShell):
+    ```powershell
+    pyinstaller -F --noupx --clean --onefile --console --name audioctl --collect-all pycaw --hidden-import comtypes.automation --icon audio.ico --add-data "audio.ico;." --version-file version.txt .\audioctl.py
+    ```
+  - Included a BUILD_EXE guide with the command above.
+
+### Behavioral Notes
+- CLI/GUI commands remain the same; the changes target cleaner shutdown and more predictable COM lifetime on systems sensitive to destructor timing.
+
 ## v1.4.1.0 - [Current]
 ### New Features
 - **Package Layout:** Project organized as a Python package (`audioctl/`) with clear modules for CLI, GUI, devices, vendor DB, compat shim, and logging. Top-level `audioctl.py` and `audioctl.__main__.py` bootstrap `audioctl.cli.main()`.
@@ -280,5 +296,6 @@
 - **Basic Enumeration:** Listed playback (Render) and recording (Capture) devices using `IMMDeviceEnumerator` with `DEVICE_STATE_ACTIVE` only.
 - **“Listen” Toggle (Admin):** Initial registry-based enable/disable of “Listen to this device” for capture endpoints (admin required).
 - **Admin Check:** `is_admin` helper added to warn when elevation is required.
+
 
 
