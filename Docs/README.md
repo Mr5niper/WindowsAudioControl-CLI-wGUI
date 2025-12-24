@@ -668,7 +668,7 @@ Tips:
   - Double-click `audioctl.exe` (no arguments), or run it without command-line options.
 
 
-<img width="1367" height="332" alt="image" src="https://github.com/user-attachments/assets/de30018a-5995-4892-9b1c-1f99e58ce956" />
+<img width="1367" height="332" alt="image" src="https://github.com/user-attachments/assets/6ca5571d-ae3c-4878-855d-da840718056e" />
 
 
 ### Features
@@ -693,7 +693,7 @@ Tips:
   Every GUI action will print the equivalent `audioctl.exe` command to stdout (useful for learning the CLI and scripting).
 
 
-<img width="418" height="71" alt="image" src="https://github.com/user-attachments/assets/f93e952f-a0a1-4a3a-ae9b-3610d0c2c966" />
+<img width="417" height="69" alt="image" src="https://github.com/user-attachments/assets/30d83d03-84a6-4190-bc96-ad4b85ee1ad4" />
     <br>
     <br>
 
