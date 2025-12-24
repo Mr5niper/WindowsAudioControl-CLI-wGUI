@@ -472,33 +472,13 @@ def _define_policyconfig_fx_interfaces():
     class IPolicyConfigFx(IUnknown):
         _iid_ = _IID_PolicyConfig
         _methods_ = (
-            COMMETHOD([], HRESULT, 'GetMixFormat',
-                      (['in'], wintypes.LPCWSTR, 'wszDeviceId'),
-                      (['out'], POINTER(ctypes.c_void_p), 'ppFormat')),
-            COMMETHOD([], HRESULT, 'GetDeviceFormat',
-                      (['in'], wintypes.LPCWSTR, 'wszDeviceId'),
-                      (['in'], ctypes.c_int, 'bDefault'),
-                      (['out'], POINTER(ctypes.c_void_p), 'ppFormat')),
-            COMMETHOD([], HRESULT, 'ResetDeviceFormat',
-                      (['in'], wintypes.LPCWSTR, 'wszDeviceId')),
-            COMMETHOD([], HRESULT, 'SetDeviceFormat',
-                      (['in'], wintypes.LPCWSTR, 'wszDeviceId'),
-                      (['in'], ctypes.c_void_p, 'pEndpointFormat'),
-                      (['in'], ctypes.c_void_p, 'mixFormat')),
-            COMMETHOD([], HRESULT, 'GetProcessingPeriod',
-                      (['in'], wintypes.LPCWSTR, 'wszDeviceId'),
-                      (['in'], ctypes.c_int, 'bDefault'),
-                      (['out'], POINTER(ctypes.c_longlong), 'pmftDefaultPeriod'),
-                      (['out'], POINTER(ctypes.c_longlong), 'pmftMinimumPeriod')),
-            COMMETHOD([], HRESULT, 'SetProcessingPeriod',
-                      (['in'], wintypes.LPCWSTR, 'wszDeviceId'),
-                      (['in'], POINTER(ctypes.c_longlong), 'pmftPeriod')),
-            COMMETHOD([], HRESULT, 'GetShareMode',
-                      (['in'], wintypes.LPCWSTR, 'wszDeviceId'),
-                      (['out'], POINTER(ctypes.c_void_p), 'pMode')),
-            COMMETHOD([], HRESULT, 'SetShareMode',
-                      (['in'], wintypes.LPCWSTR, 'wszDeviceId'),
-                      (['in'], ctypes.c_void_p, 'mode')),
+            COMMETHOD([], HRESULT, 'GetMixFormat', (['in'], wintypes.LPCWSTR, 'wszDeviceId'), (['out'], POINTER(ctypes.c_void_p), 'ppFormat')),
+            COMMETHOD([], HRESULT, 'GetDeviceFormat', (['in'], wintypes.LPCWSTR, 'wszDeviceId'), (['in'], wintypes.BOOL, 'bDefault'), (['out'], ctypes.POINTER(ctypes.c_void_p), 'ppFormat')),
+            COMMETHOD([], HRESULT, 'SetDeviceFormat', (['in'], wintypes.LPCWSTR, 'wszDeviceId'), (['in'], ctypes.c_void_p, 'pEndpointFormat'), (['in'], ctypes.c_void_p, 'mixFormat')),
+            COMMETHOD([], HRESULT, 'GetProcessingPeriod', (['in'], wintypes.LPCWSTR, 'wszDeviceId'), (['in'], wintypes.BOOL, 'bDefault'), (['out'], ctypes.POINTER(ctypes.c_longlong), 'pmftDefaultPeriod'), (['out'], ctypes.POINTER(ctypes.c_longlong), 'pmftMinimumPeriod')),
+            COMMETHOD([], HRESULT, 'SetProcessingPeriod', (['in'], wintypes.LPCWSTR, 'wszDeviceId'), (['in'], ctypes.POINTER(ctypes.c_longlong), 'pmftPeriod')),
+            COMMETHOD([], HRESULT, 'GetShareMode', (['in'], wintypes.LPCWSTR, 'wszDeviceId'), (['out'], ctypes.POINTER(ctypes.c_void_p), 'pMode')),
+            COMMETHOD([], HRESULT, 'SetShareMode', (['in'], wintypes.LPCWSTR, 'wszDeviceId'), (['in'], ctypes.c_void_p, 'mode')),
             COMMETHOD([], HRESULT, 'GetPropertyValue',
                       (['in'], wintypes.LPCWSTR, 'pszDeviceName'),
                       (['in'], wintypes.BOOL, 'bFxStore'),
@@ -509,12 +489,8 @@ def _define_policyconfig_fx_interfaces():
                       (['in'], wintypes.BOOL, 'bFxStore'),
                       (['in'], POINTER(PROPERTYKEY), 'pKey'),
                       (['in'], POINTER(PROPVARIANT), 'pv')),
-            COMMETHOD([], HRESULT, 'SetDefaultEndpoint',
-                      (['in'], wintypes.LPCWSTR, 'wszDeviceId'),
-                      (['in'], wintypes.DWORD, 'role')),
-            COMMETHOD([], HRESULT, 'SetEndpointVisibility',
-                      (['in'], wintypes.LPCWSTR, 'wszDeviceId'),
-                      (['in'], wintypes.BOOL, 'bVisible')),
+            COMMETHOD([], HRESULT, 'SetDefaultEndpoint', (['in'], wintypes.LPCWSTR, 'wszDeviceId'), (['in'], wintypes.DWORD, 'role')),
+            COMMETHOD([], HRESULT, 'SetEndpointVisibility', (['in'], wintypes.LPCWSTR, 'wszDeviceId'), (['in'], wintypes.BOOL, 'bVisible')),
         )
     # CLSID_PolicyConfigClient {870AF99C-171D-4F9E-AF0D-E63DF40C2BC9}
     CLSID_PolicyConfigClient = GUID(_guid_from_parts("870AF99C", "-171D-4F9E-", "AF0D-", "E63DF40C2BC9"))
@@ -674,7 +650,11 @@ def _set_enhancements_com(device_id, enable):
         return False
 def _read_enhancements_from_registry(device_id):
     r"""
-    Robustly read the 'Listen to this device' enable state from MMDevices.
+    Read enhancements state (enabled/disabled) via registry.
+    Returns True (enabled) / False (disabled) / None (unknown).
+    Searches BOTH HKCU and HKLM under:
+      ...\MMDevices\Audio\{Render|Capture}\{guid}\{FxProperties|Properties}
+    Prefers ",2" if present (common pid for Disable_SysFx).
     """
     guid = _extract_endpoint_guid_from_device_id(device_id)
     if not guid:
