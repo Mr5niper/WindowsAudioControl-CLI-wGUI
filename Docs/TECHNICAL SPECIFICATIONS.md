@@ -9,7 +9,7 @@
 
 It targets reliable control of Windows Core Audio endpoints (Render/Capture) using COM via `comtypes`, and low‑level `ctypes` where needed. The application is designed to run both from source and as a standalone PyInstaller executable, with care taken to keep COM usage robust and packaging‑friendly.
 
-This document describes the current architecture, technologies, and behavior of version 1.4.1.0. It is a technical guide to the system as it exists in this release (not a change log).
+This document describes the current architecture, technologies, and behavior of version 1.4.2.0. It is a technical guide to the system as it exists in this release (not a change log).
 
 ---
 
@@ -345,13 +345,13 @@ pyinstaller -F --noupx --clean --onefile --console --name audioctl --collect-all
 
 ### 8.2. Version File (`version.txt`)
 
-PE version resource for v1.4.1.0, example:
+PE version resource for v1.4.2.0, example:
 
 ```text
 VSVersionInfo(
   ffi=FixedFileInfo(
-    filevers=(1, 4, 1, 0),
-    prodvers=(1, 4, 1, 0),
+    filevers=(1, 4, 2, 0),
+    prodvers=(1, 4, 2, 0),
     mask=0x3f,
     flags=0x0,
     OS=0x40004,
@@ -364,12 +364,12 @@ VSVersionInfo(
       StringTable('040904E4', [
           StringStruct('CompanyName', 'Mr5niper5oft'),
           StringStruct('FileDescription', 'Windows Audio Control CLI'),
-          StringStruct('FileVersion', '1.4.1.0'),
+          StringStruct('FileVersion', '1.4.2.0'),
           StringStruct('InternalName', 'audioctl'),
           StringStruct('LegalCopyright', 'Copyright (c) 2025 Mr5niper5oft'),
           StringStruct('OriginalFilename', 'audioctl.exe'),
           StringStruct('ProductName', 'Windows Audio Control CLI'),
-          StringStruct('ProductVersion', '1.4.1.0'),
+          StringStruct('ProductVersion', '1.4.2.0'),
         ]
       )
     ]),
@@ -379,7 +379,7 @@ VSVersionInfo(
 ```
 
 Notes:
-- `FileVersion`/`ProductVersion` reflect the application’s release (1.4.1.0).
+- `FileVersion`/`ProductVersion` reflect the application’s release (1.4.2.0).
 - Language table `040904E4` corresponds to U.S. English, Unicode.
 
 ### 8.3. Output
@@ -520,4 +520,4 @@ audioctl enhancements --name "Speakers" --flow Render --disable
 
 ## 11. Conclusion
 
-`audioctl.py` (v1.4.1.0) provides a robust, scriptable and interactive way to manage Windows audio endpoints. Its COM interaction approach blends `comtypes` convenience with targeted `ctypes` vtable calls for reliability in sensitive areas, and it is structured to work consistently from source and as a frozen executable. Diagnostics and optional debug logging make it practical to deploy and support in varied Windows environments, while the GUI and CLI share a consistent selection model and device ordering. Learn mode enables vendor‑aware Enhancements toggling that is reliable across different driver implementations.
+`audioctl.py` (v1.4.2.0) provides a robust, scriptable and interactive way to manage Windows audio endpoints. Its COM interaction approach blends `comtypes` convenience with targeted `ctypes` vtable calls for reliability in sensitive areas, and it is structured to work consistently from source and as a frozen executable. Diagnostics and optional debug logging make it practical to deploy and support in varied Windows environments, while the GUI and CLI share a consistent selection model and device ordering. Learn mode enables vendor‑aware Enhancements toggling that is reliable across different driver implementations.
