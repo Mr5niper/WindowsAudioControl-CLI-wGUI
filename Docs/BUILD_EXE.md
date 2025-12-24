@@ -25,7 +25,8 @@ pip install -r requirements.txt
 
 6) Build the executable with PyInstaller
 ```powershell
-pyinstaller --clean --onefile --console --name audioctl --collect-all pycaw --collect-submodules comtypes --hidden-import comtypes --hidden-import comtypes.gen --hidden-import comtypes.automation --icon audio.ico --add-data "audio.ico;." --version-file version.txt audioctl_v1.2.1.py
+```bash
+pyinstaller -F --noupx --clean --onefile --console --name audioctl --collect-all pycaw --hidden-import comtypes.automation --icon audio.ico --add-data "audio.ico;." --version-file version.txt .\audioctl_1.3.0.17.py
 ```
 
 Notes:
