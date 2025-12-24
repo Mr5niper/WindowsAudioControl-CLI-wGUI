@@ -1,16 +1,57 @@
 # AUDIOCTL.PY CHANGELOG
 
-## v1.4.0.0 (Current)
-### Refactor (no behavior change)
-- Split the single `audioctl.py` file from v1.3.0.17 into a package:
-  - `audioctl/compat.py` – comtypes/pycaw shim and shared constants.
-  - `audioctl/logging_setup.py` – logging, faulthandler, exception hooks, `resource_path`.
-  - `audioctl/devices.py` – all device/COM/pycaw logic (list, default, volume/mute, listen, Windows Enhancements path).
-  - `audioctl/vendor_db.py` – Enhancements vendor toggles and INI learn system.
-  - `audioctl/gui.py` – Tkinter GUI.
-  - `audioctl/cli.py` – argparse and CLI commands.
-- Kept CLI and GUI behavior the same as v1.3.0.17.
-- Kept the top-level `audioctl.py` shim so PyInstaller usage and the EXE name don’t change.
+## v1.4.3.0 - [Current]
+### New Features
+- **Deferred (on‑demand) logging initialization:**
+  - The log file is created and the first breadcrumb is written only when the first log/debug line is emitted.
+  - Exception/console hooks are installed once at that moment (idempotent).
+  - Optional `faulthandler` attaches to the log file when available.
+  - `AUDIOCTL_DEBUG=1` still enables structured debug lines; debug setup is also deferred.
+
+### Improvements
+- **Simplified lifecycle and startup footprint:**
+  - Removed CLI‑time GC disable/enable and GUI “quiet exit”/pre‑shutdown GC sweep paths; both CLI and GUI now use standard `CoInitialize/CoUninitialize`.
+  - Removed the GUI hot‑patch that forced default‑routing to a PolicyConfig singleton (SysFX still uses its Fx‑capable PolicyConfig singleton internally).
+  - `resource_path()` and log path resolution are robust in both frozen (PyInstaller) and source runs; no file I/O occurs until the first log.
+
+### Bug Fixes
+- **Hook/handle safety:** Prevent double‑installation of hooks and repeated file‑handle churn on re‑imports.
+- **Predictable shutdown:** Eliminates edge cases from prior “quiet exit” and GC‑sweep shutdown paths; fewer timing interactions with `comtypes` releases.
+
+### Behavioral Changes
+- **No CLI/GUI surface changes:** Commands and options are unchanged.
+- **Logging visibility:** If nothing logs, no log file is created (because initialization is on‑demand).
+
+## v1.4.2.0
+### Improvements
+- GUI shutdown and COM finalization:
+  - Added an optional “quiet exit” path after setting defaults (or when `AUDIOCTL_QUIET_EXIT=1`) that bypasses normal teardown to avoid release‑time noise on some drivers.
+  - Introduced a pre‑shutdown GC sweep (while COM is still initialized) to force `comtypes` releases before `CoUninitialize()`.
+  - Added `_release_singletons_quiet()` to proactively release COM singletons before COM teardown.
+
+### Behavioral Notes
+- CLI/GUI commands remain the same; the changes target cleaner shutdown and more predictable COM lifetime on systems sensitive to destructor timing.
+
+## v1.4.1.0
+### New Features
+- **Package Layout:** Project organized as a Python package (`audioctl/`) with clear modules for CLI, GUI, devices, vendor DB, compat shim, and logging. Top-level `audioctl.py` and `audioctl.__main__.py` bootstrap `audioctl.cli.main()`.
+- **Stable PolicyConfig Singleton:** A lazy, process‑wide PolicyConfigFx COM object is used for default endpoint operations; both CLI and GUI route `_get_policy_config` to this singleton.
+
+### Improvements
+- **GC‑Aware Stability:** CLI and GUI disable the Python GC during critical sections to prevent `comtypes` finalizers from releasing COM objects while raw pointers are in use. GC is re‑enabled on shutdown/CLI exit. Certain call sites (e.g., GUI refresh) temporarily pause/resume GC.
+- **Friendly Name Resolution:** Device names now preferentially come from a one‑time `pycaw.AudioUtilities.GetAllDevices()` map for stability. The raw IPropertyStore path remains available and is hardened with explicit AddRef/Release and GC pausing.
+- **Logging/Diagnostics:**
+  - Centralized debug logging with thread/process annotations; enable via `AUDIOCTL_DEBUG=1`.
+  - Added targeted debug breadcrumbs around sensitive COM operations (e.g., friendly name reads, default routing).
+- **Build Flow:** Included `audioctl.spec` for PyInstaller builds; retains `version.txt` metadata and `audio.ico`.
+
+### Bug Fixes
+- **COM Lifetime Edges:** Additional guards and explicit AddRef/Release around raw IPropertyStore pointers; fewer opportunities for finalizer‑time crashes.
+- **Default Routing Robustness:** Using a single PolicyConfig instance reduces intermittent failure modes and refcount churn during repeated default changes.
+
+### Behavioral Changes
+- **No Command‑Line Changes:** CLI surface remains the same (list, set-default, set-volume, listen, enhancements, diag-sysfx, diag-mmdevices, discover-enhancements, wait).
+- **Diagnostics Opt‑In:** Verbose debug logs are opt‑in via `AUDIOCTL_DEBUG=1` and are written to `audioctl_gui.log` next to the executable (temp fallback if not writable).
 
 ---
 
@@ -271,4 +312,8 @@
 - **Basic Enumeration:** Listed playback (Render) and recording (Capture) devices using `IMMDeviceEnumerator` with `DEVICE_STATE_ACTIVE` only.
 - **“Listen” Toggle (Admin):** Initial registry-based enable/disable of “Listen to this device” for capture endpoints (admin required).
 - **Admin Check:** `is_admin` helper added to warn when elevation is required.
+
+
+
+
 
