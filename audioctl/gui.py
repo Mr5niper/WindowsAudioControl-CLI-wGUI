@@ -42,7 +42,7 @@ except Exception:
 class AudioGUI:
     def __init__(self, root):
         self.root = root
-        self.root.title("Audio Control v1.4.1.0 12-22-2025")
+        self.root.title("Audio Control v1.4.3.0 12-23-2025")
 
         # Style and theme
         style = ttk.Style(self.root)
@@ -863,3 +863,4 @@ def launch_gui():
         pass
 
     return 0
+
