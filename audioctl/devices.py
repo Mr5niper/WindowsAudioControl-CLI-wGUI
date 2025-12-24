@@ -1261,7 +1261,7 @@ def set_default_endpoint(device_id, role):
     if not _is_device_active(device_id):
         _dbg("SetDefaultEndpoint abort: device not active")
         raise RuntimeError("Target device is not active; refusing to set default.")
-    policy = _get_policy_config_fx_singleton()
+    policy = _get_policy_config()
     
     def _call(rname, rval):
         try:
@@ -1723,4 +1723,5 @@ def _verify_effect_only(device_id, flow, expected_enabled, timeout=2.5, interval
             ok_streak = 0
         _time.sleep(interval)
     return False, None, last_state
+
 
