@@ -33,14 +33,15 @@
 ---
 
 ## Selectors (used by most commands)
-
 - `--id "{endpoint-id}"` (exact endpoint ID)
 - `--name "substring"` (case-insensitive substring match)
 - `--regex` (treat `--name` as a regex)
-- `--flow Render|Capture` (optional filter for playback/recording)
-- `--index N` (0-based index to disambiguate when multiple matches)
+- `--flow Render|Capture` (optional filter for playback/recording device)
+- `--index N` (Number-based index to disambiguate between multiple matches)
+- `--playback-name "substring"` (Render-only name selector; for set-default)
+- `--recording-name "substring"` (Capture-only name selector; for set-default)
 
-When using the --name option, commands accept partial matches against device names or descriptions. If the specified text uniquely identifies exactly one playback or recording device, that device will be targeted and an index value is not required.
+When using the `--name`, `--playback-name`, or `--recording-name` options, commands accept partial matches against device names or descriptions. If the specified text uniquely identifies exactly one playback or recording device, that device will be targeted and an index value is not required.
 
 ---
 
