@@ -69,9 +69,9 @@ When using the `--name`, `--playback-name`, or `--recording-name` options, comma
 Use `audioctl set-default` to choose the system’s default playback (Render) and/or recording (Capture) endpoints. Targets must be active (`DEVICE_STATE_ACTIVE`). On some systems, you may need an elevated console (Run as Administrator).
 
 Roles you can set:
-- console
-- multimedia
-- communications
+- console — the default device most apps use.
+- multimedia — often resolved to the same device as console on most systems.
+- communications — used by calling/telephony apps.
 - all (applies to all three roles)
 
 Defaults if a role is omitted:
@@ -80,6 +80,10 @@ Defaults if a role is omitted:
 
 About Windows roles (console vs multimedia):
 - On most Windows systems, “console” and “multimedia” effectively point to the same default device. If you set either one, you will typically see both flags update in the next `audioctl list` output. The tool still lets you set them independently—or set `all`—for completeness and for environments where they’re distinct.
+
+Most users want a device to be the default for everything. Use:
+- `--playback-role all` for playback (Render)
+- `--recording-role all` for recording (Capture)
 
 Get IDs first (optional but recommended):
 ```bash
@@ -101,92 +105,53 @@ Notes about JSON output:
 
 ---
 
-## Examples
+Examples (only “all”)
 
-### 1) Set playback default by exact ID (multimedia role)
-```bash
-audioctl set-default --playback-id "{RENDER-ENDPOINT-ID}" --playback-role multimedia
-```
-Sample output (single line):
-```json
-{"set":[{"flow":"Render","role":"multimedia","id":"{RENDER-ENDPOINT-ID}","name":"Speakers (Realtek(R) Audio)"}]}
-```
-
-### 2) Set playback default by name (all roles); disambiguate by index
+Playback (Render) — by name
 ```bash
 audioctl set-default --playback-name "Speakers" --playback-role all --index 0
+```
+Sample output:
+```json
+{"set":[{"flow":"Render","role":"all","id":"{RENDER-ENDPOINT-ID}","name":"Speakers (Realtek(R) Audio)"}]}
+```
+
+Playback (Render) — by ID
+```bash
+audioctl set-default --playback-id "{RENDER-ENDPOINT-ID}" --playback-role all
 ```
 Sample output:
 ```json
 {"set":[{"flow":"Render","role":"all","id":"{RENDER-ENDPOINT-ID}","name":"Speakers (USB DAC)"}]}
 ```
 
-### 3) Set recording default by name (default role = communications)
+Recording (Capture) — by name
 ```bash
-audioctl set-default --recording-name "USB Microphone"
+audioctl set-default --recording-name "USB Microphone" --recording-role all --index 0
 ```
 Sample output:
 ```json
-{"set":[{"flow":"Capture","role":"communications","id":"{CAPTURE-ENDPOINT-ID}","name":"USB Microphone"}]}
+{"set":[{"flow":"Capture","role":"all","id":"{CAPTURE-ENDPOINT-ID}","name":"USB Microphone"}]}
 ```
 
-### 4) Set recording default by exact ID (communications role)
+Recording (Capture) — by ID
 ```bash
-audioctl set-default --recording-id "{CAPTURE-ENDPOINT-ID}" --recording-role communications
+audioctl set-default --recording-id "{CAPTURE-ENDPOINT-ID}" --recording-role all
 ```
 Sample output:
 ```json
-{"set":[{"flow":"Capture","role":"communications","id":"{CAPTURE-ENDPOINT-ID}","name":"Headset Mic"}]}
+{"set":[{"flow":"Capture","role":"all","id":"{CAPTURE-ENDPOINT-ID}","name":"Headset Mic"}]}
 ```
 
-### 5) Set both playback and recording in one command
-Playback to all roles; recording to communications:
+Playback + Recording — both “all” in one command
 ```bash
 audioctl set-default \
-  --playback-id "{RENDER-ENDPOINT-ID}" --playback-role all \
-  --recording-id "{CAPTURE-ENDPOINT-ID}" --recording-role communications
+  --playback-id "{RENDER-ENDPOINT-ID}"   --playback-role all \
+  --recording-id "{CAPTURE-ENDPOINT-ID}" --recording-role all
 ```
 Sample output:
 ```json
-{"set":[{"flow":"Render","role":"all","id":"{RENDER-ENDPOINT-ID}","name":"Speakers (Realtek(R) Audio)"},{"flow":"Capture","role":"communications","id":"{CAPTURE-ENDPOINT-ID}","name":"USB Microphone"}]}
-```
-
-### 6) Use regex name matching (with index if needed)
-Targets the first Render device matching the regex; `--index` is the GUI‑order index among matches for that flow.
-```bash
-audioctl set-default --playback-name "Speakers.*Realtek" --regex --playback-role multimedia --index 0
-```
-Sample output:
-```json
-{"set":[{"flow":"Render","role":"multimedia","id":"{RENDER-ENDPOINT-ID}","name":"Speakers (Realtek(R) Audio)"}]}
-```
-
-### 7) Set a specific playback role (console) by name
-(Useful when you want to explicitly set console, even though many systems treat console and multimedia the same.)
-```bash
-audioctl set-default --playback-name "Headphones" --playback-role console
-```
-Sample output:
-```json
-{"set":[{"flow":"Render","role":"console","id":"{RENDER-ENDPOINT-ID}","name":"Headphones"}]}
-```
-
-### 8) Set the playback communications role (e.g., a softphone/headset)
-```bash
-audioctl set-default --playback-name "USB Headset" --playback-role communications
-```
-Sample output:
-```json
-{"set":[{"flow":"Render","role":"communications","id":"{RENDER-ENDPOINT-ID}","name":"USB Headset"}]}
-```
-
-### 9) JSON result for automation (single line)
-```bash
-audioctl set-default --playback-id "{RENDER-ENDPOINT-ID}" --playback-role all
-```
-Output:
-```json
-{"set":[{"flow":"Render","role":"all","id":"{RENDER-ENDPOINT-ID}","name":"Speakers (Realtek(R) Audio)"}]}
+{"set":[{"flow":"Render","role":"all","id":"{RENDER-ENDPOINT-ID}","name":"Speakers (Realtek(R) Audio)"},{"flow":"Capture","role":"all","id":"{CAPTURE-ENDPOINT-ID}","name":"USB Microphone"}]}
 ```
 
 Additional notes:
