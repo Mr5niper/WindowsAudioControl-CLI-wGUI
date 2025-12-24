@@ -105,7 +105,7 @@ Notes about JSON output:
 
 ---
 
-Examples (only using “all”)
+## Examples (only using “all”)
 
 Playback (Render) — by name
 ```bash
