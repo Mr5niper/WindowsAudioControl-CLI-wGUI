@@ -1,18 +1,22 @@
 # Windows Audio Control CLI + GUI
 ## audioctl.exe (pycaw-based)
-List devices
+[List devices](#list-devices)
 <BR>
-set default endpoints
+[Set default endpoints](#set-default-devices-cli)
 <BR>
-[adjust volume/mute](#set-volume-or-muteunmute-cli)
+[Adjust volume / mute](#set-volume-or-muteunmute-cli)
 <BR>
-toggle “Listen to this device”
+[Listen to this device](#listen-to-this-device-capture-only)
 <BR>
-toggle (Enable/Disable) “Audio Enhancements” for devices that support vendor toggles.
+[Audio enhancements](#audio-enhancements-sysfx--vendor-toggles)
+<BR>
+[Wait for a device](#wait-for-a-device-to-appear)
+<BR>
+
 <BR>
 
 
-## Quick Start
+# Quick Start
 
 - Help:
   ```bash
@@ -33,6 +37,8 @@ toggle (Enable/Disable) “Audio Enhancements” for devices that support vendor
 - `--regex` (treat `--name` as a regex)
 - `--flow Render|Capture` (optional filter for playback/recording)
 - `--index N` (0-based index to disambiguate when multiple matches)
+
+When using the --name option, commands accept partial matches against device names or descriptions. If the specified text uniquely identifies exactly one playback or recording device, that device will be targeted and an index value is not required.
 
 ---
 
@@ -297,7 +303,7 @@ Tips:
 
 ---
 
-## “Listen to this device” (Capture Only)
+# “Listen to this device” (Capture Only)
 
 - Enable “Listen”:
   ```bash
@@ -332,7 +338,7 @@ Tips:
 
 ---
 
-## Audio Enhancements (SysFX) – Vendor Toggles
+# Audio Enhancements (SysFX) – Vendor Toggles
 
 For devices where a vendor toggle has been configured or learned, you can control “Audio Enhancements” at the endpoint level.
 
@@ -381,9 +387,7 @@ This will:
 3. Diff MMDevices registry and write an entry into `vendor_toggles.ini` (next to the EXE or in the working dir).
 4. From then on, `enhancements --enable/--disable` for that endpoint will write that vendor DWORD.
 
----
-
-## Diagnose Enhancements / SysFx
+### Diagnose Enhancements / SysFx
 
 - Dump live Enhancements status and vendor toggle status for a device:
   ```bash
@@ -396,9 +400,7 @@ Sample JSON fields:
 - `enhancementsEnabled_live_com` – PolicyConfig COM view.
 - `vendor_toggle_status` – First matched vendor entry and its current state.
 
----
-
-## Discover Enhancements Behavior (for debugging / advanced)
+### Discover Enhancements Behavior (for debugging / advanced)
 
 This is a deeper discovery command for diagnosing how a driver maps Enhancements to registry / COM.
 
@@ -424,7 +426,7 @@ Optional:
 
 ---
 
-## Wait for a Device to Appear
+# Wait for a Device to Appear
 
 - Wait up to 60 seconds for a capture device by name:
   ```bash
