@@ -1,6 +1,39 @@
 # AUDIOCTL.PY CHANGELOG
 
-## v1.2.1 - [Current]
+## v1.3.0.17 - [Current]
+### New Features
+- **Audio Enhancements (SysFX) Control (Vendor‑First):**
+  - Adds a learnable, vendor‑specific method to enable/disable Enhancements using driver DWORD toggles under MMDevices FxProperties.
+  - Introduces an append‑only `vendor_toggles.ini` database (next to the EXE by default). Entries are discovered and written by the tool; HKLM writes require Administrator.
+- **CLI Commands:**
+  - `enhancements`: Enable/disable Enhancements for a device using vendor toggles; supports `--learn` for guided learning, `--prefer-hklm`, and `--vendor-ini`.
+  - `diag-sysfx`: Read‑only snapshot of Enhancements from Windows (PropertyStore/PolicyConfig) and the first applicable vendor entry.
+  - `diag-mmdevices`: Dumps all MMDevices values (HKCU/HKLM; FxProperties/Properties) for an endpoint (debugging/discovery).
+  - `discover-enhancements`: Interactive A/B capture (Enabled vs Disabled) that writes TXT/JSON reports; optionally appends a suggested INI snippet.
+- **GUI Additions:**
+  - Context menu entries for “Enable/Disable Enhancements” (vendor‑first; disabled if unsupported).
+  - “Learn Enhancements” guided assistant to capture snapshots and append a vendor entry to `vendor_toggles.ini`.
+- **Diagnostics Framework for SysFX:**
+  - Snapshots include COM (PolicyConfig) reads for Disable_SysFx from both FX and normal stores, live PropertyStore reads, and a full MMDevices registry dump.
+  - A registry diff utility highlights DWORD flips and Disable_SysFx hits to help identify vendor toggles.
+
+### Improvements
+- **PROPVARIANT Handling:** Extended parsing and construction support for boolean‑like values stored as VT_BOOL, VT_UI2, or VT_UI4 to robustly read/write Disable_SysFx.
+- **comtypes Shim:** Ensures availability of `VT_UI2` and `VT_UI4` (in addition to `PROPVARIANT`, `VT_LPWSTR`, `VT_BOOL`, `VARIANT_TRUE/FALSE`) for packaged builds.
+- **Vendor Toggle Verification:** After writing a vendor DWORD, the tool verifies expected state via the same DWORD (with short polling) for reliable confirmation.
+- **Configurability:** Optional `--vendor-ini` path and `--prefer-hklm` flag; default INI path is co‑located with the executable.
+- **GUI UX:** Enhancements menu item reflects the most likely next action (Enable/Disable) when a vendor toggle is available; remains disabled when unsupported; Learn is always available.
+
+### Bug Fixes
+- **Stability Around Endpoint Operations:** Hardened error handling around device activation and interface acquisition to avoid spurious failures during mute/volume operations and menu building.
+- **PropertyStore Safety:** Additional guards around `PROPVARIANT` reading/clearing to prevent edge‑case parsing errors on some systems.
+
+### Behavioral Changes
+- **Vendor‑Only Enhancements Toggling:** At runtime, Enhancements are changed only through vendor toggles. If a device has no applicable vendor entry, the command fails with guidance to use `--learn` or the GUI “Learn Enhancements.”
+- **File Writes Are Append‑Only:** `vendor_toggles.ini` is appended to (never rewritten) and persists across runs. HKLM writes require Administrator.
+- **JSON Outputs:** New result shapes include `{"enhancementsSet": {...}}`, `{"vendorLearned": {...}}`, and diagnostics bundles for discovery/diag commands.
+
+## v1.2.1
 
 ### Consistency, Safety, and CLI/GUI Parity
 - **CLI/GUI Index Parity:** The CLI device list is now sorted by name within each flow (Render/Capture) exactly like the GUI, and shows the same per‑flow indices. All commands that accept `--name` together with `--index` interpret the index in this same GUI order.
@@ -222,3 +255,4 @@
 - **Basic Enumeration:** Listed playback (Render) and recording (Capture) devices using `IMMDeviceEnumerator` with `DEVICE_STATE_ACTIVE` only.
 - **“Listen” Toggle (Admin):** Initial registry-based enable/disable of “Listen to this device” for capture endpoints (admin required).
 - **Admin Check:** `is_admin` helper added to warn when elevation is required.
+
