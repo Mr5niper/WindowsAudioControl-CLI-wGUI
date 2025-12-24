@@ -566,13 +566,6 @@ def main(argv=None):
     except Exception:
         pass
 
-    # Use the stable PolicyConfig (lazy singleton) for SetDefault and SysFX helpers
-    try:
-        from . import devices as _dev
-        _dev._get_policy_config = _dev._get_policy_config_fx_singleton  # note: no parentheses
-    except Exception:
-        pass
-
     parser = build_parser()
     args = parser.parse_args(argv)
 
@@ -630,3 +623,4 @@ def main(argv=None):
             pass
 
     return rc
+
