@@ -107,7 +107,7 @@ Notes about JSON output:
 
 ## Examples (only using “all”)
 
-Playback (Render) — by name
+### 1) Playback (Render) — by name
 ```bash
 audioctl set-default --playback-name "Speakers" --playback-role all --index 0
 ```
@@ -116,7 +116,7 @@ Sample output:
 {"set":[{"flow":"Render","role":"all","id":"{RENDER-ENDPOINT-ID}","name":"Speakers (Realtek(R) Audio)"}]}
 ```
 
-Playback (Render) — by ID
+### 2) Playback (Render) — by ID
 ```bash
 audioctl set-default --playback-id "{RENDER-ENDPOINT-ID}" --playback-role all
 ```
@@ -125,7 +125,7 @@ Sample output:
 {"set":[{"flow":"Render","role":"all","id":"{RENDER-ENDPOINT-ID}","name":"Speakers (USB DAC)"}]}
 ```
 
-Recording (Capture) — by name
+### 3) Recording (Capture) — by name
 ```bash
 audioctl set-default --recording-name "USB Microphone" --recording-role all --index 0
 ```
@@ -134,7 +134,7 @@ Sample output:
 {"set":[{"flow":"Capture","role":"all","id":"{CAPTURE-ENDPOINT-ID}","name":"USB Microphone"}]}
 ```
 
-Recording (Capture) — by ID
+### 4) Recording (Capture) — by ID
 ```bash
 audioctl set-default --recording-id "{CAPTURE-ENDPOINT-ID}" --recording-role all
 ```
@@ -143,7 +143,7 @@ Sample output:
 {"set":[{"flow":"Capture","role":"all","id":"{CAPTURE-ENDPOINT-ID}","name":"Headset Mic"}]}
 ```
 
-Playback + Recording — both “all” in one command
+### 5) Playback + Recording — both “all” in one command
 ```bash
 audioctl set-default \
   --playback-id "{RENDER-ENDPOINT-ID}"   --playback-role all \
