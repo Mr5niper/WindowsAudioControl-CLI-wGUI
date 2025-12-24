@@ -6,7 +6,7 @@
 <BR>
 [Adjust volume / mute](#set-volume-or-muteunmute-cli)
 <BR>
-[Listen to this device](#listen-to-this-device-capture-only)
+[Listen to this device](#listen-to-this-device-capture-only-cli)
 <BR>
 [Audio enhancements](#audio-enhancements-sysfx--vendor-toggles)
 <BR>
@@ -303,38 +303,110 @@ Tips:
 
 ---
 
-# “Listen to this device” (Capture Only)
+# “Listen to this device” (Capture Only, CLI)
 
-- Enable “Listen”:
-  ```bash
-  audioctl.exe listen --name "Microphone" --enable
+Use `audioctl listen` to enable or disable “Listen to this device” on a capture (recording) endpoint. The target must be active (`DEVICE_STATE_ACTIVE`). This command only operates on Capture devices; Render devices are not eligible.
+
+You must specify exactly one of:
+- `--enable`
+- `--disable`
+
+Optional playback routing:
+- `--playback-target-id "{RENDER-ENDPOINT-ID}"` routes the monitored audio to a specific playback (Render) endpoint.
+- `--playback-target-id ""` routes to the Windows “Default Playback Device.”
+- If `--playback-target-id` is omitted:
+  - The current routing target is preserved.
+  - When enabling and no target exists, the tool sets it to `""` (Default Playback Device).
+
+Command template:
+```bash
+audioctl listen
+  (--id <CAPTURE-ENDPOINT-ID> | --name <NAME>)
+  (--enable | --disable)
+  [--playback-target-id <RenderEndpointID-or-empty>]
+  [--index <N>] [--regex]
+```
+
+Disambiguation behavior:
+- If name selection matches more than one active capture device and you don’t pass `--index`, the command prints the matching candidates in GUI order (with indices) and exits with:
   ```
-
-- Disable “Listen”:
-  ```bash
-  audioctl.exe listen --name "Microphone" --disable
+  ERROR: multiple matches; specify --index
   ```
+  Rerun with `--index N` (0‑based, GUI‑order for the Capture flow). Use `audioctl list` (or `--json`) to see the same order.
 
-- Enable “Listen” to **Default Playback Device**:
-  ```bash
-  audioctl.exe listen --name "Microphone" --enable --playback-target-id ""
-  ```
+Notes about JSON output:
+- Success prints compact, single‑line JSON.
+- When a retry/verification path is used, the JSON may include a `verifiedBy` field (`"com"` or `"registry"`).
 
-- Enable and route to a specific playback endpoint:
-  ```bash
-  audioctl.exe listen --name "Microphone" --enable --playback-target-id "{render-endpoint-id}"
-  ```
+---
 
-- Disable/enable “Listen” by ID:
-  ```bash
-  audioctl.exe listen --id "{capture-endpoint-id}" --disable
-  ```
+## Examples
 
-- Notes:
-  - Use `audioctl.exe list --json` to find endpoint IDs.
-  - When multiple “Microphone” matches exist, add `--index N`.
-  - When `--playback-target-id` is omitted, the current target is preserved; when enabling and no target exists, `""` (Default Playback Device) is used.
-  - The tool verifies the change via COM and (if needed) the registry; JSON output may include `verifiedBy`.
+### 1) Enable Listen for a microphone by name (preserve current playback target)
+```bash
+audioctl listen --name "Microphone" --enable
+```
+Sample output:
+```json
+{"listenSet":{"id":"{CAPTURE-ENDPOINT-ID}","name":"Microphone","enabled":true}}
+```
+
+### 2) Enable Listen and route to the Default Playback Device
+Explicitly set the routing to the default output by passing an empty string.
+```bash
+audioctl listen --name "Microphone" --enable --playback-target-id ""
+```
+Sample output:
+```json
+{"listenSet":{"id":"{CAPTURE-ENDPOINT-ID}","name":"Microphone","enabled":true}}
+```
+
+### 3) Enable Listen and route to a specific playback endpoint by ID
+Find the Render endpoint ID with `audioctl list --json` (flow="Render"), then:
+```bash
+audioctl listen --name "Microphone" --enable --playback-target-id "{RENDER-ENDPOINT-ID}"
+``>
+Sample output:
+```json
+{"listenSet":{"id":"{CAPTURE-ENDPOINT-ID}","name":"Microphone","enabled":true}}
+```
+
+### 4) Disable Listen by exact ID
+```bash
+audioctl listen --id "{CAPTURE-ENDPOINT-ID}" --disable
+```
+Sample output:
+```json
+{"listenSet":{"id":"{CAPTURE-ENDPOINT-ID}","name":"USB Microphone","enabled":false}}
+```
+
+### 5) Use regex name matching with index disambiguation (Capture)
+If multiple capture devices match “Mic”, choose one with `--index`:
+```bash
+audioctl listen --name "Mic" --regex --enable --index 0
+```
+Sample output:
+```json
+{"listenSet":{"id":"{CAPTURE-ENDPOINT-ID}","name":"Studio Mic","enabled":true}}
+```
+
+### 6) Example with verification source included
+When the initial COM write needs verification, you may see:
+```json
+{"listenSet":{"id":"{CAPTURE-ENDPOINT-ID}","name":"Microphone","enabled":true,"verifiedBy":"com"}}
+```
+or:
+```json
+{"listenSet":{"id":"{CAPTURE-ENDPOINT-ID}","name":"Microphone","enabled":true,"verifiedBy":"registry"}}
+```
+
+---
+
+Tips:
+- This command only targets Capture devices. If you try a Render device, it won’t match.
+- Use `audioctl list --json` to get both Capture (for `--id`) and Render endpoints (for `--playback-target-id`).
+- If you see “device not found (active only)”, ensure the microphone is connected/enabled and visible in `audioctl list`.
+- If the name matches multiple capture devices, rerun with `--index N` using the indices shown in the disambiguation prompt.
 
 ---
 
