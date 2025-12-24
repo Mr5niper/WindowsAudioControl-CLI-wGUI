@@ -4,7 +4,7 @@ List devices
 <BR>
 set default endpoints
 <BR>
-adjust volume/mute
+[adjust volume/mute](#set-volume-or-muteunmute-cli)
 <BR>
 toggle “Listen to this device”
 <BR>
@@ -36,7 +36,7 @@ toggle (Enable/Disable) “Audio Enhancements” for devices that support vendor
 
 ---
 
-## List Devices
+# List Devices
 
 - Human-readable:
   ```bash
@@ -53,55 +53,247 @@ toggle (Enable/Disable) “Audio Enhancements” for devices that support vendor
   audioctl.exe list --json
   ```
 
-- Tip: grab an ID for later use:
-  ```bash
-  audioctl.exe list --json
+---
+
+# Set Default Devices (CLI)
+
+Use `audioctl set-default` to choose the system’s default playback (Render) and/or recording (Capture) endpoints. Targets must be active (`DEVICE_STATE_ACTIVE`). On some systems, you may need an elevated console (Run as Administrator).
+
+Roles you can set:
+- console
+- multimedia
+- communications
+- all (applies to all three roles)
+
+Defaults if a role is omitted:
+- Playback role defaults to `all`.
+- Recording role defaults to `communications`.
+
+About Windows roles (console vs multimedia):
+- On most Windows systems, “console” and “multimedia” effectively point to the same default device. If you set either one, you will typically see both flags update in the next `audioctl list` output. The tool still lets you set them independently—or set `all`—for completeness and for environments where they’re distinct.
+
+Get IDs first (optional but recommended):
+```bash
+audioctl list --json
+```
+
+Disambiguation when multiple name matches:
+- If your `--playback-name` or `--recording-name` matches more than one active device, the command will stop and print the matching candidates in GUI order with an index for each. Then rerun with `--index N` to choose the one you want.
+- Example of the prompt:
   ```
+  Multiple playback matches:
+    [Render idx 0] Speakers (USB DAC)  id={...}  defaults=-
+    [Render idx 1] Speakers (Realtek(R) Audio)  id={...}  defaults=multimedia,console
+  Use --index to disambiguate.
+  ```
+
+Notes about JSON output:
+- Successful commands print compact, single‑line JSON (no pretty‑printing). For pretty output, pipe to a formatter (e.g., `| jq .`).
 
 ---
 
-## Set Default Device(s)
+## Examples
 
-- Set playback default for **all roles** by name:
-  ```bash
-  audioctl.exe set-default --playback-name "Speakers (Realtek)" --playback-role all
-  ```
+### 1) Set playback default by exact ID (multimedia role)
+```bash
+audioctl set-default --playback-id "{RENDER-ENDPOINT-ID}" --playback-role multimedia
+```
+Sample output (single line):
+```json
+{"set":[{"flow":"Render","role":"multimedia","id":"{RENDER-ENDPOINT-ID}","name":"Speakers (Realtek(R) Audio)"}]}
+```
 
-- Set recording default for **communications** role by name:
-  ```bash
-  audioctl.exe set-default --recording-name "Headset Mic"
-  ```
+### 2) Set playback default by name (all roles); disambiguate by index
+```bash
+audioctl set-default --playback-name "Speakers" --playback-role all --index 0
+```
+Sample output:
+```json
+{"set":[{"flow":"Render","role":"all","id":"{RENDER-ENDPOINT-ID}","name":"Speakers (USB DAC)"}]}
+```
 
-- Target by ID:
-  ```bash
-  audioctl.exe set-default --playback-id "{render-endpoint-id}" --playback-role multimedia
-  ```
+### 3) Set recording default by name (default role = communications)
+```bash
+audioctl set-default --recording-name "USB Microphone"
+```
+Sample output:
+```json
+{"set":[{"flow":"Capture","role":"communications","id":"{CAPTURE-ENDPOINT-ID}","name":"USB Microphone"}]}
+```
 
-- When multiple name matches:
-  ```bash
-  audioctl.exe set-default --playback-name "Speakers" --index 0
-  ```
+### 4) Set recording default by exact ID (communications role)
+```bash
+audioctl set-default --recording-id "{CAPTURE-ENDPOINT-ID}" --recording-role communications
+```
+Sample output:
+```json
+{"set":[{"flow":"Capture","role":"communications","id":"{CAPTURE-ENDPOINT-ID}","name":"Headset Mic"}]}
+```
 
-- Note: setting defaults may require running in an elevated context (Run as Administrator).
+### 5) Set both playback and recording in one command
+Playback to all roles; recording to communications:
+```bash
+audioctl set-default \
+  --playback-id "{RENDER-ENDPOINT-ID}" --playback-role all \
+  --recording-id "{CAPTURE-ENDPOINT-ID}" --recording-role communications
+```
+Sample output:
+```json
+{"set":[{"flow":"Render","role":"all","id":"{RENDER-ENDPOINT-ID}","name":"Speakers (Realtek(R) Audio)"},{"flow":"Capture","role":"communications","id":"{CAPTURE-ENDPOINT-ID}","name":"USB Microphone"}]}
+```
+
+### 6) Use regex name matching (with index if needed)
+Targets the first Render device matching the regex; `--index` is the GUI‑order index among matches for that flow.
+```bash
+audioctl set-default --playback-name "Speakers.*Realtek" --regex --playback-role multimedia --index 0
+```
+Sample output:
+```json
+{"set":[{"flow":"Render","role":"multimedia","id":"{RENDER-ENDPOINT-ID}","name":"Speakers (Realtek(R) Audio)"}]}
+```
+
+### 7) Set a specific playback role (console) by name
+(Useful when you want to explicitly set console, even though many systems treat console and multimedia the same.)
+```bash
+audioctl set-default --playback-name "Headphones" --playback-role console
+```
+Sample output:
+```json
+{"set":[{"flow":"Render","role":"console","id":"{RENDER-ENDPOINT-ID}","name":"Headphones"}]}
+```
+
+### 8) Set the playback communications role (e.g., a softphone/headset)
+```bash
+audioctl set-default --playback-name "USB Headset" --playback-role communications
+```
+Sample output:
+```json
+{"set":[{"flow":"Render","role":"communications","id":"{RENDER-ENDPOINT-ID}","name":"USB Headset"}]}
+```
+
+### 9) JSON result for automation (single line)
+```bash
+audioctl set-default --playback-id "{RENDER-ENDPOINT-ID}" --playback-role all
+```
+Output:
+```json
+{"set":[{"flow":"Render","role":"all","id":"{RENDER-ENDPOINT-ID}","name":"Speakers (Realtek(R) Audio)"}]}
+```
+
+Additional notes:
+- If list output shows both console and multimedia toggled after setting only one, that is expected on most Windows builds—they commonly map to the same endpoint.
+- “device not found (active only)”: verify the device is connected/enabled and visible in `audioctl list`.
+- If multiple name matches occur, rerun with `--index N` using the indices printed in the disambiguation prompt.
 
 ---
 
-## Set Volume or Mute/Unmute
+# Set Volume or Mute/Unmute (CLI)
 
-- Set volume to 30% for a playback device:
-  ```bash
-  audioctl.exe set-volume --name "Speakers" --flow Render --level 30
-  ```
+Use `audioctl set-volume` to change an endpoint’s master volume (0–100%) or toggle its mute state. Targets must be active (`DEVICE_STATE_ACTIVE`). On name selection, prefer adding `--flow` to disambiguate between Render (playback) and Capture (recording). If multiple matches remain, add `--index N` (0‑based, GUI‑order within the flow).
 
-- Mute a capture device by ID:
-  ```bash
-  audioctl.exe set-volume --id "{capture-endpoint-id}" --mute
-  ```
+Rules:
+- You must specify exactly one of: `--level`, `--mute`, or `--unmute`.
+- `--level` is an integer 0–100 (values outside this range are clamped by the tool).
+- Either `--id` or `--name` is required for selection (with optional `--regex` for pattern matching).
 
-- Unmute by name (add `--index` when multiple matches):
-  ```bash
-  audioctl.exe set-volume --name "USB Mic" --flow Capture --unmute
+Command template:
+```bash
+audioctl set-volume
+  (--id <ID> | --name <NAME>) [--flow <Render|Capture>]
+  (--level <0..100> | --mute | --unmute)
+  [--index <N>] [--regex]
+```
+
+Disambiguation behavior:
+- If name selection matches more than one active device and you don’t pass `--index`, the tool returns:
   ```
+  ERROR: multiple matches; specify --index
+  ```
+  Rerun the command with `--flow` and/or `--index N`. Use `audioctl list` (or `--json`) to see devices in the same GUI order.
+
+Notes about JSON output:
+- Successful commands print compact, single‑line JSON. Pipe to a formatter (e.g., `| jq .`) if you want pretty output.
+
+---
+
+## Examples
+
+### 1) Set playback volume by name (Render, 30%)
+```bash
+audioctl set-volume --name "Speakers" --flow Render --level 30
+```
+Sample output:
+```json
+{"volumeSet":{"id":"{RENDER-ENDPOINT-ID}","name":"Speakers (Realtek(R) Audio)","level":30}}
+```
+
+### 2) Set recording volume by ID (Capture, 70%)
+```bash
+audioctl set-volume --id "{CAPTURE-ENDPOINT-ID}" --level 70
+```
+Sample output:
+```json
+{"volumeSet":{"id":"{CAPTURE-ENDPOINT-ID}","name":"USB Microphone","level":70}}
+```
+
+### 3) Mute a playback device by name (Render) with index disambiguation
+If multiple “Speakers” exist, specify which one using `--index` (0‑based, GUI‑order for Render).
+```bash
+audioctl set-volume --name "Speakers" --flow Render --mute --index 0
+```
+Sample output:
+```json
+{"muteSet":{"id":"{RENDER-ENDPOINT-ID}","name":"Speakers (USB DAC)","muted":true}}
+```
+
+### 4) Unmute a recording device by ID (Capture)
+```bash
+audioctl set-volume --id "{CAPTURE-ENDPOINT-ID}" --unmute
+```
+Sample output:
+```json
+{"muteSet":{"id":"{CAPTURE-ENDPOINT-ID}","name":"USB Microphone","muted":false}}
+```
+
+### 5) Use regex name matching (Render)
+```bash
+audioctl set-volume --name "^Speakers .* Realtek\\(R\\) Audio$" --regex --flow Render --level 15
+```
+Sample output:
+```json
+{"volumeSet":{"id":"{RENDER-ENDPOINT-ID}","name":"Speakers (Realtek(R) Audio)","level":15}}
+```
+
+### 6) Name match without `--flow` and multiple results
+If both Render and Capture have a device matching “USB”, you’ll see:
+```
+ERROR: multiple matches; specify --index
+```
+Disambiguate by flow and/or index:
+```bash
+audioctl set-volume --name "USB" --flow Capture --unmute --index 0
+```
+Sample output:
+```json
+{"muteSet":{"id":"{CAPTURE-ENDPOINT-ID}","name":"USB Microphone","muted":false}}
+```
+
+### 7) Error safeguard: `--level` cannot be combined with `--mute/--unmute`
+Invalid example (will return an error):
+```bash
+audioctl set-volume --name "Speakers" --flow Render --level 20 --mute
+```
+Error:
+```
+ERROR: Cannot specify both --level and --mute/--unmute
+```
+
+---
+
+Tips:
+- Prefer `--id` for exact targeting (no disambiguation needed).
+- If you get “device not found (active only)”, verify the endpoint is connected/enabled and visible in `audioctl list`.
+- The command controls the endpoint’s master scalar level and mute state (not per‑app volumes).
 
 ---
 
