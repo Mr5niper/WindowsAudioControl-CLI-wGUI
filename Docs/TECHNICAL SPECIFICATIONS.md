@@ -283,7 +283,7 @@ Quality/stability:
 ## 8. Build (PyInstaller)
 Use the new build command (PowerShell):
 ```powershell
-pyinstaller -F --noupx --clean --onefile --console --name audioctl --collect-all pycaw --hidden-import comtypes.automation --icon audio.ico --add-data "audio.ico;." --version-file version.txt .\audioctl.py
+pyinstaller -F --noupx --clean --console --name audioctl --collect-all pycaw --collect-all comtypes --hidden-import comtypes.automation --hidden-import comtypes._post_coinit --hidden-import comtypes._post_coinit.unknwn --hidden-import comtypes._post_coinit.misc --icon audio.ico --add-data "audio.ico;." --version-file version.txt .\audioctl.py
 ```
 Notes:
 - Ensure `audio.ico` and `version.txt` are present.
