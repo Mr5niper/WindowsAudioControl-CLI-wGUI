@@ -21,6 +21,10 @@ from .logging_setup import _log, _log_exc, _dbg
 # Removed: from .vendor_db import ...
 import comtypes.automation as automation
 import copy
+
+# Global cache for PropertyStore interface definitions to avoid GC-related COM crashes
+_PROPERTY_STORE_INTERFACES_CACHE = None
+
 def _short_settle(sec=0.15):
     try:
         time.sleep(float(sec))
@@ -59,70 +63,21 @@ def set_listen_to_device_ps(capture_device_id, enable, render_device_id=None):
     """
     import sys
     
-    try:
-        HRESULT_T = wintypes.HRESULT
-    except Exception:
-        HRESULT_T = ctypes.c_long
-    CALL = ctypes.WINFUNCTYPE if ctypes.sizeof(ctypes.c_void_p) == 4 else ctypes.CFUNCTYPE
+    # Get cached interface definitions
+    interfaces = _get_property_store_interfaces()
+    PROPVARIANT = interfaces["PROPVARIANT"]
+    PROPERTYKEY = interfaces["PROPERTYKEY"]
+    IPropertyStoreRaw = interfaces["IPropertyStoreRaw"]
+    PIPS = interfaces["PIPS"]
+    VT_BOOL = interfaces["VT_BOOL"]
+    VT_LPWSTR = interfaces["VT_LPWSTR"]
+    HRESULT_T = interfaces["HRESULT_T"]
+    VARIANT_TRUE = interfaces["VARIANT_TRUE"]
+    VARIANT_FALSE = interfaces["VARIANT_FALSE"]
+    
     def _hrx(hr): return f"0x{ctypes.c_uint(hr).value:08X}"
     def _raw_ptr(p): return ctypes.cast(p, ctypes.c_void_p).value
     
-    if hasattr(automation, "PROPVARIANT"):
-        PROPVARIANT = automation.PROPVARIANT
-    elif hasattr(automation, "tagPROPVARIANT"):
-        PROPVARIANT = automation.tagPROPVARIANT
-    else:
-        class _PVU(ctypes.Union):
-            _fields_ = [
-                ("pwszVal", ctypes.c_wchar_p),
-                ("boolVal", ctypes.c_short),
-                ("punkVal", ctypes.c_void_p),
-                ("ulVal", ctypes.c_ulong),
-                ("uhVal", ctypes.c_ulonglong),
-            ]
-        class PROPVARIANT(ctypes.Structure):
-            _anonymous_ = ("data",)
-            _fields_ = [
-                ("vt", ctypes.c_ushort),
-                ("wReserved1", ctypes.c_ushort),
-                ("wReserved2", ctypes.c_ushort),
-                ("wReserved3", ctypes.c_ushort),
-                ("data", _PVU),
-            ]
-    VT_BOOL = getattr(automation, "VT_BOOL", 11)
-    VT_LPWSTR = getattr(automation, "VT_LPWSTR", 31)
-    VARIANT_TRUE = -1
-    VARIANT_FALSE = 0
-    class PROPERTYKEY(ctypes.Structure):
-        _fields_ = (("fmtid", GUID), ("pid", wintypes.DWORD))
-    class IPropertyStoreRaw(ctypes.Structure):
-        pass
-    PIPS = POINTER(IPropertyStoreRaw)
-    _POGUID_ = POINTER(GUID)
-    _PPVoid_ = POINTER(ctypes.c_void_p)
-    _PDWORD_ = POINTER(wintypes.DWORD)
-    _PPROPERTYKEY_ = POINTER(PROPERTYKEY)
-    _PPROPVARIANT_ = POINTER(PROPVARIANT)
-    QueryInterfaceProto = CALL(HRESULT_T, PIPS, _POGUID_, _PPVoid_)
-    AddRefProto         = CALL(ctypes.c_ulong, PIPS)
-    ReleaseProto        = CALL(ctypes.c_ulong, PIPS)
-    GetCountProto       = CALL(HRESULT_T, PIPS, _PDWORD_)
-    GetAtProto          = CALL(HRESULT_T, PIPS, wintypes.DWORD, _PPROPERTYKEY_)
-    GetValueProto       = CALL(HRESULT_T, PIPS, _PPROPERTYKEY_, _PPROPVARIANT_)
-    SetValueProto       = CALL(HRESULT_T, PIPS, _PPROPERTYKEY_, _PPROPVARIANT_)
-    CommitProto         = CALL(HRESULT_T, PIPS)
-    class IPropertyStoreVTBL(ctypes.Structure):
-        _fields_ = [
-            ("QueryInterface", QueryInterfaceProto),
-            ("AddRef", AddRefProto),
-            ("Release", ReleaseProto),
-            ("GetCount", GetCountProto),
-            ("GetAt", GetAtProto),
-            ("GetValue", GetValueProto),
-            ("SetValue", SetValueProto),
-            ("Commit", CommitProto),
-        ]
-    IPropertyStoreRaw._fields_ = [("lpVtbl", POINTER(IPropertyStoreVTBL))]
     propsys = ctypes.OleDLL("propsys.dll")
     ole32 = ctypes.OleDLL("ole32.dll")
     have_helpers = True
@@ -141,6 +96,7 @@ def set_listen_to_device_ps(capture_device_id, enable, render_device_id=None):
     CoTaskMemAlloc = ole32.CoTaskMemAlloc
     CoTaskMemAlloc.restype = ctypes.c_void_p
     CoTaskMemAlloc.argtypes = (ctypes.c_size_t,)
+    
     def _pv_from_bool_local(value: bool):
         pv = PROPVARIANT()
         if have_helpers:
@@ -154,6 +110,7 @@ def set_listen_to_device_ps(capture_device_id, enable, render_device_id=None):
             except AttributeError:
                 pass
         return pv
+    
     def _pv_from_string_local(s: str):
         pv = PROPVARIANT()
         s_val = s if s is not None else ""
@@ -171,8 +128,10 @@ def set_listen_to_device_ps(capture_device_id, enable, render_device_id=None):
             pv.vt = VT_LPWSTR
             pv.pwszVal = ctypes.cast(ptr, ctypes.c_wchar_p)
         return pv
+    
     PKEY_LISTEN_ENABLE = PROPERTYKEY(GUID("{24dbb0fc-9311-4b3d-9cf0-18ff155639d4}"), 1)
     PKEY_LISTEN_PLAYBACKTHROUGH = PROPERTYKEY(GUID("{24dbb0fc-9311-4b3d-9cf0-18ff155639d4}"), 2)
+    
     def _get_string_prop_local(ps_iface_ptr, pkey_obj):
         pv = PROPVARIANT()
         try:
@@ -200,6 +159,7 @@ def set_listen_to_device_ps(capture_device_id, enable, render_device_id=None):
             return s
         finally:
             PropVariantClear(byref(pv))
+    
     enumerator = None
     pv_enable = None
     pv_target = None
@@ -256,62 +216,14 @@ def _get_listen_to_device_status_ps(device_id):
     """
     import sys
     
-    try:
-        HRESULT_T = wintypes.HRESULT
-    except Exception:
-        HRESULT_T = ctypes.c_long
-    CALL = ctypes.WINFUNCTYPE if ctypes.sizeof(ctypes.c_void_p) == 4 else ctypes.CFUNCTYPE
-    def _raw_ptr(p): return ctypes.cast(p, ctypes.c_void_p).value
-    
-    if hasattr(automation, "PROPVARIANT"):
-        PROPVARIANT = automation.PROPVARIANT
-    elif hasattr(automation, "tagPROPVARIANT"):
-        PROPVARIANT = automation.tagPROPVARIANT
-    else:
-        class _PVU(ctypes.Union):
-            _fields_ = [("pwszVal", ctypes.c_wchar_p), ("boolVal", ctypes.c_short)]
-        class PROPVARIANT(ctypes.Structure):
-            _anonymous_ = ("data",)
-            _fields_ = [
-                ("vt", ctypes.c_ushort),
-                ("wReserved1", ctypes.c_ushort),
-                ("wReserved2", ctypes.c_ushort),
-                ("wReserved3", ctypes.c_ushort),
-                ("data", _PVU),
-            ]
-    VT_BOOL = getattr(automation, "VT_BOOL", 11)
-    VARIANT_FALSE = getattr(automation, "VARIANT_FALSE", 0)
-    
-    class PROPERTYKEY(ctypes.Structure):
-        _fields_ = (("fmtid", GUID), ("pid", wintypes.DWORD))
-    class IPropertyStoreRaw(ctypes.Structure):
-        pass
-    PIPS = POINTER(IPropertyStoreRaw)
-    _POGUID_ = POINTER(GUID)
-    _PPVoid_ = POINTER(ctypes.c_void_p)
-    _PDWORD_ = POINTER(wintypes.DWORD)
-    _PPROPERTYKEY_ = POINTER(PROPERTYKEY)
-    _PPROPVARIANT_ = POINTER(PROPVARIANT)
-    QueryInterfaceProto = CALL(HRESULT_T, PIPS, _POGUID_, _PPVoid_)
-    AddRefProto         = CALL(ctypes.c_ulong, PIPS)
-    ReleaseProto        = CALL(ctypes.c_ulong, PIPS)
-    GetCountProto       = CALL(HRESULT_T, PIPS, _PDWORD_)
-    GetAtProto          = CALL(HRESULT_T, PIPS, wintypes.DWORD, _PPROPERTYKEY_)
-    GetValueProto       = CALL(HRESULT_T, PIPS, _PPROPERTYKEY_, _PPROPVARIANT_)
-    SetValueProto       = CALL(HRESULT_T, PIPS, _PPROPERTYKEY_, _PPROPVARIANT_)
-    CommitProto         = CALL(HRESULT_T, PIPS)
-    class IPropertyStoreVTBL(ctypes.Structure):
-        _fields_ = [
-            ("QueryInterface", QueryInterfaceProto),
-            ("AddRef", AddRefProto),
-            ("Release", ReleaseProto),
-            ("GetCount", GetCountProto),
-            ("GetAt", GetAtProto),
-            ("GetValue", GetValueProto),
-            ("SetValue", SetValueProto),
-            ("Commit", CommitProto),
-        ]
-    IPropertyStoreRaw._fields_ = [("lpVtbl", POINTER(IPropertyStoreVTBL))]
+    # Get cached interface definitions
+    interfaces = _get_property_store_interfaces()
+    PROPVARIANT = interfaces["PROPVARIANT"]
+    PROPERTYKEY = interfaces["PROPERTYKEY"]
+    PIPS = interfaces["PIPS"]
+    VT_BOOL = interfaces["VT_BOOL"]
+    HRESULT_T = interfaces["HRESULT_T"]
+    VARIANT_FALSE = interfaces["VARIANT_FALSE"]
     
     ole32 = ctypes.OleDLL("ole32.dll")
     PropVariantClear = ole32.PropVariantClear
@@ -323,7 +235,7 @@ def _get_listen_to_device_status_ps(device_id):
         enumerator = CoCreateInstance(CLSID_MMDeviceEnumerator, interface=IMMDeviceEnumerator, clsctx=CLSCTX_ALL)
         dev = enumerator.GetDevice(device_id)
         ps_unknown = dev.OpenPropertyStore(STGM_READ)
-        ps_ptr_val = _raw_ptr(ps_unknown)
+        ps_ptr_val = ctypes.cast(ps_unknown, ctypes.c_void_p).value
         if not ps_ptr_val:
             return None
         ps_iface = ctypes.cast(ctypes.c_void_p(ps_ptr_val), PIPS)
@@ -332,8 +244,11 @@ def _get_listen_to_device_status_ps(device_id):
         if hr != 0:
             return False
         
-        if pv.vt == VT_BOOL:
-            return pv.boolVal != VARIANT_FALSE
+        if getattr(pv, "vt", 0) == VT_BOOL:
+            try:
+                return pv.boolVal != VARIANT_FALSE
+            except Exception:
+                return None
         return False
     except Exception as e:
         print(f"WARNING: Failed to read listen status via COM for '{device_id}': {e}", file=sys.stderr)
@@ -498,8 +413,6 @@ def _define_policyconfig_fx_interfaces():
 def _get_policy_config_fx():
     IPolicyConfigFx, CLSID_PolicyConfigClient, PROPERTYKEY, PROPVARIANT = _define_policyconfig_fx_interfaces()
     return CoCreateInstance(CLSID_PolicyConfigClient, interface=IPolicyConfigFx, clsctx=CLSCTX_ALL)
-# Keep one PolicyConfig object alive for the whole process
-_policy_cfg_singleton = None
 def _get_policy_config_fx_singleton():
     """
     Create a fresh PolicyConfig object each time - no singleton caching.
@@ -577,6 +490,100 @@ def _release_singletons_quiet():
     Kept for backward compatibility in case it's called from cleanup code.
     """
     pass
+def _get_property_store_interfaces():
+    """
+    Get or create IPropertyStore interface definitions once and cache them.
+    Avoids redefining classes during each call, which can cause GC crashes.
+    Returns a dict with all the interface components needed.
+    """
+    global _PROPERTY_STORE_INTERFACES_CACHE
+    
+    if _PROPERTY_STORE_INTERFACES_CACHE is not None:
+        return _PROPERTY_STORE_INTERFACES_CACHE
+    
+    try:
+        HRESULT_T = wintypes.HRESULT
+    except Exception:
+        HRESULT_T = ctypes.c_long
+    
+    CALL = ctypes.WINFUNCTYPE if ctypes.sizeof(ctypes.c_void_p) == 4 else ctypes.CFUNCTYPE
+    
+    # PROPVARIANT
+    if hasattr(automation, "PROPVARIANT"):
+        PROPVARIANT = automation.PROPVARIANT
+    elif hasattr(automation, "tagPROPVARIANT"):
+        PROPVARIANT = automation.tagPROPVARIANT
+    else:
+        class _PVU(ctypes.Union):
+            _fields_ = [
+                ("pwszVal", ctypes.c_wchar_p),
+                ("boolVal", ctypes.c_short),
+                ("punkVal", ctypes.c_void_p),
+                ("ulVal", ctypes.c_ulong),
+                ("uhVal", ctypes.c_ulonglong),
+            ]
+        class PROPVARIANT(ctypes.Structure):
+            _anonymous_ = ("data",)
+            _fields_ = [
+                ("vt", ctypes.c_ushort),
+                ("wReserved1", ctypes.c_ushort),
+                ("wReserved2", ctypes.c_ushort),
+                ("wReserved3", ctypes.c_ushort),
+                ("data", _PVU),
+            ]
+    
+    VT_BOOL = getattr(automation, "VT_BOOL", 11)
+    VT_LPWSTR = getattr(automation, "VT_LPWSTR", 31)
+    
+    class PROPERTYKEY(ctypes.Structure):
+        _fields_ = (("fmtid", GUID), ("pid", wintypes.DWORD))
+    
+    class IPropertyStoreRaw(ctypes.Structure):
+        pass
+    
+    PIPS = POINTER(IPropertyStoreRaw)
+    _POGUID_ = POINTER(GUID)
+    _PPVoid_ = POINTER(ctypes.c_void_p)
+    _PDWORD_ = POINTER(wintypes.DWORD)
+    _PPROPERTYKEY_ = POINTER(PROPERTYKEY)
+    _PPROPVARIANT_ = POINTER(PROPVARIANT)
+    
+    QueryInterfaceProto = CALL(HRESULT_T, PIPS, _POGUID_, _PPVoid_)
+    AddRefProto         = CALL(ctypes.c_ulong, PIPS)
+    ReleaseProto        = CALL(ctypes.c_ulong, PIPS)
+    GetCountProto       = CALL(HRESULT_T, PIPS, _PDWORD_)
+    GetAtProto          = CALL(HRESULT_T, PIPS, wintypes.DWORD, _PPROPERTYKEY_)
+    GetValueProto       = CALL(HRESULT_T, PIPS, _PPROPERTYKEY_, _PPROPVARIANT_)
+    SetValueProto       = CALL(HRESULT_T, PIPS, _PPROPERTYKEY_, _PPROPVARIANT_)
+    CommitProto         = CALL(HRESULT_T, PIPS)
+    
+    class IPropertyStoreVTBL(ctypes.Structure):
+        _fields_ = [
+            ("QueryInterface", QueryInterfaceProto),
+            ("AddRef", AddRefProto),
+            ("Release", ReleaseProto),
+            ("GetCount", GetCountProto),
+            ("GetAt", GetAtProto),
+            ("GetValue", GetValueProto),
+            ("SetValue", SetValueProto),
+            ("Commit", CommitProto),
+        ]
+    
+    IPropertyStoreRaw._fields_ = [("lpVtbl", POINTER(IPropertyStoreVTBL))]
+    
+    _PROPERTY_STORE_INTERFACES_CACHE = {
+        "PROPVARIANT": PROPVARIANT,
+        "PROPERTYKEY": PROPERTYKEY,
+        "IPropertyStoreRaw": IPropertyStoreRaw,
+        "PIPS": PIPS,
+        "VT_BOOL": VT_BOOL,
+        "VT_LPWSTR": VT_LPWSTR,
+        "HRESULT_T": HRESULT_T,
+        "VARIANT_TRUE": -1,
+        "VARIANT_FALSE": 0,
+    }
+    
+    return _PROPERTY_STORE_INTERFACES_CACHE
 def _pkey_disable_sysfx():
     # PKEY_AudioEndpoint_Disable_SysFx {E4870E26-3CC5-4CD2-BA46-CA0A9A70ED04}, pid 2
     IPolicyConfigFx, CLSID_PolicyConfigClient, PROPERTYKEY, PROPVARIANT = _define_policyconfig_fx_interfaces()
@@ -1751,7 +1758,3 @@ def _verify_effect_only(device_id, flow, expected_enabled, timeout=2.5, interval
             ok_streak = 0
         _time.sleep(interval)
     return False, None, last_state
-
-
-
-
