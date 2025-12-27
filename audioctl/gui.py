@@ -770,11 +770,9 @@ class AudioGUI:
             except Exception:
                 result["value"] = None
             top.destroy()
-
         def cancel():
             result["value"] = None
             top.destroy()
-
         ttk.Button(btns, text="OK", command=ok).pack(side="right")
         ttk.Button(btns, text="Cancel", command=cancel).pack(side="right", padx=(0, 8))
         top.bind("<Return>", lambda e: ok())
@@ -782,14 +780,16 @@ class AudioGUI:
         entry.focus_set()
         top.wait_window()
         return result["value"]
-
 def launch_gui():
     try:
         CoInitialize()
     except Exception:
-        pass   
+        pass
+        
+    # Disable cyclical GC during runtime to prevent unpredictable COM cleanup
     import gc
     gc.disable()
+
     _log("launch_gui: creating Tk root")
     root = tk.Tk()
     try:
@@ -838,19 +838,29 @@ def launch_gui():
         _log_exc("MAINLOOP EXCEPTION")
     _log("launch_gui: mainloop exited")
     
-    # Clean up COM singletons before uninitializing COM
+    # --- Start of Controlled Shutdown Sequence ---
+    _log("Shutdown: Releasing singletons and running final GC sweep before CoUninitialize")
+    
+    # Release any COM singletons we might hold (good practice)
     try:
         from .devices import _release_singletons_quiet
         _release_singletons_quiet()
     except Exception:
         pass
-    
+
+    # Re-enable GC and run a full collection to ensure all __del__ methods
+    # for COM objects are called *before* CoUninitialize. This is the crucial step.
     try:
+        gc.enable()
+        gc.collect()
+    except Exception:
+        pass
+    
+    # Now it is safe to uninitialize COM
+    try:
+        _log("Shutdown: Calling CoUninitialize")
         CoUninitialize()
     except Exception:
         pass
+        
     return 0
-
-
-
-
