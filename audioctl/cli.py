@@ -169,15 +169,23 @@ def cmd_set_volume(args):
         return 1
     return 0
 def cmd_listen(args):
-    # Resolve playback target name to ID if provided
+    # Resolve playback target. Start with ID if it was provided.
     render_device_id = args.playback_target_id
-    if args.playback_target_name:
-        render_target, err = _select_by_name_active_only("Render", args.playback_target_name, None, args.regex)
-        if err:
-            print(f"ERROR: Could not find playback target device: {err}", file=sys.stderr)
-            return 3
-        render_device_id = render_target["id"]
-    
+
+    # Handle --playback-target-name. This will override the ID if both are used.
+    if args.playback_target_name is not None:
+        # If the flag was used without a value, argparse sets it to const=''
+        if args.playback_target_name == '':
+            render_device_id = ''
+        else:
+            # A name was provided, so find the device ID
+            render_target, err = _select_by_name_active_only("Render", args.playback_target_name, None, args.regex)
+            if err:
+                print(f"ERROR: Could not find playback target device: {err}", file=sys.stderr)
+                return 3
+            render_device_id = render_target["id"]
+
+    # --- The rest of the function is for finding the CAPTURE device ---
     devices = list_devices(include_all=False)
     matches = find_devices_by_selector(devices, dev_id=args.id, name_substr=args.name, flow="Capture", regex=args.regex)
     if len(matches) == 0:
@@ -198,10 +206,14 @@ def cmd_listen(args):
         target = ordered[args.index]
     else:
         target = ordered[0]
+        
+    # --- Now, call the device function with the resolved render_device_id ---
     captured_stderr = io.StringIO()
     ok = False
     with redirect_stderr(captured_stderr):
+        # render_device_id will be a string ID, '', or None
         ok = set_listen_to_device_ps(target["id"], args.enable, render_device_id=render_device_id)
+        
     stderr_output = captured_stderr.getvalue()
     if not ok:
         actual = _get_listen_to_device_status_ps(target["id"])
@@ -217,12 +229,14 @@ def cmd_listen(args):
         sys.stderr.write(stderr_output)
         print(f"ERROR: failed to set 'Listen to this device' for '{target['name']}'.", file=sys.stderr)
         return 1
+        
     _reemit_non_error_stderr(stderr_output)
     actual_enabled_state = _get_listen_to_device_status_ps(target["id"])
     if actual_enabled_state is None:
         verified, reg_state = _verify_listen_via_registry(target["id"], args.enable, timeout=3.0, interval=0.20)
         if verified or reg_state is not None:
             actual_enabled_state = reg_state
+            
     print(json.dumps({"listenSet": {"id": target["id"], "name": target["name"], "enabled": actual_enabled_state}}))
     return 0
 def cmd_enhancements(args):
@@ -457,8 +471,8 @@ def build_parser():
     p_ls.add_argument("--name", help="Substring of the device name for the capture device.")
     p_ls.add_argument("--enable", action="store_true", help="Enable 'Listen to this device'.")
     p_ls.add_argument("--disable", action="store_true", help="Disable 'Listen to this device'.")
-    p_ls.add_argument("--playback-target-id", help="Optional: Render endpoint ID to play through. Use '' for 'Default Playback Device'. If omitted, current target is preserved (or set to '' if enabling and no target).")
-    p_ls.add_argument("--playback-target-name", help="Optional: Render endpoint name to play through. Searches active render devices.")  # ADD THIS LINE
+    p_ls.add_argument("--playback-target-id", nargs='?', const='', default=None, help="Optional: Render endpoint ID to play through. Use without a value for 'Default Playback Device'.")
+    p_ls.add_argument("--playback-target-name", nargs='?', const='', default=None, help="Optional: Render endpoint name to play through. Use without a value for 'Default Playback Device'.")
     p_ls.add_argument("--index", type=int)
     p_ls.add_argument("--regex", action="store_true")
     p_ls.set_defaults(func=cmd_listen)
@@ -618,5 +632,6 @@ def main(argv=None):
             pass
 
     return rc
+
 
 
