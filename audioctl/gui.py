@@ -787,7 +787,9 @@ def launch_gui():
     try:
         CoInitialize()
     except Exception:
-        pass
+        pass   
+    import gc
+    gc.disable()
     _log("launch_gui: creating Tk root")
     root = tk.Tk()
     try:
@@ -848,5 +850,6 @@ def launch_gui():
     except Exception:
         pass
     return 0
+
 
 
