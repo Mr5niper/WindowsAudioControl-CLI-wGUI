@@ -168,26 +168,29 @@ def cmd_set_volume(args):
         print("ERROR: failed to set volume/mute", file=sys.stderr)
         return 1
     return 0
-
-
 def cmd_listen(args):
+    # Resolve playback target name to ID if provided
+    render_device_id = args.playback_target_id
+    if args.playback_target_name:
+        render_target, err = _select_by_name_active_only("Render", args.playback_target_name, None, args.regex)
+        if err:
+            print(f"ERROR: Could not find playback target device: {err}", file=sys.stderr)
+            return 3
+        render_device_id = render_target["id"]
+    
     devices = list_devices(include_all=False)
     matches = find_devices_by_selector(devices, dev_id=args.id, name_substr=args.name, flow="Capture", regex=args.regex)
-
     if len(matches) == 0:
         print("ERROR: capture device not found (active only)", file=sys.stderr)
         return 3
     if len(matches) > 1 and args.index is None:
         print("ERROR: multiple matches; specify --index", file=sys.stderr)
         return 4
-
     buckets = _sort_and_tag_gui_indices(matches[:])
     ordered = buckets["Capture"]
-
     if not ordered:
         print("ERROR: no target device found for the specified criteria", file=sys.stderr)
         return 4
-
     if args.index is not None:
         if args.index < 0 or args.index >= len(ordered):
             print(f"ERROR: --index out of range (0..{len(ordered)-1})", file=sys.stderr)
@@ -195,42 +198,33 @@ def cmd_listen(args):
         target = ordered[args.index]
     else:
         target = ordered[0]
-
     captured_stderr = io.StringIO()
     ok = False
     with redirect_stderr(captured_stderr):
-        ok = set_listen_to_device_ps(target["id"], args.enable, render_device_id=args.playback_target_id)
-
+        ok = set_listen_to_device_ps(target["id"], args.enable, render_device_id=render_device_id)
     stderr_output = captured_stderr.getvalue()
-
     if not ok:
         actual = _get_listen_to_device_status_ps(target["id"])
         if actual is not None and actual == args.enable:
             _reemit_non_error_stderr(stderr_output)
             print(json.dumps({"listenSet": {"id": target["id"], "name": target["name"], "enabled": actual, "verifiedBy": "com"}}))
             return 0
-
         verified, reg_state = _verify_listen_via_registry(target["id"], args.enable, timeout=3.0, interval=0.20)
         if verified or (reg_state is not None and reg_state == args.enable):
             _reemit_non_error_stderr(stderr_output)
             print(json.dumps({"listenSet": {"id": target["id"], "name": target["name"], "enabled": reg_state, "verifiedBy": "registry"}}))
             return 0
-
         sys.stderr.write(stderr_output)
         print(f"ERROR: failed to set 'Listen to this device' for '{target['name']}'.", file=sys.stderr)
         return 1
-
     _reemit_non_error_stderr(stderr_output)
     actual_enabled_state = _get_listen_to_device_status_ps(target["id"])
     if actual_enabled_state is None:
         verified, reg_state = _verify_listen_via_registry(target["id"], args.enable, timeout=3.0, interval=0.20)
         if verified or reg_state is not None:
             actual_enabled_state = reg_state
-
     print(json.dumps({"listenSet": {"id": target["id"], "name": target["name"], "enabled": actual_enabled_state}}))
     return 0
-
-
 def cmd_enhancements(args):
     devices = list_devices(include_all=False)
     matches = find_devices_by_selector(devices, dev_id=args.id, name_substr=args.name, flow=args.flow, regex=args.regex)
@@ -464,6 +458,7 @@ def build_parser():
     p_ls.add_argument("--enable", action="store_true", help="Enable 'Listen to this device'.")
     p_ls.add_argument("--disable", action="store_true", help="Disable 'Listen to this device'.")
     p_ls.add_argument("--playback-target-id", help="Optional: Render endpoint ID to play through. Use '' for 'Default Playback Device'. If omitted, current target is preserved (or set to '' if enabling and no target).")
+    p_ls.add_argument("--playback-target-name", help="Optional: Render endpoint name to play through. Searches active render devices.")  # ADD THIS LINE
     p_ls.add_argument("--index", type=int)
     p_ls.add_argument("--regex", action="store_true")
     p_ls.set_defaults(func=cmd_listen)
@@ -623,4 +618,5 @@ def main(argv=None):
             pass
 
     return rc
+
 
