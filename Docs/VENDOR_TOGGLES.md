@@ -1,4 +1,3 @@
-
 # Vendor Toggles Configuration Guide
 
 ## What is vendor_toggles.ini?
