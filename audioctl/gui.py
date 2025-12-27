@@ -316,7 +316,7 @@ class AudioGUI:
 
         total_cols = int(group_w + index_w + name_w + flow_w + defaults_w + id_w + sb_w + 40)
         desired_w = max(total_cols, self.container.winfo_reqwidth() + 10, 600)
-        desired_h = max(self.root.winfo_reqheight(), 300)
+        desired_h = max(self.root.winfo_reqheight(), 325)
         scr_w = self.root.winfo_screenwidth()
         scr_h = self.root.winfo_screenheight()
         margin = 80
@@ -842,6 +842,7 @@ def launch_gui():
         pass
         
     return 0
+
 
 
 
