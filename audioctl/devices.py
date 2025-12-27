@@ -982,53 +982,16 @@ def _get_enhancements_status_propstore(device_id):
     """
     import sys
     try:
-        if sys.platform.startswith("win"):
-            import ctypes
-        else:
+        if not sys.platform.startswith("win"):
             return None
         
-        # Ensure an HRESULT type for PropVariantClear signature
-        try:
-            HRESULT_T = wintypes.HRESULT
-        except Exception:
-            HRESULT_T = ctypes.c_long
+        # Get cached interface definitions
+        interfaces = _get_property_store_interfaces()
+        PROPVARIANT = interfaces["PROPVARIANT"]
+        PROPERTYKEY = interfaces["PROPERTYKEY"]
+        PIPS = interfaces["PIPS"]
+        HRESULT_T = interfaces["HRESULT_T"]
         
-        # PROPVARIANT
-        try:
-            PROPVARIANT = getattr(automation, "PROPVARIANT", getattr(automation, "tagPROPVARIANT"))
-        except Exception:
-            class _PVU(ctypes.Union):
-                _fields_ = [("boolVal", ctypes.c_short), ("uiVal", ctypes.c_ushort), ("ulVal", ctypes.c_ulong)]
-            class PROPVARIANT(ctypes.Structure):
-                _anonymous_ = ("data",)
-                _fields_ = [
-                    ("vt", ctypes.c_ushort),
-                    ("wReserved1", ctypes.c_ushort),
-                    ("wReserved2", ctypes.c_ushort),
-                    ("wReserved3", ctypes.c_ushort),
-                    ("data", _PVU),
-                ]
-        CALL = ctypes.WINFUNCTYPE if ctypes.sizeof(ctypes.c_void_p) == 4 else ctypes.CFUNCTYPE
-        
-        class PROPERTYKEY(ctypes.Structure):
-            _fields_ = (("fmtid", GUID), ("pid", wintypes.DWORD))
-        class IPropertyStoreRaw(ctypes.Structure):
-            pass
-        PIPS = POINTER(IPropertyStoreRaw)
-        GetValueProto = CALL(HRESULT_T, PIPS, POINTER(PROPERTYKEY), POINTER(PROPVARIANT))
-        
-        class IPropertyStoreVTBL(ctypes.Structure):
-            _fields_ = [
-                ("QueryInterface", ctypes.c_void_p),
-                ("AddRef", ctypes.c_void_p),
-                ("Release", ctypes.c_void_p),
-                ("GetCount", ctypes.c_void_p),
-                ("GetAt", ctypes.c_void_p),
-                ("GetValue", GetValueProto),
-                ("SetValue", ctypes.c_void_p),
-                ("Commit", ctypes.c_void_p),
-            ]
-        IPropertyStoreRaw._fields_ = [("lpVtbl", POINTER(IPropertyStoreVTBL))]
         enumerator = CoCreateInstance(CLSID_MMDeviceEnumerator, interface=IMMDeviceEnumerator, clsctx=CLSCTX_ALL)
         dev = enumerator.GetDevice(device_id)
         ps_unknown = dev.OpenPropertyStore(STGM_READ)
@@ -1066,55 +1029,15 @@ def _set_enhancements_propstore(device_id, enable):
     """
     import sys
     try:
-        if sys.platform.startswith("win"):
-            import ctypes
-        else:
+        if not sys.platform.startswith("win"):
             return False
-            
-        try:
-            PROPVARIANT = getattr(automation, "PROPVARIANT", getattr(automation, "tagPROPVARIANT"))
-        except Exception:
-            class _PVU(ctypes.Union):
-                _fields_ = [("boolVal", ctypes.c_short), ("uiVal", ctypes.c_ushort), ("ulVal", ctypes.c_ulong)]
-            class PROPVARIANT(ctypes.Structure):
-                _anonymous_ = ("data",)
-                _fields_ = [
-                    ("vt", ctypes.c_ushort),
-                    ("wReserved1", ctypes.c_ushort),
-                    ("wReserved2", ctypes.c_ushort),
-                    ("wReserved3", ctypes.c_ushort),
-                    ("data", _PVU),
-                ]
-                
-        CALL = ctypes.WINFUNCTYPE if ctypes.sizeof(ctypes.c_void_p) == 4 else ctypes.CFUNCTYPE
         
-        class PROPERTYKEY(ctypes.Structure):
-            _fields_ = (("fmtid", GUID), ("pid", wintypes.DWORD))
-        class IPropertyStoreRaw(ctypes.Structure):
-            pass
-        PIPS = POINTER(IPropertyStoreRaw)
-        
-        try:
-            HRESULT_T = wintypes.HRESULT
-        except Exception:
-            HRESULT_T = ctypes.c_long
-            
-        GetValueProto = CALL(HRESULT_T, PIPS, POINTER(PROPERTYKEY), POINTER(PROPVARIANT))
-        SetValueProto = CALL(HRESULT_T, PIPS, POINTER(PROPERTYKEY), POINTER(PROPVARIANT))
-        CommitProto   = CALL(HRESULT_T, PIPS)
-        
-        class IPropertyStoreVTBL(ctypes.Structure):
-            _fields_ = [
-                ("QueryInterface", ctypes.c_void_p),
-                ("AddRef", ctypes.c_void_p),
-                ("Release", ctypes.c_void_p),
-                ("GetCount", ctypes.c_void_p),
-                ("GetAt", ctypes.c_void_p),
-                ("GetValue", GetValueProto),
-                ("SetValue", SetValueProto),
-                ("Commit", CommitProto),
-            ]
-        IPropertyStoreRaw._fields_ = [("lpVtbl", POINTER(IPropertyStoreVTBL))]
+        # Get cached interface definitions
+        interfaces = _get_property_store_interfaces()
+        PROPVARIANT = interfaces["PROPVARIANT"]
+        PROPERTYKEY = interfaces["PROPERTYKEY"]
+        PIPS = interfaces["PIPS"]
+        HRESULT_T = interfaces["HRESULT_T"]
         
         enumerator = CoCreateInstance(CLSID_MMDeviceEnumerator, interface=IMMDeviceEnumerator, clsctx=CLSCTX_ALL)
         dev = enumerator.GetDevice(device_id)
@@ -1372,15 +1295,22 @@ def _friendly_names_by_id():
     return names
 def _safe_friendly_name_from_device(dev):
     """
-    Read PKEY_Device_FriendlyName from an IMMDevice via IPropertyStore using raw vtable.
-    Hardened so GC doesn't interfere and COM refcounts are balanced.
+    Read PKEY_Device_FriendlyName from an IMMDevice via IPropertyStore using cached interfaces.
     """
     _dbg("FriendlyName: enter (_safe_friendly_name_from_device)")
     try:
         import sys, gc
         if not sys.platform.startswith("win"):
             return None
-        import ctypes
+        
+        # Get cached interface definitions
+        interfaces = _get_property_store_interfaces()
+        PROPVARIANT = interfaces["PROPVARIANT"]
+        PROPERTYKEY = interfaces["PROPERTYKEY"]
+        PIPS = interfaces["PIPS"]
+        VT_LPWSTR = interfaces["VT_LPWSTR"]
+        HRESULT_T = interfaces["HRESULT_T"]
+        
         # Pause GC so comtypes __del__ won't run Release while we hold raw pointers
         gc_was_enabled = gc.isenabled()
         if gc_was_enabled:
@@ -1389,49 +1319,6 @@ def _safe_friendly_name_from_device(dev):
             except Exception:
                 gc_was_enabled = False
         try:
-            CALL = ctypes.WINFUNCTYPE if ctypes.sizeof(ctypes.c_void_p) == 4 else ctypes.CFUNCTYPE
-            if hasattr(automation, "PROPVARIANT"):
-                PROPVARIANT = automation.PROPVARIANT
-            elif hasattr(automation, "tagPROPVARIANT"):
-                PROPVARIANT = automation.tagPROPVARIANT
-            else:
-                class _PVU(ctypes.Union):
-                    _fields_ = [
-                        ("pwszVal", ctypes.c_wchar_p),
-                        ("boolVal", ctypes.c_short),
-                    ]
-                class PROPVARIANT(ctypes.Structure):
-                    _anonymous_ = ("data",)
-                    _fields_ = [
-                        ("vt", ctypes.c_ushort),
-                        ("wReserved1", ctypes.c_ushort),
-                        ("wReserved2", ctypes.c_ushort),
-                        ("wReserved3", ctypes.c_ushort),
-                        ("data", _PVU),
-                    ]
-            VT_LPWSTR = getattr(automation, "VT_LPWSTR", 31)
-            class PROPERTYKEY(ctypes.Structure):
-                _fields_ = (("fmtid", GUID), ("pid", wintypes.DWORD))
-            class IPropertyStoreRaw(ctypes.Structure):
-                pass
-            PIPS = POINTER(IPropertyStoreRaw)
-            try:
-                HRESULT_T = wintypes.HRESULT
-            except Exception:
-                HRESULT_T = ctypes.c_long
-            GetValueProto = CALL(HRESULT_T, PIPS, POINTER(PROPERTYKEY), POINTER(PROPVARIANT))
-            class IPropertyStoreVTBL(ctypes.Structure):
-                _fields_ = [
-                    ("QueryInterface", ctypes.c_void_p),
-                    ("AddRef", ctypes.c_void_p),
-                    ("Release", ctypes.c_void_p),
-                    ("GetCount", ctypes.c_void_p),
-                    ("GetAt", ctypes.c_void_p),
-                    ("GetValue", GetValueProto),
-                    ("SetValue", ctypes.c_void_p),
-                    ("Commit", ctypes.c_void_p),
-                ]
-            IPropertyStoreRaw._fields_ = [("lpVtbl", POINTER(IPropertyStoreVTBL))]
             ps_unknown = dev.OpenPropertyStore(STGM_READ)
             # Balance COM refcount explicitly while we use the raw vtable
             did_addref = False
@@ -1445,22 +1332,17 @@ def _safe_friendly_name_from_device(dev):
                 if not ps_ptr_val:
                     return None
                 
-                # --- New debug log after OpenPropertyStore ---
-                try:
-                    import ctypes
-                    ptr = ctypes.cast(ps_unknown, ctypes.c_void_p).value
-                    _dbg(f"FriendlyName: IPropertyStore raw=0x{ptr:016X} (AddRef before use)")
-                except Exception:
-                    pass
-                # ---------------------------------------------
+                _dbg(f"FriendlyName: IPropertyStore raw=0x{ps_ptr_val:016X} (AddRef before use)")
                 
                 ps_iface = ctypes.cast(ctypes.c_void_p(ps_ptr_val), PIPS)
                 PKEY_Device_FriendlyName = PROPERTYKEY(GUID("{a45c254e-df1c-4efd-8020-67d146a850e0}"), 14)
                 PKEY_Device_DeviceDesc   = PROPERTYKEY(GUID("{a45c254e-df1c-4efd-8020-67d146a850e0}"), 2)
+                
                 ole32 = ctypes.OleDLL("ole32.dll")
                 PropVariantClear = ole32.PropVariantClear
                 PropVariantClear.restype = HRESULT_T
-                PropVariantClear.argtypes = (POINTER(PROPVARIANT),)
+                PropVariantClear.argtypes = (ctypes.POINTER(PROPVARIANT),)
+                
                 def _read_ptr_or_str(val):
                     if isinstance(val, str):
                         return val
@@ -1470,6 +1352,7 @@ def _safe_friendly_name_from_device(dev):
                         except Exception:
                             return None
                     return None
+                
                 def _pv_read_lpwstr(pv):
                     try:
                         s = _read_ptr_or_str(getattr(pv, "pwszVal", None))
@@ -1488,6 +1371,7 @@ def _safe_friendly_name_from_device(dev):
                             if s: return s
                     except Exception: pass
                     return None
+                
                 def _get_string_prop(pkey):
                     pv = PROPVARIANT()
                     try:
@@ -1502,6 +1386,7 @@ def _safe_friendly_name_from_device(dev):
                         except Exception:
                             pass
                     return None
+                
                 name = _get_string_prop(PKEY_Device_FriendlyName)
                 if not name:
                     name = _get_string_prop(PKEY_Device_DeviceDesc)
