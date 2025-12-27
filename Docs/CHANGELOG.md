@@ -1,6 +1,21 @@
 # AUDIOCTL.PY CHANGELOG
 
-## v1.4.3.1 - [Current]
+## v1.4.3.2 - [Current]
+### New Features
+- **Listen Playback by Name:** Added a `--playback-target-name` argument to the `listen` command, allowing users to specify the playback device by a substring of its name instead of the full device ID.
+- **Improved "Default Device" Selection:** Both `--playback-target-id` and `--playback-target-name` now support setting the playback target to "Default Device" by providing the flag without a value (e.g., `... --enable --playback-target-id`). This resolves usability issues with shells that strip empty quotes (`""`).
+
+### Bug Fixes
+- **Listen Playback Target Not Applied:** Fixed a critical bug where `--playback-target-id` reported success but did not change the device in Windows. The code now writes directly to the correct registry location (`HKLM\...\Properties\{...},0`).
+- **COM Shutdown Stability:** Resolved fatal access violations and log spam that occurred when closing the GUI. The application now uses the official `comtypes.CoInitialize()` and `comtypes.CoUninitialize()` functions, which correctly manage the cleanup of all COM objects at process exit and eliminate the race condition with Python's garbage collector.
+- **GUI Window Auto-Sizing:** Corrected the automatic height calculation for the main window by adding a pixel buffer. This prevents the vertical scrollbar from appearing unnecessarily and stops the top group header from being cut off on initial load.
+
+### Improvements
+- **Overall Stability:** The combination of runtime `gc.disable()` in the GUI and proper library-managed shutdown provides a much more stable user experience, eliminating both runtime and shutdown-related crashes.
+
+---
+
+## v1.4.3.1
 ### Bug Fixes
 - **Critical COM Garbage Collection Crash Fix:**
   - Eliminated access violations caused by Python's garbage collector attempting to release COM objects during dynamic interface class definition.
@@ -359,6 +374,7 @@
 - **Basic Enumeration:** Listed playback (Render) and recording (Capture) devices using `IMMDeviceEnumerator` with `DEVICE_STATE_ACTIVE` only.
 - **“Listen” Toggle (Admin):** Initial registry-based enable/disable of “Listen to this device” for capture endpoints (admin required).
 - **Admin Check:** `is_admin` helper added to warn when elevation is required.
+
 
 
 

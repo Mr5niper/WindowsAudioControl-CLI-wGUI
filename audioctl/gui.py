@@ -5,7 +5,7 @@ import time
 import tkinter as tk
 from tkinter import ttk, messagebox
 from contextlib import redirect_stderr
-from comtypes import CoInitialize, CoUninitialize
+import comtypes
 from .logging_setup import resource_path, _log, _log_exc, _log_path
 from .compat import is_admin
 from .devices import (
@@ -32,7 +32,7 @@ from .vendor_db import (
 class AudioGUI:
     def __init__(self, root):
         self.root = root
-        self.root.title("Audio Control v1.4.3.1 12-26-2025")
+        self.root.title("Audio Control v1.4.3.2 12-27-2025")
 
         # Style and theme
         style = ttk.Style(self.root)
@@ -305,8 +305,8 @@ class AudioGUI:
         except Exception:
             pass
 
-        rows = len(self.devices) + 2 if self.devices else 2
-        self.tree.configure(height=min(max(rows, 6), 22))
+        rows = len(self.devices) + 4 if self.devices else 4
+        self.tree.configure(height=min(max(rows, 6), 50))
         self.root.update_idletasks()
 
         try:
@@ -316,7 +316,7 @@ class AudioGUI:
 
         total_cols = int(group_w + index_w + name_w + flow_w + defaults_w + id_w + sb_w + 40)
         desired_w = max(total_cols, self.container.winfo_reqwidth() + 10, 600)
-        desired_h = max(self.root.winfo_reqheight(), 300)
+        desired_h = max(self.root.winfo_reqheight(), 325)
         scr_w = self.root.winfo_screenwidth()
         scr_h = self.root.winfo_screenheight()
         margin = 80
@@ -770,11 +770,9 @@ class AudioGUI:
             except Exception:
                 result["value"] = None
             top.destroy()
-
         def cancel():
             result["value"] = None
             top.destroy()
-
         ttk.Button(btns, text="OK", command=ok).pack(side="right")
         ttk.Button(btns, text="Cancel", command=cancel).pack(side="right", padx=(0, 8))
         top.bind("<Return>", lambda e: ok())
@@ -782,10 +780,10 @@ class AudioGUI:
         entry.focus_set()
         top.wait_window()
         return result["value"]
-
 def launch_gui():
     try:
-        CoInitialize()
+        # Use the library's own initializer
+        comtypes.CoInitialize()
     except Exception:
         pass
     _log("launch_gui: creating Tk root")
@@ -836,17 +834,15 @@ def launch_gui():
         _log_exc("MAINLOOP EXCEPTION")
     _log("launch_gui: mainloop exited")
     
-    # Clean up COM singletons before uninitializing COM
     try:
-        from .devices import _release_singletons_quiet
-        _release_singletons_quiet()
+        # Use the library's own uninitializer.
+        # This correctly handles cleanup at process exit.
+        comtypes.CoUninitialize()
     except Exception:
         pass
-    
-    try:
-        CoUninitialize()
-    except Exception:
-        pass
+        
     return 0
+
+
 
 

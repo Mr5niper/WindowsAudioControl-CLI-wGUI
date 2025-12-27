@@ -58,7 +58,8 @@ def _extract_endpoint_guid_from_device_id(device_id: str):
         return None
 def set_listen_to_device_ps(capture_device_id, enable, render_device_id=None):
     """
-    Enable/disable 'Listen to this device' using raw IPropertyStore vtable calls.
+    Enable/disable 'Listen to this device' using IPropertyStore for enable flag
+    and registry for playback target (which requires admin for HKLM write).
     Assumes COM is already initialized on this thread (GUI or CLI does that).
     """
     import sys
@@ -70,7 +71,6 @@ def set_listen_to_device_ps(capture_device_id, enable, render_device_id=None):
     IPropertyStoreRaw = interfaces["IPropertyStoreRaw"]
     PIPS = interfaces["PIPS"]
     VT_BOOL = interfaces["VT_BOOL"]
-    VT_LPWSTR = interfaces["VT_LPWSTR"]
     HRESULT_T = interfaces["HRESULT_T"]
     VARIANT_TRUE = interfaces["VARIANT_TRUE"]
     VARIANT_FALSE = interfaces["VARIANT_FALSE"]
@@ -85,17 +85,11 @@ def set_listen_to_device_ps(capture_device_id, enable, render_device_id=None):
         InitPropVariantFromBoolean = propsys.InitPropVariantFromBoolean
         InitPropVariantFromBoolean.restype = HRESULT_T
         InitPropVariantFromBoolean.argtypes = (wintypes.BOOL, POINTER(PROPVARIANT))
-        InitPropVariantFromString = propsys.InitPropVariantFromString
-        InitPropVariantFromString.restype = HRESULT_T
-        InitPropVariantFromString.argtypes = (wintypes.LPCWSTR, POINTER(PROPVARIANT))
     except (AttributeError, OSError):
         have_helpers = False
     PropVariantClear = ole32.PropVariantClear
     PropVariantClear.restype = HRESULT_T
     PropVariantClear.argtypes = (POINTER(PROPVARIANT),)
-    CoTaskMemAlloc = ole32.CoTaskMemAlloc
-    CoTaskMemAlloc.restype = ctypes.c_void_p
-    CoTaskMemAlloc.argtypes = (ctypes.c_size_t,)
     
     def _pv_from_bool_local(value: bool):
         pv = PROPVARIANT()
@@ -111,59 +105,11 @@ def set_listen_to_device_ps(capture_device_id, enable, render_device_id=None):
                 pass
         return pv
     
-    def _pv_from_string_local(s: str):
-        pv = PROPVARIANT()
-        s_val = s if s is not None else ""
-        if have_helpers:
-            hr = InitPropVariantFromString(s_val, byref(pv))
-            if hr != 0:
-                raise OSError(f"InitPropVariantFromString failed: {_hrx(hr)}")
-        else:
-            nbytes = (len(s_val) + 1) * ctypes.sizeof(ctypes.c_wchar)
-            buf = ctypes.create_unicode_buffer(s_val)
-            ptr = CoTaskMemAlloc(nbytes)
-            if not ptr:
-                raise MemoryError("CoTaskMemAlloc failed")
-            ctypes.memmove(ptr, ctypes.addressof(buf), nbytes)
-            pv.vt = VT_LPWSTR
-            pv.pwszVal = ctypes.cast(ptr, ctypes.c_wchar_p)
-        return pv
-    
     PKEY_LISTEN_ENABLE = PROPERTYKEY(GUID("{24dbb0fc-9311-4b3d-9cf0-18ff155639d4}"), 1)
-    PKEY_LISTEN_PLAYBACKTHROUGH = PROPERTYKEY(GUID("{24dbb0fc-9311-4b3d-9cf0-18ff155639d4}"), 2)
     
-    def _get_string_prop_local(ps_iface_ptr, pkey_obj):
-        pv = PROPVARIANT()
-        try:
-            hr = ps_iface_ptr.contents.lpVtbl.contents.GetValue(ps_iface_ptr, byref(pkey_obj), byref(pv))
-            if hr != 0 or getattr(pv, "vt", 0) != VT_LPWSTR:
-                return None
-            def _read_ptr_or_str(val):
-                if isinstance(val, str):
-                    return val
-                if val:
-                    try:
-                        return ctypes.wstring_at(val)
-                    except Exception:
-                        return None
-                return None
-            s = _read_ptr_or_str(getattr(pv, "pwszVal", None))
-            if not s:
-                val = getattr(pv, "value", None)
-                if val is not None:
-                    s = _read_ptr_or_str(getattr(val, "pwszVal", None))
-            if not s:
-                data = getattr(pv, "data", None)
-                if data is not None:
-                    s = _read_ptr_or_str(getattr(data, "pwszVal", None))
-            return s
-        finally:
-            PropVariantClear(byref(pv))
-    
-    enumerator = None
     pv_enable = None
-    pv_target = None
     try:
+        # Set enable/disable via IPropertyStore (works)
         enumerator = CoCreateInstance(CLSID_MMDeviceEnumerator, interface=IMMDeviceEnumerator, clsctx=CLSCTX_ALL)
         dev = enumerator.GetDevice(capture_device_id)
         ps_unknown = dev.OpenPropertyStore(STGM_WRITE)
@@ -172,26 +118,31 @@ def set_listen_to_device_ps(capture_device_id, enable, render_device_id=None):
             raise OSError("OpenPropertyStore returned null pointer for IPropertyStore.")
         ps_iface = ctypes.cast(ctypes.c_void_p(ps_ptr_val), PIPS)
         
-        current_target_id = _get_string_prop_local(ps_iface, PKEY_LISTEN_PLAYBACKTHROUGH)
         pv_enable = _pv_from_bool_local(bool(enable))
         hr = ps_iface.contents.lpVtbl.contents.SetValue(ps_iface, byref(PKEY_LISTEN_ENABLE), byref(pv_enable))
         if hr != 0:
             raise OSError(f"IPropertyStore::SetValue(enable) failed: {_hrx(hr)}")
-        target_string_to_set = None
-        if render_device_id is None:
-            if enable and not current_target_id:
-                target_string_to_set = ""
-        else:
-            target_string_to_set = render_device_id
-        if target_string_to_set is not None:
-            pv_target = _pv_from_string_local(target_string_to_set)
-            hr = ps_iface.contents.lpVtbl.contents.SetValue(ps_iface, byref(PKEY_LISTEN_PLAYBACKTHROUGH), byref(pv_target))
-            if hr != 0:
-                raise OSError(f"IPropertyStore::SetValue(target) failed: {_hrx(hr)}")
         
         hr = ps_iface.contents.lpVtbl.contents.Commit(ps_iface)
         if hr != 0:
             raise OSError(f"IPropertyStore::Commit failed: {_hrx(hr)}")
+        
+        # Set playback target via registry (only way that works)
+        if render_device_id is not None:
+            guid = _extract_endpoint_guid_from_device_id(capture_device_id)
+            if guid:
+                key_path = rf"SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Capture\{guid}\Properties"
+                value_name = "{24dbb0fc-9311-4b3d-9cf0-18ff155639d4},0"
+                target_value = render_device_id if render_device_id else ""
+                
+                try:
+                    key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, key_path, 0, winreg.KEY_SET_VALUE)
+                    try:
+                        winreg.SetValueEx(key, value_name, 0, winreg.REG_SZ, target_value)
+                    finally:
+                        winreg.CloseKey(key)
+                except OSError as e:
+                    print(f"WARNING: Failed to set playback target (requires Admin): {e}", file=sys.stderr)
         
         return True
     except Exception as e:
@@ -201,11 +152,6 @@ def set_listen_to_device_ps(capture_device_id, enable, render_device_id=None):
         try:
             if pv_enable is not None:
                 PropVariantClear(byref(pv_enable))
-        except Exception:
-            pass
-        try:
-            if pv_target is not None:
-                PropVariantClear(byref(pv_target))
         except Exception:
             pass
 def _get_listen_to_device_status_ps(device_id):
@@ -1643,3 +1589,4 @@ def _verify_effect_only(device_id, flow, expected_enabled, timeout=2.5, interval
             ok_streak = 0
         _time.sleep(interval)
     return False, None, last_state
+

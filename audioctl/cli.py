@@ -8,7 +8,7 @@ import os
 import warnings
 import re
 from contextlib import redirect_stderr
-from comtypes import CoInitialize, CoUninitialize
+import comtypes
 from .compat import (
     E_RENDER, E_CAPTURE,
     ROLES, DEVICE_STATE_ACTIVE, DEVICE_STATE_ALL, is_admin,
@@ -43,7 +43,6 @@ from .vendor_db import (
 )
 from .gui import launch_gui
 
-
 def cmd_list(args):
     devices = list_devices(include_all=args.all)
     buckets = _sort_and_tag_gui_indices(devices)
@@ -62,11 +61,10 @@ def cmd_list(args):
         print(f"[{d['guiIndex']}] {d['name']}  id={d['id']}  defaults={','.join(flags) if flags else '-'}\n")
     return 0
 
-
 def cmd_set_default(args):
     if not is_admin():
         print("WARNING: 'set-default' might require Administrator privileges on this system.", file=sys.stderr)
-
+    
     exit_code = 0
     results = {"set": []}
 
@@ -83,6 +81,7 @@ def cmd_set_default(args):
             if err:
                 print(err, file=sys.stderr)
                 return 4 if "Multiple" in err else 3
+        
         try:
             role = args.playback_role
             set_default_endpoint(target["id"], role)
@@ -104,6 +103,7 @@ def cmd_set_default(args):
             if err:
                 print(err, file=sys.stderr)
                 return 4 if "Multiple" in err else 3
+        
         try:
             role = args.recording_role
             set_default_endpoint(target["id"], role)
@@ -115,7 +115,6 @@ def cmd_set_default(args):
     print(json.dumps(results))
     return exit_code
 
-
 def cmd_set_volume(args):
     if (args.mute or args.unmute) and args.level is not None:
         print("ERROR: Cannot specify both --level and --mute/--unmute", file=sys.stderr)
@@ -126,22 +125,21 @@ def cmd_set_volume(args):
 
     devices = list_devices(include_all=False)
     matches = find_devices_by_selector(devices, dev_id=args.id, name_substr=args.name, flow=args.flow, regex=args.regex)
-
     if len(matches) == 0:
         print("ERROR: device not found (active only)", file=sys.stderr)
         return 3
     if len(matches) > 1 and args.index is None:
         print("ERROR: multiple matches; specify --index", file=sys.stderr)
         return 4
-
+    
     buckets = _sort_and_tag_gui_indices([d for d in matches])
     flow = args.flow or (matches[0]["flow"] if matches else None)
     ordered = (buckets.get(flow) or []) if args.flow else (buckets["Render"] + buckets["Capture"])
-
+    
     if not ordered:
         print("ERROR: no target device found for the specified criteria", file=sys.stderr)
         return 4
-
+        
     if args.index is not None:
         if args.index < 0 or args.index >= len(ordered):
             print(f"ERROR: --index out of range (0..{len(ordered)-1})", file=sys.stderr)
@@ -169,25 +167,38 @@ def cmd_set_volume(args):
         return 1
     return 0
 
-
 def cmd_listen(args):
+    # Resolve playback target. Start with ID if it was provided.
+    render_device_id = args.playback_target_id
+    # Handle --playback-target-name. This will override the ID if both are used.
+    if args.playback_target_name is not None:
+        # If the flag was used without a value, argparse sets it to const=''
+        if args.playback_target_name == '':
+            render_device_id = ''
+        else:
+            # A name was provided, so find the device ID
+            render_target, err = _select_by_name_active_only("Render", args.playback_target_name, None, args.regex)
+            if err:
+                print(f"ERROR: Could not find playback target device: {err}", file=sys.stderr)
+                return 3
+            render_device_id = render_target["id"]
+
+    # --- The rest of the function is for finding the CAPTURE device ---
     devices = list_devices(include_all=False)
     matches = find_devices_by_selector(devices, dev_id=args.id, name_substr=args.name, flow="Capture", regex=args.regex)
-
     if len(matches) == 0:
         print("ERROR: capture device not found (active only)", file=sys.stderr)
         return 3
     if len(matches) > 1 and args.index is None:
         print("ERROR: multiple matches; specify --index", file=sys.stderr)
         return 4
-
+    
     buckets = _sort_and_tag_gui_indices(matches[:])
     ordered = buckets["Capture"]
-
     if not ordered:
         print("ERROR: no target device found for the specified criteria", file=sys.stderr)
         return 4
-
+        
     if args.index is not None:
         if args.index < 0 or args.index >= len(ordered):
             print(f"ERROR: --index out of range (0..{len(ordered)-1})", file=sys.stderr)
@@ -195,60 +206,56 @@ def cmd_listen(args):
         target = ordered[args.index]
     else:
         target = ordered[0]
-
+        
+    # --- Now, call the device function with the resolved render_device_id ---
     captured_stderr = io.StringIO()
     ok = False
     with redirect_stderr(captured_stderr):
-        ok = set_listen_to_device_ps(target["id"], args.enable, render_device_id=args.playback_target_id)
-
+        # render_device_id will be a string ID, '', or None
+        ok = set_listen_to_device_ps(target["id"], args.enable, render_device_id=render_device_id)
+        
     stderr_output = captured_stderr.getvalue()
-
     if not ok:
         actual = _get_listen_to_device_status_ps(target["id"])
         if actual is not None and actual == args.enable:
             _reemit_non_error_stderr(stderr_output)
             print(json.dumps({"listenSet": {"id": target["id"], "name": target["name"], "enabled": actual, "verifiedBy": "com"}}))
             return 0
-
         verified, reg_state = _verify_listen_via_registry(target["id"], args.enable, timeout=3.0, interval=0.20)
         if verified or (reg_state is not None and reg_state == args.enable):
             _reemit_non_error_stderr(stderr_output)
             print(json.dumps({"listenSet": {"id": target["id"], "name": target["name"], "enabled": reg_state, "verifiedBy": "registry"}}))
             return 0
-
         sys.stderr.write(stderr_output)
         print(f"ERROR: failed to set 'Listen to this device' for '{target['name']}'.", file=sys.stderr)
         return 1
-
+        
     _reemit_non_error_stderr(stderr_output)
     actual_enabled_state = _get_listen_to_device_status_ps(target["id"])
     if actual_enabled_state is None:
         verified, reg_state = _verify_listen_via_registry(target["id"], args.enable, timeout=3.0, interval=0.20)
         if verified or reg_state is not None:
             actual_enabled_state = reg_state
-
+            
     print(json.dumps({"listenSet": {"id": target["id"], "name": target["name"], "enabled": actual_enabled_state}}))
     return 0
-
 
 def cmd_enhancements(args):
     devices = list_devices(include_all=False)
     matches = find_devices_by_selector(devices, dev_id=args.id, name_substr=args.name, flow=args.flow, regex=args.regex)
-
     if len(matches) == 0:
         print("ERROR: device not found (active only)", file=sys.stderr)
         return 3
     if len(matches) > 1 and args.index is None:
         print("ERROR: multiple matches; specify --index", file=sys.stderr)
         return 4
-
+    
     buckets = _sort_and_tag_gui_indices([d for d in matches])
     ordered = (buckets.get(args.flow) or []) if args.flow else (buckets["Render"] + buckets["Capture"])
-
     if not ordered:
         print("ERROR: no target device found for the specified criteria", file=sys.stderr)
         return 4
-
+        
     target = ordered[args.index] if args.index is not None else ordered[0]
 
     if getattr(args, "learn", False):
@@ -265,7 +272,6 @@ def cmd_enhancements(args):
             return 1
 
     enable = True if args.enable else False
-
     if not _enhancements_supported(target["id"], target["flow"]):
         print("ERROR: No vendor toggle available for this device. Use --learn to teach a vendor method.", file=sys.stderr)
         return 1
@@ -280,10 +286,9 @@ def cmd_enhancements(args):
     if ok:
         print(json.dumps({"enhancementsSet": {"id": target["id"], "name": target["name"], "enabled": state, "verifiedBy": verified_by}}))
         return 0
-
+        
     print("ERROR: vendor toggle failed.", file=sys.stderr)
     return 1
-
 
 def cmd_diag_sysfx(args):
     devices = list_devices(include_all=False)
@@ -291,14 +296,14 @@ def cmd_diag_sysfx(args):
     if not matches:
         print("ERROR: device not found (active only)", file=sys.stderr)
         return 3
-
+    
     buckets = _sort_and_tag_gui_indices([d for d in matches])
     ordered = (buckets.get(args.flow) or []) if args.flow else (buckets["Render"] + buckets["Capture"])
     target = ordered[args.index] if args.index is not None else ordered[0]
 
     live_win = _get_enhancements_status_propstore(target["id"])
     live_com = _get_enhancements_status_com(target["id"])
-
+    
     vend_entry = _find_first_vendor_entry(target["id"], target["flow"], ini_path=None)
     vend_state = None
     vend_tag = "None Found"
@@ -314,18 +319,16 @@ def cmd_diag_sysfx(args):
     }, indent=2))
     return 0
 
-
 def cmd_discover_enhancements(args):
     devices = list_devices(include_all=False)
     matches = find_devices_by_selector(devices, dev_id=args.id, name_substr=args.name, flow=args.flow, regex=args.regex)
-
     if not matches:
         print("ERROR: device not found (active only)", file=sys.stderr)
         return 3
     if len(matches) > 1 and args.index is None:
         print(_pretty_matches_msg("device", matches), file=sys.stderr)
         return 4
-
+    
     buckets = _sort_and_tag_gui_indices(matches[:])
     ordered = (buckets.get(args.flow) or []) if args.flow else (buckets["Render"] + buckets["Capture"])
     target = ordered[args.index] if args.index is not None else ordered[0]
@@ -334,27 +337,27 @@ def cmd_discover_enhancements(args):
     print("Step 1: In Windows Sound settings, set 'Audio Enhancements' to ENABLED for this device.")
     input("When ready, press Enter to capture snapshot A... ")
     snapA = _collect_sysfx_snapshot(target["id"])
-
+    
     print("Step 2: Now set 'Audio Enhancements' to DISABLED for the same device.")
     input("When ready, press Enter to capture snapshot B... ")
     snapB = _collect_sysfx_snapshot(target["id"])
-
+    
     diffs = _diff_mmdevices_lists(snapA.get("registry") or [], snapB.get("registry") or [])
-
+    
     base_name = re.sub(r'[^A-Za-z0-9_.-]+', "_", f"enh-discovery_{target['flow']}_{target['name']}")
     from datetime import datetime
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     out_dir = args.output_dir or os.getcwd()
-
     try:
         os.makedirs(out_dir, exist_ok=True)
     except Exception:
         pass
-
+        
     txt_path = os.path.join(out_dir, f"{base_name}_{stamp}.txt")
     json_path = os.path.join(out_dir, f"{base_name}_{stamp}.json")
+    
     report_text = _generate_enh_discovery_report(target, snapA, snapB, diffs)
-
+    
     try:
         with open(txt_path, "w", encoding="utf-8", errors="replace") as f:
             f.write(report_text)
@@ -392,22 +395,18 @@ def cmd_discover_enhancements(args):
     print(f"  JSON -> {json_path}")
     return 0
 
-
 def cmd_wait(args):
     deadline = time.time() + args.timeout
     while time.time() < deadline:
         devices = list_devices(include_all=False)
         matches = find_devices_by_selector(devices, dev_id=args.id, name_substr=args.name, flow=args.flow, regex=args.regex)
-
         if matches:
             buckets = _sort_and_tag_gui_indices(matches[:])
             flow = args.flow or (matches[0]["flow"] if matches else None)
             ordered = (buckets.get(flow) or []) if args.flow else (buckets["Render"] + buckets["Capture"])
-
             if not ordered:
                 print("ERROR: no target device found for the specified criteria", file=sys.stderr)
                 return 4
-
             if args.index is not None:
                 if args.index < 0 or args.index >= len(ordered):
                     print(f"ERROR: --index out of range (0..{len(ordered)-1})", file=sys.stderr)
@@ -415,15 +414,11 @@ def cmd_wait(args):
                 target = ordered[args.index]
             else:
                 target = ordered[0]
-
             print(json.dumps({"found": target}))
             return 0
-
         time.sleep(0.5)
-
     print("ERROR: timeout waiting for device", file=sys.stderr)
     return 3
-
 
 def build_parser():
     p = argparse.ArgumentParser(prog="audioctl", description="Windows audio control CLI (pycaw-based)")
@@ -463,7 +458,8 @@ def build_parser():
     p_ls.add_argument("--name", help="Substring of the device name for the capture device.")
     p_ls.add_argument("--enable", action="store_true", help="Enable 'Listen to this device'.")
     p_ls.add_argument("--disable", action="store_true", help="Disable 'Listen to this device'.")
-    p_ls.add_argument("--playback-target-id", help="Optional: Render endpoint ID to play through. Use '' for 'Default Playback Device'. If omitted, current target is preserved (or set to '' if enabling and no target).")
+    p_ls.add_argument("--playback-target-id", nargs='?', const='', default=None, help="Optional: Render endpoint ID to play through. Use without a value for 'Default Playback Device'.")
+    p_ls.add_argument("--playback-target-name", nargs='?', const='', default=None, help="Optional: Render endpoint name to play through. Use without a value for 'Default Playback Device'.")
     p_ls.add_argument("--index", type=int)
     p_ls.add_argument("--regex", action="store_true")
     p_ls.set_defaults(func=cmd_listen)
@@ -523,7 +519,6 @@ def build_parser():
 
     return p
 
-
 def cmd_diag_mmdevices(args):
     devices = list_devices(include_all=False)
     matches = find_devices_by_selector(devices, dev_id=args.id, name_substr=args.name, flow=args.flow, regex=args.regex)
@@ -533,14 +528,13 @@ def cmd_diag_mmdevices(args):
     if len(matches) > 1 and args.index is None:
         print("ERROR: multiple matches; specify --index", file=sys.stderr)
         return 4
-
+    
     buckets = _sort_and_tag_gui_indices([d for d in matches])
     ordered = (buckets.get(args.flow) or []) if args.flow else (buckets["Render"] + buckets["Capture"])
-
     if not ordered:
         print("ERROR: no target device found for the specified criteria", file=sys.stderr)
         return 4
-
+        
     if args.index is not None:
         if args.index < 0 or args.index >= len(ordered):
             print(f"ERROR: --index out of range (0..{len(ordered)-1})", file=sys.stderr)
@@ -548,11 +542,10 @@ def cmd_diag_mmdevices(args):
         target = ordered[args.index]
     else:
         target = ordered[0]
-
+        
     dump = _dump_mmdevices_all_values(target["id"])
     print(json.dumps({"id": target["id"], "name": target["name"], "flow": target["flow"], "mmdevices": dump}, indent=2))
     return 0
-
 
 def main(argv=None):
     if argv is None and len(sys.argv) <= 1:
@@ -562,7 +555,7 @@ def main(argv=None):
             print(f"ERROR: GUI failed to start: {e}", file=sys.stderr)
 
     try:
-        CoInitialize()
+        comtypes.CoInitialize()
     except Exception:
         pass
 
@@ -573,14 +566,14 @@ def main(argv=None):
         if args.enable and args.disable:
             print("ERROR: specify only one of --enable or --disable", file=sys.stderr)
             try:
-                CoUninitialize()
+                comtypes.CoUninitialize()
             except Exception:
                 pass
             return 1
         if not args.enable and not args.disable:
             print("ERROR: specify --enable or --disable", file=sys.stderr)
             try:
-                CoUninitialize()
+                comtypes.CoUninitialize()
             except Exception:
                 pass
             return 1
@@ -591,7 +584,7 @@ def main(argv=None):
         if trio != 1:
             print("ERROR: specify exactly one of --enable, --disable, or --learn", file=sys.stderr)
             try:
-                CoUninitialize()
+                comtypes.CoUninitialize()
             except Exception:
                 pass
             return 1
@@ -600,14 +593,14 @@ def main(argv=None):
         if (args.mute or args.unmute) and args.level is not None:
             print("ERROR: Cannot specify both --level and --mute/--unmute", file=sys.stderr)
             try:
-                CoUninitialize()
+                comtypes.CoUninitialize()
             except Exception:
                 pass
             return 1
         if not (args.mute or args.unmute or args.level is not None):
             print("ERROR: Must specify --level or --mute/--unmute", file=sys.stderr)
             try:
-                CoUninitialize()
+                comtypes.CoUninitialize()
             except Exception:
                 pass
             return 1
@@ -618,9 +611,7 @@ def main(argv=None):
         rc = 130
     finally:
         try:
-            CoUninitialize()
+            comtypes.CoUninitialize()
         except Exception:
             pass
-
     return rc
-
