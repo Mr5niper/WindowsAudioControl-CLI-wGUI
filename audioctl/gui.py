@@ -537,14 +537,11 @@ class AudioGUI:
             if current is None:
                 current = _read_listen_enable_from_registry(d["id"])
             enable = not bool(current)
-
             cmd = f'audioctl listen --id "{d["id"]}" --{"enable" if enable else "disable"}'
             self.maybe_print_cli(cmd)
-
             captured_stderr = io.StringIO()
             with redirect_stderr(captured_stderr):
                 ok = set_listen_to_device_ps(d["id"], enable, render_device_id=None)
-
             if not ok:
                 actual = _get_listen_to_device_status_ps(d["id"])
                 if actual is None:
@@ -555,7 +552,6 @@ class AudioGUI:
                 if actual is None:
                     verified, reg_state = _verify_listen_via_registry(d["id"], enable, timeout=3.0, interval=0.20)
                     actual = reg_state if verified or reg_state is not None else None
-
             if actual is None:
                 _log(f"Listen toggle result unknown for {d['name']} ({d['id']}); requested={enable}")
                 messagebox.showwarning("Listen status unknown", "Could not verify final 'Listen' state. It may still have applied.")
@@ -568,30 +564,26 @@ class AudioGUI:
             _log(f"Listen toggle exception for {d['name']} ({d['id']}): {e!r}")
             messagebox.showerror("Error", f"Failed to toggle Listen:\n{e}")
             self.set_status("Failed to toggle Listen")
-        finally:
-            # Force GC to clean up COM objects before next GUI interaction
-            import gc
-            gc.collect()
+        
+        # Schedule GC after this function returns and COM objects go out of scope
+        self.root.after(100, self._deferred_gc)
+
     def on_toggle_enhancements(self):
         d = self.get_selected_device()
         if not d:
             return
         try:
             _log(f"Enhancements toggle requested for {d['name']} ({d['id']})")
-
             if getattr(self, "_pending_enh", None) and self._pending_enh.get("id") == d["id"]:
                 enable = bool(self._pending_enh["enable"])
             else:
                 current = _get_enhancements_status_any(d["id"], d["flow"])
                 enable = True if current is None else (not bool(current))
-
             if not _enhancements_supported(d["id"], d["flow"]):
                 messagebox.showinfo("Not supported", "This endpoint does not have a configured vendor toggle for 'Audio Enhancements'. Use 'Learn Enhancements' first.")
                 self.set_status("Enhancements toggle failed: No vendor method.")
                 return
-
             self.maybe_print_cli(f'audioctl enhancements --id "{d["id"]}" --flow {d["flow"]} --{"enable" if enable else "disable"}')
-
             ok, verified_by, state = _apply_enhancements(
                 d["id"], d["flow"], enable,
                 prefer_hklm=is_admin(),
@@ -599,7 +591,6 @@ class AudioGUI:
                 vendor_ini_path=_vendor_ini_default_path()
             )
             self._pending_enh = None
-
             if ok and (state is None or state == enable):
                 state_txt = "enabled" if state else "disabled"
                 _log(f"Enhancements toggle result for {d['name']} ({d['id']}): final={state_txt} via {verified_by}")
@@ -614,11 +605,18 @@ class AudioGUI:
             _log(f"Enhancements toggle exception for {d['name']} ({d['id']}): {e!r}")
             messagebox.showerror("Error", f"Failed to toggle Enhancements:\n{e}")
             self.set_status("Failed to toggle Enhancements")
-        finally:
-            # Force GC to clean up COM objects before next GUI interaction
+        
+        # Schedule GC after this function returns and COM objects go out of scope
+        self.root.after(100, self._deferred_gc)
+
+    def _deferred_gc(self):
+        """Run garbage collection after COM operations complete and objects go out of scope."""
+        try:
             import gc
             gc.collect()
-
+        except Exception:
+            pass
+            
     def on_learn_enhancements(self):
         d = self.get_selected_device()
         if not d:
@@ -855,6 +853,7 @@ def launch_gui():
     except Exception:
         pass
     return 0
+
 
 
 
