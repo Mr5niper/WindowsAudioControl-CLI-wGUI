@@ -501,35 +501,38 @@ def _get_policy_config_fx():
 # Keep one PolicyConfig object alive for the whole process
 _policy_cfg_singleton = None
 def _get_policy_config_fx_singleton():
-    global _policy_cfg_singleton
-    if _policy_cfg_singleton is None:
-        _dbg("Creating PolicyConfigFx COM object (singleton)")
-        _policy_cfg_singleton = _get_policy_config_fx()
+    """
+    Create a fresh PolicyConfig object each time - no singleton caching.
+    
+    The singleton pattern was causing COM cleanup issues during garbage collection
+    because COM objects must be cleaned up on the same thread they were created on.
+    Holding a singleton across multiple GUI operations while GC runs intermittently
+    causes access violations when Python tries to Release() the interface at 
+    inopportune times.
+    
+    Creating fresh instances for each operation and letting them go out of scope
+    naturally allows proper COM cleanup timing.
+    """
+    _dbg("Creating PolicyConfigFx COM object (fresh instance, not singleton)")
+    try:
+        IPolicyConfigFx, CLSID_PolicyConfigClient, PROPERTYKEY, PROPVARIANT = _define_policyconfig_fx_interfaces()
+        pc = CoCreateInstance(CLSID_PolicyConfigClient, interface=IPolicyConfigFx, clsctx=CLSCTX_ALL)
         try:
             import ctypes
-            ptr = ctypes.cast(_policy_cfg_singleton, ctypes.c_void_p).value
+            ptr = ctypes.cast(pc, ctypes.c_void_p).value
             _dbg(f"PolicyConfigFx COM pointer = 0x{ptr:016X}")
         except Exception:
             pass
-    return _policy_cfg_singleton
+        return pc
+    except Exception as e:
+        _dbg(f"Failed to create PolicyConfigFx: {e}")
+        return None
 def _release_singletons_quiet():
     """
-    Release COM singletons we keep, so they don't get finalized after COM is uninitialized.
-    Safe to call multiple times.
+    No-op now since we don't keep singletons.
+    Kept for backward compatibility in case it's called from cleanup code.
     """
-    global _policy_cfg_singleton
-    try:
-        pc = _policy_cfg_singleton
-        _policy_cfg_singleton = None
-        if pc is not None:
-            try:
-                # Many comtypes wrappers expose Release(); guard just in case.
-                if hasattr(pc, "Release"):
-                    pc.Release()
-            except Exception:
-                pass
-    except Exception:
-        pass
+    pass
 def _pkey_disable_sysfx():
     # PKEY_AudioEndpoint_Disable_SysFx {E4870E26-3CC5-4CD2-BA46-CA0A9A70ED04}, pid 2
     IPolicyConfigFx, CLSID_PolicyConfigClient, PROPERTYKEY, PROPVARIANT = _define_policyconfig_fx_interfaces()
@@ -602,6 +605,8 @@ def _get_enhancements_status_com(device_id):
         IPolicyConfigFx, CLSID_PolicyConfigClient, PROPERTYKEY, PROPVARIANT = _define_policyconfig_fx_interfaces()
         pkey = _pkey_disable_sysfx()
         pc = _get_policy_config_fx_singleton()
+        if pc is None:  # ADD THIS CHECK
+            return None
         for bfx in (True, False):
             pv = PROPVARIANT()
             try:
@@ -625,6 +630,8 @@ def _set_enhancements_com(device_id, enable):
         IPolicyConfigFx, CLSID_PolicyConfigClient, PROPERTYKEY, PROPVARIANT = _define_policyconfig_fx_interfaces()
         pkey = _pkey_disable_sysfx()
         pc = _get_policy_config_fx_singleton()
+        if pc is None:  # ADD THIS CHECK
+            return False
         desired_disable = 0 if enable else 1
         ok_any = False
         for bfx in (True, False):
@@ -1723,5 +1730,6 @@ def _verify_effect_only(device_id, flow, expected_enabled, timeout=2.5, interval
             ok_streak = 0
         _time.sleep(interval)
     return False, None, last_state
+
 
 
