@@ -783,48 +783,39 @@ class AudioGUI:
         top.wait_window()
         return result["value"]
 
-
 def launch_gui():
     try:
         CoInitialize()
     except Exception:
         pass
-
     _log("launch_gui: creating Tk root")
     root = tk.Tk()
-
     try:
         if sys.platform.startswith("win"):
             root.iconbitmap(resource_path("audio.ico"))
     except Exception:
         pass
-
     gui = AudioGUI(root)
-
     def _on_root_close():
         try:
             _log("WM_DELETE_WINDOW received: root close requested (user/system)")
         except Exception:
             pass
         root.destroy()
-
     try:
         root.protocol("WM_DELETE_WINDOW", _on_root_close)
     except Exception:
         pass
-
     def _on_any_destroy(ev):
         try:
             if ev.widget == root:
                 _log("Tk <Destroy> on root window")
         except Exception:
             pass
-
     try:
         root.bind("<Destroy>", _on_any_destroy, add="+")
     except Exception:
         pass
-
     def _tk_report_callback_exception(exc, val, tb):
         try:
             _log_exc("TK CALLBACK EXCEPTION", (exc, val, tb))
@@ -834,25 +825,28 @@ def launch_gui():
             messagebox.showerror("Unexpected error", f"{exc.__name__}: {val}\n\nDetails were written to:\n{_log_path()}")
         except Exception:
             pass
-
     try:
         root.report_callback_exception = _tk_report_callback_exception
     except Exception:
         pass
-
     _log("launch_gui: entering mainloop")
     try:
         root.mainloop()
     except Exception:
         _log_exc("MAINLOOP EXCEPTION")
     _log("launch_gui: mainloop exited")
-
+    
+    # Clean up COM singletons before uninitializing COM
+    try:
+        from .devices import _release_singletons_quiet
+        _release_singletons_quiet()
+    except Exception:
+        pass
+    
     try:
         CoUninitialize()
     except Exception:
         pass
-
     return 0
-
 
 
