@@ -568,7 +568,10 @@ class AudioGUI:
             _log(f"Listen toggle exception for {d['name']} ({d['id']}): {e!r}")
             messagebox.showerror("Error", f"Failed to toggle Listen:\n{e}")
             self.set_status("Failed to toggle Listen")
-
+        finally:
+            # Force GC to clean up COM objects before next GUI interaction
+            import gc
+            gc.collect()
     def on_toggle_enhancements(self):
         d = self.get_selected_device()
         if not d:
@@ -611,6 +614,10 @@ class AudioGUI:
             _log(f"Enhancements toggle exception for {d['name']} ({d['id']}): {e!r}")
             messagebox.showerror("Error", f"Failed to toggle Enhancements:\n{e}")
             self.set_status("Failed to toggle Enhancements")
+        finally:
+            # Force GC to clean up COM objects before next GUI interaction
+            import gc
+            gc.collect()
 
     def on_learn_enhancements(self):
         d = self.get_selected_device()
@@ -848,5 +855,6 @@ def launch_gui():
     except Exception:
         pass
     return 0
+
 
 
