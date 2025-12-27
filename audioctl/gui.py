@@ -5,7 +5,7 @@ import time
 import tkinter as tk
 from tkinter import ttk, messagebox
 from contextlib import redirect_stderr
-from comtypes import CoInitialize, CoUninitialize
+import comtypes
 from .logging_setup import resource_path, _log, _log_exc, _log_path
 from .compat import is_admin
 from .devices import (
@@ -782,14 +782,10 @@ class AudioGUI:
         return result["value"]
 def launch_gui():
     try:
-        CoInitialize()
+        # Use the library's own initializer
+        comtypes.CoInitialize()
     except Exception:
         pass
-        
-    # Disable cyclical GC during runtime to prevent unpredictable COM cleanup
-    import gc
-    gc.disable()
-
     _log("launch_gui: creating Tk root")
     root = tk.Tk()
     try:
@@ -838,28 +834,10 @@ def launch_gui():
         _log_exc("MAINLOOP EXCEPTION")
     _log("launch_gui: mainloop exited")
     
-    # --- Start of Controlled Shutdown Sequence ---
-    _log("Shutdown: Releasing singletons and running final GC sweep before CoUninitialize")
-    
-    # Release any COM singletons we might hold (good practice)
     try:
-        from .devices import _release_singletons_quiet
-        _release_singletons_quiet()
-    except Exception:
-        pass
-
-    # Re-enable GC and run a full collection to ensure all __del__ methods
-    # for COM objects are called *before* CoUninitialize. This is the crucial step.
-    try:
-        gc.enable()
-        gc.collect()
-    except Exception:
-        pass
-    
-    # Now it is safe to uninitialize COM
-    try:
-        _log("Shutdown: Calling CoUninitialize")
-        CoUninitialize()
+        # Use the library's own uninitializer.
+        # This correctly handles cleanup at process exit.
+        comtypes.CoUninitialize()
     except Exception:
         pass
         
