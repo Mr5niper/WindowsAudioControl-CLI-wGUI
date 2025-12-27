@@ -1,4 +1,4 @@
-# Technical Specifications: audioctl — Windows Audio CLI/GUI Utility (v1.4.3.0)
+# Technical Specifications: audioctl — Windows Audio CLI/GUI Utility (v1.4.3.1)
 
 ## 1. Introduction
 `audioctl` is a Windows audio control utility offering:
@@ -15,7 +15,7 @@ Core capabilities:
 - enable/disable “Audio Enhancements” (SysFX) using a vendor‑first approach with a learnable INI, and
 - diagnostics and discovery tooling for Enhancements behavior.
 
-This document describes what the tool is and how it works in v1.4.3.0 (not a change log).
+This document describes what the tool is and how it works in v1.4.3.1 (not a change log).
 
 ---
 
@@ -168,7 +168,7 @@ Ensures for packaged and source runs:
   - Diagnostics (CLI `diag-sysfx`/`diag-mmdevices`):
     - Inspect Windows’ live state and registry surfaces alongside the vendor entry’s current value.
 
-### 5.8. Logging, diagnostics, and debug (v1.4.3.0)
+### 5.8. Logging, diagnostics, and debug (v1.4.3.1)
 - Lazy initialization:
   - Logging file and hooks are created on first write, not at import time.
   - File path resolves to the executable folder; if not writable, a temp folder is used.
@@ -289,12 +289,12 @@ Notes:
 - Ensure `audio.ico` and `version.txt` are present.
 - The build collects `pycaw` and ensures `comtypes.automation` is embedded for the shim.
 
-Version resource (example for v1.4.3.0):
+Version resource (example for v1.4.3.1):
 ```text
 VSVersionInfo(
   ffi=FixedFileInfo(
-    filevers=(1, 4, 3, 0),
-    prodvers=(1, 4, 3, 0),
+    filevers=(1, 4, 3, 1),
+    prodvers=(1, 4, 3, 1),
     mask=0x3f,
     flags=0x0,
     OS=0x40004,
@@ -302,7 +302,23 @@ VSVersionInfo(
     subtype=0x0,
     date=(0, 0)
   ),
-  kids=[ ... ]
+  kids=[
+    StringFileInfo([
+      StringTable('040904E4', [
+          StringStruct('CompanyName', 'Mr5niper5oft'),
+          StringStruct('FileDescription', 'Windows Audio Control CLI'),
+          StringStruct('FileVersion', '1.4.3.1'),
+          StringStruct('InternalName', 'audioctl'),
+          StringStruct('LegalCopyright', 'Copyright (c) 2025 Mr5niper5oft'),
+          StringStruct('OriginalFilename', 'audioctl.exe'),
+          StringStruct('ProductName', 'Windows Audio Control CLI'),
+          StringStruct('ProductVersion', '1.4.3.1'),
+        ]
+      )
+    ]),
+    VarFileInfo([VarStruct('Translation', [1033, 1252])])
+  ]
+
 )
 ```
 
@@ -346,4 +362,4 @@ VSVersionInfo(
 ---
 
 ## 11. Conclusion
-`audioctl` v1.4.3.0 provides a dependable, scriptable, and interactive way to manage Windows audio endpoints. It blends `comtypes` convenience with targeted `ctypes` vtable calls for robust Listen/SysFX operations, uses a vendor‑first approach for Enhancements, and offers comprehensive diagnostics and learn tooling. The logging subsystem initializes lazily, with opt‑in debugging, and the packaging flow is streamlined with a single PyInstaller command.
+`audioctl` v1.4.3.1 provides a dependable, scriptable, and interactive way to manage Windows audio endpoints. It blends `comtypes` convenience with targeted `ctypes` vtable calls for robust Listen/SysFX operations, uses a vendor‑first approach for Enhancements, and offers comprehensive diagnostics and learn tooling. The logging subsystem initializes lazily, with opt‑in debugging, and the packaging flow is streamlined with a single PyInstaller command.
