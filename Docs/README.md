@@ -666,30 +666,37 @@ Tips:
 
 - Launch the GUI:
   - Double-click `audioctl.exe` (no arguments), or run it without command-line options.
-
-
-<img width="1367" height="332" alt="image" src="https://github.com/user-attachments/assets/6ca5571d-ae3c-4878-855d-da840718056e" />
-
+    <br>
+  <img width="80" height="94" alt="image" src="https://github.com/user-attachments/assets/7559971f-8d97-4337-8f3a-c1b6df6038ba" />
+  <br>
+  
+<img width="1367" height="357" alt="image" src="https://github.com/user-attachments/assets/58d35c73-2cdd-44d4-9704-62817a97e558" />
+<br>
 
 ### Features
 
 - Visual list of playback (Render) and recording (Capture) devices, grouped and sorted.
-- “Show disabled/disconnected” toggle.
-- Right-click a **device** for actions:
-  - “Set as Default (all roles)”
+- **“Show disabled/disconnected”** toggle.
+- **Right-click** or **double-click** a device for actions:
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<img width="344" height="224" alt="image" src="https://github.com/user-attachments/assets/8745eae7-b9d8-415a-bb7a-3feebd739300" />
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<br>
+
+  - **“Set as Default (all roles)”**
   - “Set Volume…”
-  - “Mute” / “Unmute”
-  - “Toggle Listen (capture only)”
-  - “Enable/Disable Enhancements” (when a vendor toggle is known)
-  - “Learn Enhancements” (discover a vendor DWORD for that device)
+    <br>
+    <img width="245" height="146" alt="image" src="https://github.com/user-attachments/assets/010de5dc-28ca-407e-affe-fba7b2161d38" />
+    <br>
 
-
-    <img width="344" height="224" alt="image" src="https://github.com/user-attachments/assets/8745eae7-b9d8-415a-bb7a-3feebd739300" />
-
+  - **“Mute” / “Unmute”**
+  - **“Toggle Listen (capture only)”**
+  - **“Enable/Disable Enhancements”** (when a vendor toggle is known)
+  - **“Learn Enhancements”** (discover a vendor DWORD for that device)
 
 ### Print CLI Commands
 
-- Enable “Print CLI commands” in the top bar.  
+- Enable **“Print CLI commands”** in the top bar.  
   Every GUI action will print the equivalent `audioctl.exe` command to stdout (useful for learning the CLI and scripting).
 
 
@@ -701,7 +708,7 @@ Tips:
 
 ### Refresh Devices
 
-- Click “Refresh” or press `F5`.
+- Click **“Refresh”** or press `F5`.
 
 ### Notes
 
