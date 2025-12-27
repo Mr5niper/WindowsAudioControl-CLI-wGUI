@@ -700,7 +700,7 @@ Tips:
   Every GUI action will print the equivalent `audioctl.exe` command to stdout (useful for learning the CLI and scripting).
 
 
-<img width="417" height="69" alt="image" src="https://github.com/user-attachments/assets/30d83d03-84a6-4190-bc96-ad4b85ee1ad4" />
+<img width="420" height="71" alt="image" src="https://github.com/user-attachments/assets/8fbc4be3-02aa-43aa-93d3-fe7835dc6bfd" />
     <br>
     <br>
 
