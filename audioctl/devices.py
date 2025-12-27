@@ -527,6 +527,50 @@ def _get_policy_config_fx_singleton():
     except Exception as e:
         _dbg(f"Failed to create PolicyConfigFx: {e}")
         return None
+# Define PolicyConfig interfaces once at module load to avoid GC issues during dynamic class creation
+_POLICY_CONFIG_INTERFACES_CACHE = None
+def _get_policy_config_interfaces():
+    """
+    Get or create PolicyConfig interface definitions once and cache them.
+    This avoids redefining classes during each call, which can cause GC crashes.
+    """
+    global _POLICY_CONFIG_INTERFACES_CACHE
+    
+    if _POLICY_CONFIG_INTERFACES_CACHE is not None:
+        return _POLICY_CONFIG_INTERFACES_CACHE
+    
+    # Try to import from pycaw first
+    try:
+        from pycaw.policyconfig import IPolicyConfig, IPolicyConfigVista, CLSID_PolicyConfigClient
+        _POLICY_CONFIG_INTERFACES_CACHE = (IPolicyConfig, IPolicyConfigVista, CLSID_PolicyConfigClient)
+        return _POLICY_CONFIG_INTERFACES_CACHE
+    except Exception:
+        pass
+    
+    # Define locally if pycaw doesn't have them
+    CLSID_PolicyConfigClient = GUID(_guid_from_parts("294935CE", "-F637-4E7C-", "A41B-", "AB255460B862"))
+    
+    class IPolicyConfigVista(IUnknown):
+        _iid_ = GUID("{568B9108-44BF-40B4-9006-86AFE5B5A620}")
+        _methods_ = (
+            COMMETHOD([], HRESULT, 'GetMixFormat', (['in'], wintypes.LPCWSTR, 'wszDeviceId'), (['out'], ctypes.POINTER(ctypes.c_void_p), 'ppFormat')),
+            COMMETHOD([], HRESULT, 'GetDeviceFormat', (['in'], wintypes.LPCWSTR, 'wszDeviceId'), (['in'], wintypes.BOOL, 'bDefault'), (['out'], ctypes.POINTER(ctypes.c_void_p), 'ppFormat')),
+            COMMETHOD([], HRESULT, 'SetDeviceFormat', (['in'], wintypes.LPCWSTR, 'wszDeviceId'), (['in'], ctypes.c_void_p, 'pEndpointFormat'), (['in'], ctypes.c_void_p, 'mixFormat')),
+            COMMETHOD([], HRESULT, 'GetProcessingPeriod', (['in'], wintypes.LPCWSTR, 'wszDeviceId'), (['in'], wintypes.BOOL, 'bDefault'), (['out'], ctypes.POINTER(ctypes.c_longlong), 'pmftDefaultPeriod'), (['out'], ctypes.POINTER(ctypes.c_longlong), 'pmftMinimumPeriod')),
+            COMMETHOD([], HRESULT, 'SetProcessingPeriod', (['in'], wintypes.LPCWSTR, 'wszDeviceId'), (['in'], ctypes.POINTER(ctypes.c_longlong), 'pmftPeriod')),
+            COMMETHOD([], HRESULT, 'GetShareMode', (['in'], wintypes.LPCWSTR, 'wszDeviceId'), (['out'], ctypes.POINTER(ctypes.c_void_p), 'pMode')),
+            COMMETHOD([], HRESULT, 'SetShareMode', (['in'], wintypes.LPCWSTR, 'wszDeviceId'), (['in'], ctypes.c_void_p, 'mode')),
+            COMMETHOD([], HRESULT, 'GetPropertyValue', (['in'], wintypes.LPCWSTR, 'wszDeviceId'), (['in'], ctypes.POINTER(ctypes.c_void_p), 'key'), (['out'], ctypes.POINTER(ctypes.c_void_p), 'pv')),
+            COMMETHOD([], HRESULT, 'SetPropertyValue', (['in'], wintypes.LPCWSTR, 'wszDeviceId'), (['in'], ctypes.POINTER(ctypes.c_void_p), 'key'), (['in'], ctypes.POINTER(ctypes.c_void_p), 'pv')),
+            COMMETHOD([], HRESULT, 'SetDefaultEndpoint', (['in'], wintypes.LPCWSTR, 'wszDeviceId'), (['in'], wintypes.DWORD, 'role')),
+            COMMETHOD([], HRESULT, 'SetEndpointVisibility', (['in'], wintypes.LPCWSTR, 'wszDeviceId'), (['in'], wintypes.BOOL, 'bVisible')),
+        )
+    
+    # IPolicyConfig is typically the same as Vista for our purposes
+    IPolicyConfig = IPolicyConfigVista
+    
+    _POLICY_CONFIG_INTERFACES_CACHE = (IPolicyConfig, IPolicyConfigVista, CLSID_PolicyConfigClient)
+    return _POLICY_CONFIG_INTERFACES_CACHE
 def _release_singletons_quiet():
     """
     No-op now since we don't keep singletons.
@@ -1227,37 +1271,14 @@ def _get_policy_config():
                 return getter()
         except Exception:
             pass
-            
-    # 2) Fallback: try to import pycaw.policyconfig
+    
+    # 2) Use cached interface definitions (either from pycaw or our fallback)
     try:
-        from pycaw.policyconfig import IPolicyConfig, IPolicyConfigVista, CLSID_PolicyConfigClient
+        IPolicyConfig, IPolicyConfigVista, CLSID_PolicyConfigClient = _get_policy_config_interfaces()
         try:
             return CoCreateInstance(CLSID_PolicyConfigClient, interface=IPolicyConfig, clsctx=CLSCTX_ALL)
         except Exception:
             return CoCreateInstance(CLSID_PolicyConfigClient, interface=IPolicyConfigVista, clsctx=CLSCTX_ALL)
-    except Exception:
-        pass
-    # 3) Final fallback: define the Vista interface locally and use it directly
-    try:
-        # CLSID for PolicyConfigClient
-        CLSID_PolicyConfigClient = GUID(_guid_from_parts("294935CE", "-F637-4E7C-", "A41B-", "AB255460B862"))
-        # Minimal IPolicyConfigVista definition
-        class IPolicyConfigVista(IUnknown):
-            _iid_ = GUID("{568B9108-44BF-40B4-9006-86AFE5B5A620}")
-            _methods_ = (
-                COMMETHOD([], HRESULT, 'GetMixFormat', (['in'], wintypes.LPCWSTR, 'wszDeviceId'), (['out'], ctypes.POINTER(ctypes.c_void_p), 'ppFormat')),
-                COMMETHOD([], HRESULT, 'GetDeviceFormat', (['in'], wintypes.LPCWSTR, 'wszDeviceId'), (['in'], wintypes.BOOL, 'bDefault'), (['out'], ctypes.POINTER(ctypes.c_void_p), 'ppFormat')),
-                COMMETHOD([], HRESULT, 'SetDeviceFormat', (['in'], wintypes.LPCWSTR, 'wszDeviceId'), (['in'], ctypes.c_void_p, 'pEndpointFormat'), (['in'], ctypes.c_void_p, 'mixFormat')),
-                COMMETHOD([], HRESULT, 'GetProcessingPeriod', (['in'], wintypes.LPCWSTR, 'wszDeviceId'), (['in'], wintypes.BOOL, 'bDefault'), (['out'], ctypes.POINTER(ctypes.c_longlong), 'pmftDefaultPeriod'), (['out'], ctypes.POINTER(ctypes.c_longlong), 'pmftMinimumPeriod')),
-                COMMETHOD([], HRESULT, 'SetProcessingPeriod', (['in'], wintypes.LPCWSTR, 'wszDeviceId'), (['in'], ctypes.POINTER(ctypes.c_longlong), 'pmftPeriod')),
-                COMMETHOD([], HRESULT, 'GetShareMode', (['in'], wintypes.LPCWSTR, 'wszDeviceId'), (['out'], ctypes.POINTER(ctypes.c_void_p), 'pMode')),
-                COMMETHOD([], HRESULT, 'SetShareMode', (['in'], wintypes.LPCWSTR, 'wszDeviceId'), (['in'], ctypes.c_void_p, 'mode')),
-                COMMETHOD([], HRESULT, 'GetPropertyValue', (['in'], wintypes.LPCWSTR, 'wszDeviceId'), (['in'], ctypes.POINTER(ctypes.c_void_p), 'key'), (['out'], ctypes.POINTER(ctypes.c_void_p), 'pv')),
-                COMMETHOD([], HRESULT, 'SetPropertyValue', (['in'], wintypes.LPCWSTR, 'wszDeviceId'), (['in'], ctypes.POINTER(ctypes.c_void_p), 'key'), (['in'], ctypes.POINTER(ctypes.c_void_p), 'pv')),
-                COMMETHOD([], HRESULT, 'SetDefaultEndpoint', (['in'], wintypes.LPCWSTR, 'wszDeviceId'), (['in'], wintypes.DWORD, 'role')),
-                COMMETHOD([], HRESULT, 'SetEndpointVisibility', (['in'], wintypes.LPCWSTR, 'wszDeviceId'), (['in'], wintypes.BOOL, 'bVisible')),
-            )
-        return CoCreateInstance(CLSID_PolicyConfigClient, interface=IPolicyConfigVista, clsctx=CLSCTX_ALL)
     except Exception as e:
         raise AttributeError("Audio policy config interface not available in this environment") from e
 def set_default_endpoint(device_id, role):
@@ -1730,6 +1751,7 @@ def _verify_effect_only(device_id, flow, expected_enabled, timeout=2.5, interval
             ok_streak = 0
         _time.sleep(interval)
     return False, None, last_state
+
 
 
 
