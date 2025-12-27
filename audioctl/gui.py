@@ -305,7 +305,7 @@ class AudioGUI:
         except Exception:
             pass
 
-        rows = len(self.devices) + 2 if self.devices else 2
+        rows = len(self.devices) + 3 if self.devices else 3
         self.tree.configure(height=min(max(rows, 6), 22))
         self.root.update_idletasks()
 
@@ -850,6 +850,7 @@ def launch_gui():
     except Exception:
         pass
     return 0
+
 
 
 
