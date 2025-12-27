@@ -1,6 +1,49 @@
 # AUDIOCTL.PY CHANGELOG
 
-## v1.4.3.0 - [Current]
+## v1.4.3.1 - [Current]
+### Bug Fixes
+- **Critical COM Garbage Collection Crash Fix:**
+  - Eliminated access violations caused by Python's garbage collector attempting to release COM objects during dynamic interface class definition.
+  - Root cause: COM interface classes (`IPolicyConfigVista`, `IPropertyStoreVTBL`, etc.) were being redefined inside functions on every call. When GC ran during `COMMETHOD()` or `CFUNCTYPE()` construction, it violated COM apartment threading rules by releasing objects from previous operations.
+  - Solution: Implemented module-level interface definition caching to prevent repeated dynamic class creation:
+    - Added `_PROPERTY_STORE_INTERFACES_CACHE` for PropertyStore interfaces (Listen, Enhancements, device name resolution).
+    - Added `_POLICY_CONFIG_INTERFACES_CACHE` for PolicyConfig interfaces (set-default operations).
+    - Created `_get_property_store_interfaces()` to return cached PropertyStore interface definitions.
+    - `_get_policy_config_interfaces()` already added in v1.4.3.0, now leveraged for set-default stability.
+  - Updated all PropertyStore consumers to use cached interfaces:
+    - `set_listen_to_device_ps()` - Listen feature setter
+    - `_get_listen_to_device_status_ps()` - Listen feature status reader
+    - `_get_enhancements_status_propstore()` - Enhancements status via PropertyStore
+    - `_set_enhancements_propstore()` - Enhancements setter via PropertyStore
+    - `_safe_friendly_name_from_device()` - Device name resolution
+  - Removed PolicyConfigFx singleton pattern (was causing COM object persistence across operations).
+  - Modified `_get_policy_config_fx_singleton()` to create fresh instances per operation instead of caching.
+
+### Improvements
+- **Stability across all features:**
+  - Eliminated intermittent crashes after enhancement toggles followed by other operations.
+  - Fixed crashes when right-clicking devices (context menu with Listen feature).
+  - Resolved crashes during set-default operations after enhancement toggles.
+  - Improved reliability of device name enumeration.
+- **Performance:** Reduced overhead by eliminating repeated interface class construction (classes defined once, instances created as needed).
+- **COM Object Lifecycle:** More predictable COM object lifecycle management with better separation between class definition (one-time, cached) and instance usage (lightweight, per-operation).
+
+### Technical Details
+- Interface class definitions (with vtable function prototypes) are now created once at first use and stored in module-level cache dictionaries.
+- Subsequent calls retrieve pre-built classes instead of recreating them, preventing GC from interrupting COMMETHOD/CFUNCTYPE calls.
+- This separates the "class definition" phase (which can trigger GC during complex ctypes operations) from the "instance usage" phase (lightweight, GC-safe).
+
+### Testing Verified
+- Multiple set-default operations without crashes
+- Enhancement toggles followed by set-default operations without crashes
+- Listen feature context menu (right-click) without crashes
+- Volume/mute operations continue to work correctly
+- Device enumeration and name lookup without crashes
+- Enhancement discovery and learn operations remain stable
+
+---
+
+## v1.4.3.0
 ### New Features
 - **Deferred (on‑demand) logging initialization:**
   - The log file is created and the first breadcrumb is written only when the first log/debug line is emitted.
@@ -22,6 +65,8 @@
 - **No CLI/GUI surface changes:** Commands and options are unchanged.
 - **Logging visibility:** If nothing logs, no log file is created (because initialization is on‑demand).
 
+---
+
 ## v1.4.2.0
 ### Improvements
 - GUI shutdown and COM finalization:
@@ -31,6 +76,8 @@
 
 ### Behavioral Notes
 - CLI/GUI commands remain the same; the changes target cleaner shutdown and more predictable COM lifetime on systems sensitive to destructor timing.
+
+---
 
 ## v1.4.1.0
 ### New Features
@@ -312,6 +359,7 @@
 - **Basic Enumeration:** Listed playback (Render) and recording (Capture) devices using `IMMDeviceEnumerator` with `DEVICE_STATE_ACTIVE` only.
 - **“Listen” Toggle (Admin):** Initial registry-based enable/disable of “Listen to this device” for capture endpoints (admin required).
 - **Admin Check:** `is_admin` helper added to warn when elevation is required.
+
 
 
 
