@@ -667,8 +667,7 @@ Tips:
 - Launch the GUI:
   - Double-click `audioctl.exe` (no arguments), or run it without command-line options.
     <br>
-    <img width="88" height="102" alt="image" src="https://github.com/user-attachments/assets/6e57a1d1-88c6-4a0d-9ff0-033e4d80452f" />
-
+  <img width="80" height="94" alt="image" src="https://github.com/user-attachments/assets/7559971f-8d97-4337-8f3a-c1b6df6038ba" />
   <br>
   
 <img width="1367" height="357" alt="image" src="https://github.com/user-attachments/assets/58d35c73-2cdd-44d4-9704-62817a97e558" />
