@@ -1,6 +1,20 @@
 # AUDIOCTL.PY CHANGELOG
 
-## v1.4.3.2 - [Current]
+## v1.4.3.3 - [Current]
+### Documentation
+- Updated the technical specifications document to reflect the final stable state of v1.4.3.3.
+- Corrected and expanded the PyInstaller build instructions (Section 8) in the technical documentation to include:
+  - The `--bootloader-ignore-signals` flag in the full build command.
+  - A detailed breakdown of the recommended `audioctl.spec` file method for building the executable.
+
+### Behavioral Changes
+- Modified icon.
+- updated audioctl.spec file.
+- No code changes in this version; all updates are to documentation, build files and the build process.
+
+---
+ 
+## v1.4.3.2
 ### New Features
 - **Listen Playback by Name:** Added a `--playback-target-name` argument to the `listen` command, allowing users to specify the playback device by a substring of its name instead of the full device ID.
 - **Improved "Default Device" Selection:** Both `--playback-target-id` and `--playback-target-name` now support setting the playback target to "Default Device" by providing the flag without a value (e.g., `... --enable --playback-target-id`). This resolves usability issues with shells that strip empty quotes (`""`).
@@ -374,6 +388,7 @@
 - **Basic Enumeration:** Listed playback (Render) and recording (Capture) devices using `IMMDeviceEnumerator` with `DEVICE_STATE_ACTIVE` only.
 - **“Listen” Toggle (Admin):** Initial registry-based enable/disable of “Listen to this device” for capture endpoints (admin required).
 - **Admin Check:** `is_admin` helper added to warn when elevation is required.
+
 
 
 
