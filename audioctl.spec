@@ -3,8 +3,10 @@ from PyInstaller.utils.hooks import collect_all
 
 datas = [('audio.ico', '.')]
 binaries = []
-hiddenimports = ['comtypes.automation']
+hiddenimports = ['comtypes.automation', 'comtypes._post_coinit', 'comtypes._post_coinit.unknwn', 'comtypes._post_coinit.misc']
 tmp_ret = collect_all('pycaw')
+datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+tmp_ret = collect_all('comtypes')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 
 
