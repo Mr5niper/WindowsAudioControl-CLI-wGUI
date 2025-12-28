@@ -1,4 +1,4 @@
-# Technical Specifications: audioctl — Windows Audio CLI/GUI Utility (v1.4.3.2)
+# Technical Specifications: audioctl — Windows Audio CLI/GUI Utility (v1.4.3.3)
 ## 1. Introduction
 `audioctl` is a Windows audio control utility offering:
 - a command‑line interface (CLI) for scripting, automation, and diagnostics, and
@@ -11,7 +11,7 @@ Core capabilities:
 - enable/disable “Listen to this device” on capture devices,
 - enable/disable “Audio Enhancements” (SysFX) using a vendor‑first approach with a learnable INI, and
 - diagnostics and discovery tooling for Enhancements behavior.
-This document describes what the tool is and how it works in v1.4.3.2 (not a change log).
+This document describes what the tool is and how it works in v1.4.3.3 (not a change log).
 ---
 ## 2. Core Technologies & Dependencies
 - Python 3.x
@@ -129,7 +129,7 @@ This shim is critical for stability, especially in packaged executables. It ensu
   - mute True/False (None on read failure).
 ### 5.7. Enhancements (SysFX) — vendor‑first control and learn
 - (This section remains accurate and is unchanged).
-### 5.8. Logging, diagnostics, and debug (v1.4.3.2)
+### 5.8. Logging, diagnostics, and debug (v1.4.3.3)
 - (This section remains accurate and is unchanged).
 ---
 ## 6. CLI Command Reference
@@ -187,16 +187,110 @@ Quality/stability:
 - **Layout:** The window auto-sizes to content, with a small height buffer added to prevent the scrollbar from appearing unnecessarily.
 ---
 ## 8. Build (PyInstaller)
-Use the build command (PowerShell):
+There are two methods to build the single-file executable. Method B is recommended for consistency.
+
+### Method A: Using Command-Line Arguments
+This method is useful for one-off builds or scripting without relying on a `.spec` file.
+
 ```powershell
-pyinstaller -F --noupx --clean --console --name audioctl --collect-all pycaw --collect-all comtypes --hidden-import comtypes.automation --hidden-import comtypes._post_coinit --hidden-import comtypes._post_coinit.unknwn --hidden-import comtypes._post_coinit.misc --icon audio.ico --add-data "audio.ico;." --version-file version.txt .\audioctl.py
+pyinstaller -F --noupx --clean --console --name audioctl --bootloader-ignore-signals --collect-all pycaw --collect-all comtypes --hidden-import comtypes.automation --hidden-import comtypes._post_coinit --hidden-import comtypes._post_coinit.unknwn --hidden-import comtypes._post_coinit.misc --icon audio.ico --add-data "audio.ico;." --version-file version.txt .\audioctl.py
 ```
-Version resource (example for v1.4.3.2):
+
+### Method B: Using a `.spec` File (Recommended)
+This method is simpler to run and guarantees all build options are correct.
+
+**1. `audioctl.spec` File Content**  
+Ensure your `audioctl.spec` file contains the following. This file is a Python script that provides the build configuration to PyInstaller. The absence of a `COLLECT` block at the end instructs PyInstaller to create a single-file executable.
+
+```python
+# -*- mode: python ; coding: utf-8 -*-
+from PyInstaller.utils.hooks import collect_all
+
+# Corresponds to: --add-data "audio.ico;."
+datas = [('audio.ico', '.')]
+binaries = []
+
+# Corresponds to all the --hidden-import flags
+hiddenimports = [
+    'comtypes.automation',
+    'comtypes._post_coinit',
+    'comtypes._post_coinit.unknwn',
+    'comtypes._post_coinit.misc'
+]
+
+# Corresponds to: --collect-all pycaw
+tmp_ret = collect_all('pycaw')
+datas += tmp_ret[0]
+binaries += tmp_ret[1]
+hiddenimports += tmp_ret[2]
+
+# Corresponds to: --collect-all comtypes
+tmp_ret = collect_all('comtypes')
+datas += tmp_ret[0]
+binaries += tmp_ret[1]
+hiddenimports += tmp_ret[2]
+
+a = Analysis(
+    ['audioctl.py'], # The main script
+    pathex=[],
+    binaries=binaries,
+    datas=datas,
+    hiddenimports=hiddenimports,
+    hookspath=[],
+    hooksconfig={},
+    runtime_hooks=[],
+    excludes=[],
+    noarchive=False,
+    optimize=0,
+)
+pyz = PYZ(a.pure)
+
+exe = EXE(
+    pyz,
+    a.scripts,
+    a.binaries,
+    a.datas,
+    [],
+    # Corresponds to: --name audioctl
+    name='audioctl',
+    debug=False,
+    # Corresponds to: --bootloader-ignore-signals
+    bootloader_ignore_signals=True,
+    strip=False,
+    # Corresponds to: --noupx
+    upx=False,
+    upx_exclude=[],
+    runtime_tmpdir=None,
+    # Corresponds to: --console
+    console=True,
+    disable_windowed_traceback=False,
+    argv_emulation=False,
+    target_arch=None,
+    codesign_identity=None,
+    entitlements_file=None,
+    # Corresponds to: --version-file version.txt
+    version='version.txt',
+    # Corresponds to: --icon audio.ico
+    icon=['audio.ico'],
+)
+```
+
+**2. Build Command**  
+With the `.spec` file saved, run this simple command:
+
+```powershell
+pyinstaller audioctl.spec --clean
+```
+
+### Version Resource (`version.txt`)
+This file provides the version metadata embedded into the final `.exe` file's properties.
+
+Example for v1.4.3.3:
 ```text
 VSVersionInfo(
   ffi=FixedFileInfo(
-    filevers=(1, 4, 3, 2),
-    prodvers=(1, 4, 3, 2),
+    filevers=(1, 4, 3, 3),
+    prodvers=(1, 4, 3, 3),
     mask=0x3f,
     flags=0x0,
     OS=0x40004,
@@ -209,12 +303,12 @@ VSVersionInfo(
       StringTable('040904E4', [
           StringStruct('CompanyName', 'Mr5niper5oft'),
           StringStruct('FileDescription', 'Windows Audio Control CLI'),
-          StringStruct('FileVersion', '1.4.3.2'),
+          StringStruct('FileVersion', '1.4.3.3'),
           StringStruct('InternalName', 'audioctl'),
           StringStruct('LegalCopyright', 'Copyright (c) 2025 Mr5niper5oft'),
           StringStruct('OriginalFilename', 'audioctl.exe'),
           StringStruct('ProductName', 'Windows Audio Control CLI'),
-          StringStruct('ProductVersion', '1.4.3.2'),
+          StringStruct('ProductVersion', '1.4.3.3'),
         ]
       )
     ]),
@@ -257,4 +351,4 @@ VSVersionInfo(
 - Runtime toggles: the first applicable vendor entry (INI first, then built‑in) is written and verified; HKLM writes need admin.
 ---
 ## 11. Conclusion
-`audioctl` v1.4.3.2 provides a dependable, scriptable, and interactive way to manage Windows audio endpoints. It incorporates significant stability fixes for COM object lifecycle management, resolving both runtime and shutdown crashes. It now correctly handles the "Listen to this device" playback target and offers more user-friendly CLI options. The utility blends `comtypes` convenience with targeted `ctypes` vtable calls and direct registry access for robust Listen/SysFX operations.
+`audioctl` v1.4.3.3 provides a dependable, scriptable, and interactive way to manage Windows audio endpoints. It incorporates significant stability fixes for COM object lifecycle management, resolving both runtime and shutdown crashes. It now correctly handles the "Listen to this device" playback target and offers more user-friendly CLI options. The utility blends `comtypes` convenience with targeted `ctypes` vtable calls and direct registry access for robust Listen/SysFX operations.
