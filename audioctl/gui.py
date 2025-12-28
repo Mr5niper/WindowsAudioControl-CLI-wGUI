@@ -842,8 +842,3 @@ def launch_gui():
         pass
         
     return 0
-
-
-
-
-
