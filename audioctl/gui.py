@@ -32,7 +32,7 @@ from .vendor_db import (
 class AudioGUI:
     def __init__(self, root):
         self.root = root
-        self.root.title("Audio Control v1.4.3.226 12-31-2025")
+        self.root.title("Audio Control v1.4.3.2 12-27-2025")
         # Style and theme
         style = ttk.Style(self.root)
         try:
@@ -722,13 +722,19 @@ class AudioGUI:
             "Learn Enhancements - Step 1",
             "Set 'Audio Enhancements' to ENABLED for this device in Windows Sound settings.\n\nClick OK to capture snapshot A."
         )
-        snapA = _collect_sysfx_snapshot(d["id"])
+        captured_stderr = io.StringIO()
+        with redirect_stderr(captured_stderr):
+            snapA = _collect_sysfx_snapshot(d["id"])
+        _reemit_non_error_stderr(captured_stderr.getvalue())
         
         messagebox.showinfo(
             "Learn Enhancements - Step 2",
             "Set 'Audio Enhancements' to DISABLED for the same device.\n\nClick OK to capture snapshot B."
         )
-        snapB = _collect_sysfx_snapshot(d["id"])
+        captured_stderr = io.StringIO()
+        with redirect_stderr(captured_stderr):
+            snapB = _collect_sysfx_snapshot(d["id"])
+        _reemit_non_error_stderr(captured_stderr.getvalue())
         
         diffs = _diff_mmdevices_lists(snapA.get("registry") or [], snapB.get("registry") or [])
         snippet, picked = _build_vendor_ini_snippet(d, snapA, snapB, diffs)
@@ -801,14 +807,20 @@ class AudioGUI:
             "(Do NOT toggle the main switch, only this specific effect)\n\n"
             "Click OK to capture snapshot A."
         )
-        snapA = _collect_sysfx_snapshot(d["id"])
+        captured_stderr = io.StringIO()
+        with redirect_stderr(captured_stderr):
+            snapA = _collect_sysfx_snapshot(d["id"])
+        _reemit_non_error_stderr(captured_stderr.getvalue())
         
         messagebox.showinfo(
             f"Learn FX '{fx_name}' - Step 2",
             f"DISABLE the '{fx_name}' effect for the same device.\n\n"
             "Click OK to capture snapshot B."
         )
-        snapB = _collect_sysfx_snapshot(d["id"])
+        captured_stderr = io.StringIO()
+        with redirect_stderr(captured_stderr):
+            snapB = _collect_sysfx_snapshot(d["id"])
+        _reemit_non_error_stderr(captured_stderr.getvalue())
         
         ok, info = _learn_fx_and_write_ini(
             d, fx_name, snapA, snapB,
@@ -1002,4 +1014,3 @@ def launch_gui():
         pass
         
     return 0
-
