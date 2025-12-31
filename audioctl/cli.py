@@ -282,10 +282,16 @@ def cmd_enhancements(args):
         print(f"Learning FX '{fx_name}' for: {target['name']} ({target['flow']})")
         print(f"Set the '{fx_name}' effect to ENABLED for this device.")
         input("When ready, press Enter to capture snapshot A... ")
-        snapA = _collect_sysfx_snapshot(target["id"])
+        captured_stderr = io.StringIO()
+        with redirect_stderr(captured_stderr):
+            snapA = _collect_sysfx_snapshot(target["id"])
+        _reemit_non_error_stderr(captured_stderr.getvalue())
         print(f"Now set the '{fx_name}' effect to DISABLED for the same device.")
         input("When ready, press Enter to capture snapshot B... ")
-        snapB = _collect_sysfx_snapshot(target["id"])
+        captured_stderr = io.StringIO()
+        with redirect_stderr(captured_stderr):
+            snapB = _collect_sysfx_snapshot(target["id"])
+        _reemit_non_error_stderr(captured_stderr.getvalue())
         ok, info = _learn_fx_and_write_ini(
             target, fx_name, snapA, snapB,
             ini_path=getattr(args, "vendor_ini", None) or _vendor_ini_default_path(),
