@@ -42,32 +42,27 @@ from .vendor_db import (
     _read_vendor_entry_state,
 )
 from .gui import launch_gui
-
 def cmd_list(args):
     devices = list_devices(include_all=args.all)
     buckets = _sort_and_tag_gui_indices(devices)
     if args.json:
         print(json.dumps({"devices": devices}, indent=2))
         return 0
-
     print("--- Playback (Render) ---")
     for d in buckets["Render"]:
         flags = [k for k, v in d["isDefault"].items() if v]
         print(f"[{d['guiIndex']}] {d['name']}  id={d['id']}  defaults={','.join(flags) if flags else '-'}\n")
-
     print("\n--- Recording (Capture) ---")
     for d in buckets["Capture"]:
         flags = [k for k, v in d["isDefault"].items() if v]
         print(f"[{d['guiIndex']}] {d['name']}  id={d['id']}  defaults={','.join(flags) if flags else '-'}\n")
     return 0
-
 def cmd_set_default(args):
     if not is_admin():
         print("WARNING: 'set-default' might require Administrator privileges on this system.", file=sys.stderr)
     
     exit_code = 0
     results = {"set": []}
-
     if args.playback_id or args.playback_name:
         flow_name = "Render"
         if args.playback_id:
@@ -89,7 +84,6 @@ def cmd_set_default(args):
         except Exception as e:
             print(f"ERROR: failed to set playback default: {e}", file=sys.stderr)
             exit_code = 1
-
     if args.recording_id or args.recording_name:
         flow_name = "Capture"
         if args.recording_id:
@@ -111,10 +105,8 @@ def cmd_set_default(args):
         except Exception as e:
             print(f"ERROR: failed to set recording default: {e}", file=sys.stderr)
             exit_code = 1
-
     print(json.dumps(results))
     return exit_code
-
 def cmd_set_volume(args):
     if (args.mute or args.unmute) and args.level is not None:
         print("ERROR: Cannot specify both --level and --mute/--unmute", file=sys.stderr)
@@ -122,7 +114,6 @@ def cmd_set_volume(args):
     if not (args.mute or args.unmute or args.level is not None):
         print("ERROR: Must specify --level or --mute/--unmute", file=sys.stderr)
         return 1
-
     devices = list_devices(include_all=False)
     matches = find_devices_by_selector(devices, dev_id=args.id, name_substr=args.name, flow=args.flow, regex=args.regex)
     if len(matches) == 0:
@@ -147,7 +138,6 @@ def cmd_set_volume(args):
         target = ordered[args.index]
     else:
         target = ordered[0]
-
     ok = False
     if args.mute:
         ok = set_endpoint_mute(target["id"], True)
@@ -161,12 +151,10 @@ def cmd_set_volume(args):
         ok = set_endpoint_volume(target["id"], args.level)
         if ok:
             print(json.dumps({"volumeSet": {"id": target["id"], "name": target["name"], "level": args.level}}))
-
     if not ok:
         print("ERROR: failed to set volume/mute", file=sys.stderr)
         return 1
     return 0
-
 def cmd_listen(args):
     # Resolve playback target. Start with ID if it was provided.
     render_device_id = args.playback_target_id
@@ -182,7 +170,6 @@ def cmd_listen(args):
                 print(f"ERROR: Could not find playback target device: {err}", file=sys.stderr)
                 return 3
             render_device_id = render_target["id"]
-
     # --- The rest of the function is for finding the CAPTURE device ---
     devices = list_devices(include_all=False)
     matches = find_devices_by_selector(devices, dev_id=args.id, name_substr=args.name, flow="Capture", regex=args.regex)
@@ -239,26 +226,107 @@ def cmd_listen(args):
             
     print(json.dumps({"listenSet": {"id": target["id"], "name": target["name"], "enabled": actual_enabled_state}}))
     return 0
-
 def cmd_enhancements(args):
+    # Validation: exactly one operation
+    ops = [
+        bool(args.enable), bool(args.disable), bool(args.learn),
+        bool(args.learn_fx), bool(args.enable_fx), bool(args.disable_fx), bool(args.list_fx)
+    ]
+    if sum(ops) != 1:
+        print("ERROR: specify exactly one of --enable, --disable, --learn, --learn-fx, --enable-fx, --disable-fx, or --list-fx", file=sys.stderr)
+        return 1
+    # Device selection (existing pattern)
     devices = list_devices(include_all=False)
     matches = find_devices_by_selector(devices, dev_id=args.id, name_substr=args.name, flow=args.flow, regex=args.regex)
-    if len(matches) == 0:
+    if not matches:
         print("ERROR: device not found (active only)", file=sys.stderr)
         return 3
     if len(matches) > 1 and args.index is None:
-        print("ERROR: multiple matches; specify --index", file=sys.stderr)
+        print(_pretty_matches_msg("device", matches), file=sys.stderr)
         return 4
-    
-    buckets = _sort_and_tag_gui_indices([d for d in matches])
+    buckets = _sort_and_tag_gui_indices(matches[:])
     ordered = (buckets.get(args.flow) or []) if args.flow else (buckets["Render"] + buckets["Capture"])
     if not ordered:
         print("ERROR: no target device found for the specified criteria", file=sys.stderr)
         return 4
-        
     target = ordered[args.index] if args.index is not None else ordered[0]
-
-    if getattr(args, "learn", False):
+    # === NEW: FX Operations ===
+    if args.list_fx:
+        from .vendor_db import _list_fx_for_device, _read_vendor_entry_state
+        fx_list = _list_fx_for_device(target["id"], target["flow"], 
+                                       ini_path=getattr(args, "vendor_ini", None))
+        result = {
+            "device": {"id": target["id"], "name": target["name"], "flow": target["flow"]},
+            "availableFX": []
+        }
+        for fx in fx_list:
+            entry = fx.get("entry")
+            state = None
+            try:
+                state = _read_vendor_entry_state(entry, target["id"], target["flow"])
+            except Exception:
+                state = None
+            result["availableFX"].append({
+                "fx_name": fx.get("fx_name"),
+                "state": state
+            })
+        print(json.dumps(result))
+        return 0
+    if args.learn_fx:
+        from .vendor_db import _learn_fx_and_write_ini, _vendor_ini_default_path
+        fx_name = args.learn_fx.strip()
+        if not fx_name:
+            print("ERROR: FX name cannot be empty", file=sys.stderr)
+            return 1
+        # CLI does the prompting and snapshot capture, then calls pure logic
+        print(f"Learning FX '{fx_name}' for: {target['name']} ({target['flow']})")
+        print(f"Set the '{fx_name}' effect to ENABLED for this device.")
+        input("When ready, press Enter to capture snapshot A... ")
+        snapA = _collect_sysfx_snapshot(target["id"])
+        print(f"Now set the '{fx_name}' effect to DISABLED for the same device.")
+        input("When ready, press Enter to capture snapshot B... ")
+        snapB = _collect_sysfx_snapshot(target["id"])
+        ok, info = _learn_fx_and_write_ini(
+            target, fx_name, snapA, snapB,
+            ini_path=getattr(args, "vendor_ini", None) or _vendor_ini_default_path(),
+            prefer_hkcu=not args.prefer_hklm
+        )
+        if ok:
+            print(json.dumps({"fxLearned": {
+                "id": target["id"],
+                "name": target["name"],
+                "flow": target["flow"],
+                "fx_name": fx_name,
+                **info
+            }}))
+            return 0
+        else:
+            print(f"ERROR: FX learn failed: {info}", file=sys.stderr)
+            return 1
+    if args.enable_fx or args.disable_fx:
+        from .vendor_db import _apply_fx
+        fx_name = args.enable_fx or args.disable_fx
+        enable = bool(args.enable_fx)
+        ok, verified_by, state = _apply_fx(
+            target["id"], target["flow"], fx_name, enable,
+            ini_path=getattr(args, "vendor_ini", None)
+        )
+        if ok:
+            print(json.dumps({
+                "fxSet": {
+                    "id": target["id"],
+                    "name": target["name"],
+                    "fx_name": fx_name,
+                    "enabled": state,
+                    "verifiedBy": verified_by
+                }
+            }))
+            return 0
+        else:
+            print(f"ERROR: FX '{fx_name}' not found or toggle failed for this device", file=sys.stderr)
+            return 1
+    # === EXISTING: Main toggle operations (UNCHANGED) ===
+    if args.learn:
         ok, info = _learn_vendor_from_discovery_and_write_ini(
             target,
             ini_path=getattr(args, "vendor_ini", None) or _vendor_ini_default_path(),
@@ -270,26 +338,21 @@ def cmd_enhancements(args):
         else:
             print(f"ERROR: learn failed: {info}", file=sys.stderr)
             return 1
-
     enable = True if args.enable else False
     if not _enhancements_supported(target["id"], target["flow"]):
         print("ERROR: No vendor toggle available for this device. Use --learn to teach a vendor method.", file=sys.stderr)
         return 1
-
     ok, verified_by, state = _apply_enhancements(
         target["id"], target["flow"], enable,
         prefer_hklm=args.prefer_hklm,
         allow_universal_scan=False,
         vendor_ini_path=getattr(args, "vendor_ini", None)
     )
-
     if ok:
         print(json.dumps({"enhancementsSet": {"id": target["id"], "name": target["name"], "enabled": state, "verifiedBy": verified_by}}))
         return 0
-        
     print("ERROR: vendor toggle failed.", file=sys.stderr)
     return 1
-
 def cmd_diag_sysfx(args):
     devices = list_devices(include_all=False)
     matches = find_devices_by_selector(devices, dev_id=args.id, name_substr=args.name, flow=args.flow, regex=args.regex)
@@ -300,7 +363,6 @@ def cmd_diag_sysfx(args):
     buckets = _sort_and_tag_gui_indices([d for d in matches])
     ordered = (buckets.get(args.flow) or []) if args.flow else (buckets["Render"] + buckets["Capture"])
     target = ordered[args.index] if args.index is not None else ordered[0]
-
     live_win = _get_enhancements_status_propstore(target["id"])
     live_com = _get_enhancements_status_com(target["id"])
     
@@ -310,7 +372,6 @@ def cmd_diag_sysfx(args):
     if vend_entry:
         vend_state = _read_vendor_entry_state(vend_entry, target["id"], target["flow"])
         vend_tag = f"{vend_entry['name']} ({vend_entry['value_name']})"
-
     print(json.dumps({
         "id": target["id"], "name": target["name"], "flow": target["flow"],
         "enhancementsEnabled_live_propstore": live_win,
@@ -318,7 +379,6 @@ def cmd_diag_sysfx(args):
         "vendor_toggle_status": {vend_tag or "None Found": vend_state}
     }, indent=2))
     return 0
-
 def cmd_discover_enhancements(args):
     devices = list_devices(include_all=False)
     matches = find_devices_by_selector(devices, dev_id=args.id, name_substr=args.name, flow=args.flow, regex=args.regex)
@@ -332,7 +392,6 @@ def cmd_discover_enhancements(args):
     buckets = _sort_and_tag_gui_indices(matches[:])
     ordered = (buckets.get(args.flow) or []) if args.flow else (buckets["Render"] + buckets["Capture"])
     target = ordered[args.index] if args.index is not None else ordered[0]
-
     print(f"Discovery target: {target['name']} [{target['id']}] ({target['flow']})")
     print("Step 1: In Windows Sound settings, set 'Audio Enhancements' to ENABLED for this device.")
     input("When ready, press Enter to capture snapshot A... ")
@@ -363,7 +422,6 @@ def cmd_discover_enhancements(args):
             f.write(report_text)
     except Exception as e:
         print(f"ERROR: failed to write report: {e}", file=sys.stderr)
-
     bundle = {
         "device": target,
         "snapshotA": snapA,
@@ -375,7 +433,6 @@ def cmd_discover_enhancements(args):
             json.dump(bundle, f, indent=2)
     except Exception as e:
         print(f"ERROR: failed to write JSON bundle: {e}", file=sys.stderr)
-
     if getattr(args, "ini_snippet", None):
         snippet, picked = _build_vendor_ini_snippet(target, snapA, snapB, diffs)
         if snippet:
@@ -388,13 +445,11 @@ def cmd_discover_enhancements(args):
                 print(f"ERROR: failed to write INI snippet: {e}", file=sys.stderr)
         else:
             print("No suitable DWORD flip candidate found for INI snippet.", file=sys.stderr)
-
     print(report_text)
     print(f"\nSaved:")
     print(f"  TXT  -> {txt_path}")
     print(f"  JSON -> {json_path}")
     return 0
-
 def cmd_wait(args):
     deadline = time.time() + args.timeout
     while time.time() < deadline:
@@ -419,16 +474,13 @@ def cmd_wait(args):
         time.sleep(0.5)
     print("ERROR: timeout waiting for device", file=sys.stderr)
     return 3
-
 def build_parser():
     p = argparse.ArgumentParser(prog="audioctl", description="Windows audio control CLI (pycaw-based)")
     sub = p.add_subparsers(dest="cmd", required=True)
-
     p_list = sub.add_parser("list", help="List devices")
     p_list.add_argument("--all", action="store_true", help="Include disabled/disconnected")
     p_list.add_argument("--json", action="store_true")
     p_list.set_defaults(func=cmd_list)
-
     p_sd = sub.add_parser("set-default", help="Set default playback/recording devices (Admin might be required)")
     p_sd.add_argument("--playback-id")
     p_sd.add_argument("--playback-name")
@@ -441,7 +493,6 @@ def build_parser():
     p_sd.add_argument("--index", type=int)
     p_sd.add_argument("--regex", action="store_true")
     p_sd.set_defaults(func=cmd_set_default)
-
     p_sv = sub.add_parser("set-volume", help="Set endpoint volume (render or capture) or mute/unmute")
     p_sv.add_argument("--id")
     p_sv.add_argument("--name")
@@ -452,7 +503,6 @@ def build_parser():
     p_sv.add_argument("--index", type=int)
     p_sv.add_argument("--regex", action="store_true")
     p_sv.set_defaults(func=cmd_set_volume)
-
     p_ls = sub.add_parser("listen", help="Enable/disable 'Listen to this device' (capture only)")
     p_ls.add_argument("--id", help="Device ID for the capture device.")
     p_ls.add_argument("--name", help="Substring of the device name for the capture device.")
@@ -463,7 +513,6 @@ def build_parser():
     p_ls.add_argument("--index", type=int)
     p_ls.add_argument("--regex", action="store_true")
     p_ls.set_defaults(func=cmd_listen)
-
     p_fx = sub.add_parser("enhancements", help="Enable/disable 'Audio Enhancements' (SysFX) on a device")
     p_fx.add_argument("--id", help="Endpoint ID")
     p_fx.add_argument("--name", help="Substring or regex of the endpoint name")
@@ -477,8 +526,16 @@ def build_parser():
     p_fx.add_argument("--vendor-ini", help="Path to vendor_toggles.ini (default: next to the EXE).")
     p_fx.add_argument("--learn", action="store_true",
                       help="Manual learn (you toggle Windows UI). Captures A/B and writes vendor INI; no Windows fallback is used at runtime.")
+    # NEW FX ARGUMENTS
+    p_fx.add_argument("--learn-fx", metavar="FX_NAME",
+                      help="Learn a specific audio effect (e.g., BassBoost, Loudness)")
+    p_fx.add_argument("--enable-fx", metavar="FX_NAME",
+                      help="Enable a learned audio effect")
+    p_fx.add_argument("--disable-fx", metavar="FX_NAME",
+                      help="Disable a learned audio effect")
+    p_fx.add_argument("--list-fx", action="store_true",
+                      help="List all learned effects for this device")
     p_fx.set_defaults(func=cmd_enhancements)
-
     p_dx = sub.add_parser(
         "diag-sysfx",
         help="Dump live Enhancements state (COM, PropertyStore, vendor toggles)"
@@ -489,7 +546,6 @@ def build_parser():
     p_dx.add_argument("--index", type=int)
     p_dx.add_argument("--regex", action="store_true")
     p_dx.set_defaults(func=cmd_diag_sysfx)
-
     p_dm = sub.add_parser("diag-mmdevices", help="Dump all MMDevices values for an endpoint (debug)")
     p_dm.add_argument("--id")
     p_dm.add_argument("--name")
@@ -497,7 +553,6 @@ def build_parser():
     p_dm.add_argument("--index", type=int)
     p_dm.add_argument("--regex", action="store_true")
     p_dm.set_defaults(func=cmd_diag_mmdevices)
-
     p_learn = sub.add_parser("discover-enhancements", help="Interactively learn how Enhancements toggles for a device")
     p_learn.add_argument("--id")
     p_learn.add_argument("--name")
@@ -507,7 +562,6 @@ def build_parser():
     p_learn.add_argument("--output-dir", help="Where to write the TXT/JSON report (default: current directory)")
     p_learn.add_argument("--ini-snippet", help="Write a suggested vendor INI section to this path (append).")
     p_learn.set_defaults(func=cmd_discover_enhancements)
-
     p_w = sub.add_parser("wait", help="Wait for device to appear")
     p_w.add_argument("--id")
     p_w.add_argument("--name")
@@ -516,9 +570,7 @@ def build_parser():
     p_w.add_argument("--index", type=int)
     p_w.add_argument("--regex", action="store_true")
     p_w.set_defaults(func=cmd_wait)
-
     return p
-
 def cmd_diag_mmdevices(args):
     devices = list_devices(include_all=False)
     matches = find_devices_by_selector(devices, dev_id=args.id, name_substr=args.name, flow=args.flow, regex=args.regex)
@@ -546,22 +598,18 @@ def cmd_diag_mmdevices(args):
     dump = _dump_mmdevices_all_values(target["id"])
     print(json.dumps({"id": target["id"], "name": target["name"], "flow": target["flow"], "mmdevices": dump}, indent=2))
     return 0
-
 def main(argv=None):
     if argv is None and len(sys.argv) <= 1:
         try:
             return launch_gui()
         except Exception as e:
             print(f"ERROR: GUI failed to start: {e}", file=sys.stderr)
-
     try:
         comtypes.CoInitialize()
     except Exception:
         pass
-
     parser = build_parser()
     args = parser.parse_args(argv)
-
     if args.cmd == "listen":
         if args.enable and args.disable:
             print("ERROR: specify only one of --enable or --disable", file=sys.stderr)
@@ -578,17 +626,23 @@ def main(argv=None):
                 pass
             return 1
         args.enable = True if args.enable else False
-
     if args.cmd == "enhancements":
-        trio = int(bool(args.enable)) + int(bool(args.disable)) + int(bool(args.learn))
-        if trio != 1:
-            print("ERROR: specify exactly one of --enable, --disable, or --learn", file=sys.stderr)
+        ops_count = (
+            int(bool(getattr(args, "enable", False))) +
+            int(bool(getattr(args, "disable", False))) +
+            int(bool(getattr(args, "learn", False))) +
+            int(bool(getattr(args, "learn_fx", None))) +
+            int(bool(getattr(args, "enable_fx", None))) +
+            int(bool(getattr(args, "disable_fx", None))) +
+            int(bool(getattr(args, "list_fx", False)))
+        )
+        if ops_count != 1:
+            print("ERROR: specify exactly one of --enable, --disable, --learn, --learn-fx, --enable-fx, --disable-fx, or --list-fx", file=sys.stderr)
             try:
                 comtypes.CoUninitialize()
             except Exception:
                 pass
             return 1
-
     if args.cmd == "set-volume":
         if (args.mute or args.unmute) and args.level is not None:
             print("ERROR: Cannot specify both --level and --mute/--unmute", file=sys.stderr)
@@ -604,7 +658,6 @@ def main(argv=None):
             except Exception:
                 pass
             return 1
-
     try:
         rc = args.func(args)
     except KeyboardInterrupt:
