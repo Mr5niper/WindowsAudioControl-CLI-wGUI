@@ -306,17 +306,21 @@ class AudioGUI:
                 self.tree.selection_set(iid)
             else:
                 self.tree.selection_remove(iid)
-            # Clear any dynamically added FX menu items
-            if hasattr(self, "_dynamic_fx_menu_items"):
-                for idx in reversed(self._dynamic_fx_menu_items):
-                    try:
-                        self.menu.delete(idx)
-                    except Exception:
-                        pass
-            self._dynamic_fx_menu_items = []
+            # SAFELY CLEAR ALL PRIOR DYNAMIC ITEMS (anything after Learn Enhancements)
+            try:
+                last = self.menu.index("end")
+                if last is not None:
+                    static_end = self.learn_menu_index  # last static item is "Learn Enhancements"
+                    if static_end is not None and last > static_end:
+                        # Delete everything after the static block
+                        self.menu.delete(static_end + 1, "end")
+            except Exception:
+                pass
+            # Determine current end after trimming tail
             end_idx = self.menu.index("end")
             end_idx = end_idx if end_idx is not None else -1
             if not d:
+                # Disable all and show menu with no selection
                 for i in range(end_idx + 1):
                     etype = self.menu.type(i)
                     if etype in ("command", "cascade", "checkbutton", "radiobutton"):
@@ -357,7 +361,7 @@ class AudioGUI:
                 self.menu.entryconfig(self.listen_menu_index, label=label, state="normal")
             else:
                 self.menu.entryconfig(self.listen_menu_index, label=self.listen_menu_default_label, state="disabled")
-            # Main enhancements toggle (as before)
+            # Main enhancements toggle (unchanged)
             vend_available = False
             try:
                 vend_available = bool(_find_first_vendor_entry(d["id"], d["flow"], ini_path=_vendor_ini_default_path()))
@@ -382,14 +386,12 @@ class AudioGUI:
             else:
                 self._pending_enh = None
                 self.menu.entryconfig(self.enh_menu_index, label=self.enh_menu_default_label, state="disabled")
-            # === NEW: Add learned FX items (using vendor_db high-level functions) ===
+            # Add learned FX items dynamically (safe rebuild). Compute action at click-time.
             try:
                 from .vendor_db import _list_fx_for_device, _read_vendor_entry_state
                 fx_list = _list_fx_for_device(d["id"], d["flow"], ini_path=_vendor_ini_default_path())
                 if fx_list:
-                    sep_idx = self.menu.index("end") + 1
                     self.menu.add_separator()
-                    self._dynamic_fx_menu_items.append(sep_idx)
                     for fx_info in fx_list:
                         fx_name = fx_info["fx_name"]
                         entry = fx_info["entry"]
@@ -399,20 +401,16 @@ class AudioGUI:
                             current_state = None
                         if current_state is True:
                             label = f"Disable {fx_name}"
-                            target_enable = False
                         elif current_state is False:
                             label = f"Enable {fx_name}"
-                            target_enable = True
                         else:
                             label = f"Toggle {fx_name}"
-                            target_enable = True
-                        def make_fx_command(fx_n, enable_flag):
+                        # Click-time toggle to handle state changes while the menu is open
+                        def make_fx_command(fx_n):
                             def cmd():
-                                self.on_toggle_fx(fx_n, enable_flag)
+                                self.on_toggle_fx_live(fx_n)
                             return cmd
-                        fx_idx = self.menu.index("end") + 1
-                        self.menu.add_command(label=label, command=make_fx_command(fx_name, target_enable))
-                        self._dynamic_fx_menu_items.append(fx_idx)
+                        self.menu.add_command(label=label, command=make_fx_command(fx_name))
             except Exception as e:
                 try:
                     from .logging_setup import _log
@@ -1054,6 +1052,56 @@ class AudioGUI:
                     "FX Toggle Failed",
                     f"Could not toggle effect '{fx_name}'.\n"
                     "The effect may not be properly learned for this device."
+                )
+                self.set_status(f"Failed to toggle {fx_name}")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to toggle {fx_name}:\n{e}")
+            self.set_status(f"Error toggling {fx_name}")
+    def on_toggle_fx_live(self, fx_name):
+        """
+        Toggle an FX at click-time by reading current state again, so the action is correct
+        even if the state changed while the context menu was open.
+        """
+        d = self.get_selected_device()
+        if not d:
+            return
+        try:
+            from .vendor_db import _list_fx_for_device, _read_vendor_entry_state, _apply_fx, _vendor_ini_default_path
+            entries = _list_fx_for_device(d["id"], d["flow"], ini_path=_vendor_ini_default_path())
+            # Find the specific FX entry
+            entry = None
+            for e in entries:
+                if str(e.get("fx_name") or "").strip().lower() == str(fx_name).strip().lower():
+                    entry = e.get("entry")
+                    break
+            if not entry:
+                messagebox.showwarning("FX Toggle", f"Effect '{fx_name}' is not currently learned for this device.")
+                return
+            current = None
+            try:
+                current = _read_vendor_entry_state(entry, d["id"], d["flow"])
+            except Exception:
+                current = None
+            # Decide the new desired state based on current live state
+            if current is True:
+                enable = False
+            elif current is False:
+                enable = True
+            else:
+                # Unknown -> choose enable as a safe default
+                enable = True
+            ok, verified_by, state = _apply_fx(
+                d["id"], d["flow"], fx_name, enable,
+                ini_path=_vendor_ini_default_path()
+            )
+            if ok:
+                state_txt = "enabled" if state else "disabled"
+                self.set_status(f"{fx_name} {state_txt} for: {d['name']}")
+            else:
+                messagebox.showwarning(
+                    "FX Toggle Failed",
+                    f"Could not toggle effect '{fx_name}'.\n"
+                    "It may have been removed or is not properly learned for this device."
                 )
                 self.set_status(f"Failed to toggle {fx_name}")
         except Exception as e:
