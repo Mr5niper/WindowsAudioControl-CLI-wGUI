@@ -73,25 +73,21 @@ def _vendor_ini_default_path():
     except Exception:
         pass
     return os.path.join(fallback_dir, "vendor_toggles.ini")
-
 def _load_vendor_db_split(ini_path=None):
     """Load vendor toggles from INI. Returns dict with 'main' and 'fx' lists."""
     path = ini_path or _vendor_ini_default_path()
     cfg = configparser.ConfigParser()
     entries = {"main": [], "fx": []}
-    
     try:
         if not os.path.exists(path):
             return entries
         cfg.read(path, encoding="utf-8")
     except Exception:
         return entries
-        
     for sec in cfg.sections():
         try:
             # Get type, default to "main" for backward compatibility
             entry_type = cfg.get(sec, "type", fallback="main").strip().lower()
-            
             value_name = cfg.get(sec, "value_name").strip().lower()
             en = int(cfg.get(sec, "dword_enable"))
             di = int(cfg.get(sec, "dword_disable"))
@@ -100,7 +96,6 @@ def _load_vendor_db_split(ini_path=None):
             hives = [x.strip().upper() for x in cfg.get(sec, "hives", fallback="HKLM,HKCU").split(",") if x.strip()]
             flows = [x.strip().capitalize() for x in cfg.get(sec, "flows", fallback="Render,Capture").split(",") if x.strip()]
             notes = cfg.get(sec, "notes", fallback="")
-            
             entry = {
                 "name": sec,
                 "type": entry_type,
@@ -111,7 +106,6 @@ def _load_vendor_db_split(ini_path=None):
                 "flows": [f for f in flows if f in ("Render", "Capture")],
                 "notes": notes,
             }
-            
             if entry_type == "fx":
                 entry["fx_name"] = cfg.get(sec, "fx_name", fallback="").strip()
                 entry["device_name_pattern"] = cfg.get(sec, "device_name_pattern", fallback="").strip()
@@ -119,15 +113,14 @@ def _load_vendor_db_split(ini_path=None):
                     entries["fx"].append(entry)
             else:
                 entries["main"].append(entry)
-                
         except Exception:
             continue
-    
     return entries
-
 def _load_vendor_db(ini_path=None):
     """
-    Load vendor toggles from INI. Returns list of normalized entries.
+    DEPRECATED for main/FX separation: returns a mixed list of MAIN + FX entries.
+    Do NOT use this in code paths that must differentiate types. Use _load_vendor_db_split()
+    and explicitly select ['main'] or ['fx'] as appropriate.
     """
     path = ini_path or _vendor_ini_default_path()
     cfg = configparser.ConfigParser()
@@ -138,7 +131,6 @@ def _load_vendor_db(ini_path=None):
         cfg.read(path, encoding="utf-8")
     except Exception:
         return entries
-        
     for sec in cfg.sections():
         try:
             value_name = cfg.get(sec, "value_name").strip().lower()
@@ -256,11 +248,13 @@ def _verify_vendor_entry(entry, device_id, flow, expected_enabled, timeout=2.5, 
     return False, last
 def _try_vendor_first(device_id, flow, enable, ini_path=None):
     """
-    Try INI vendor entries first, then code vendors.
+    Try MAIN vendor entries from INI first, then built-in code vendors.
+    IMPORTANT: This function must NOT consider FX entries.
     """
-    # 1) INI vendors first
-    vendor_db = _load_vendor_db(ini_path)
-    for entry in vendor_db:
+    # 1) INI vendors (MAIN only)
+    db = _load_vendor_db_split(ini_path)
+    main_entries = db.get("main") or []
+    for entry in main_entries:
         try:
             if _vendor_entry_applies(entry, device_id, flow):
                 wrote = _set_vendor_entry_state(entry, device_id, flow, enable)
@@ -270,7 +264,7 @@ def _try_vendor_first(device_id, flow, enable, ini_path=None):
                         return True, f"vendor:{entry['name']}", st
         except Exception:
             continue
-    # 2) Code vendors next
+    # 2) Code vendors next (also MAIN by design)
     for entry in _CODE_VENDOR_ENTRIES:
         try:
             if _vendor_entry_applies(entry, device_id, flow):
@@ -284,9 +278,12 @@ def _try_vendor_first(device_id, flow, enable, ini_path=None):
     return False, None, None
 def _find_first_vendor_entry(device_id, flow, ini_path=None):
     """
-    Read-only: return the first vendor entry that applies to this endpoint.
+    Read-only: return the first MAIN vendor entry that applies to this endpoint.
+    FX entries are intentionally ignored here.
     """
-    for entry in _load_vendor_db(ini_path):
+    db = _load_vendor_db_split(ini_path)
+    main_entries = db.get("main") or []
+    for entry in main_entries:
         try:
             if _vendor_entry_applies(entry, device_id, flow):
                 return entry
@@ -354,24 +351,18 @@ def _build_vendor_ini_snippet(target, snapA, snapB, diffs, section_name=None):
         cands.append({
             "hive": hive, "name": name, "before": before, "after": after, "subkey": subkey
         })
-        
     if not cands:
         return None, None
-        
     cands.sort(key=lambda x: (0 if x["hive"]=="HKLM" else 1))
     pick = cands[0]
-    
     dword_enable = pick["before"]
     dword_disable = pick["after"]
-    
     if not section_name:
         base = re.sub(r'[^A-Za-z0-9_,\-{}]+', "_", pick["name"])
         section_name = f"vendor_{base}"
-        
     flows_all = "Render,Capture"
     hives = "HKCU,HKLM"
     notes = f"Auto-learned from discovery on device '{target.get('name')}' ({target.get('flow')}). A=enabled,B=disabled."
-    
     snippet = []
     snippet.append(f"[{section_name}]")
     snippet.append(f"value_name = {pick['name']}")
@@ -380,7 +371,6 @@ def _build_vendor_ini_snippet(target, snapA, snapB, diffs, section_name=None):
     snippet.append(f"hives = {hives}")
     snippet.append(f"flows = {flows_all}")
     snippet.append(f"notes = {notes}")
-    
     return "\n".join(snippet) + "\n", pick
 def _learn_vendor_from_discovery_and_write_ini(target, ini_path=None, prefer_hkcu=True):
     """
@@ -466,7 +456,6 @@ Type exactly: I UNDERSTAND
     orig = _get_enhancements_status_propstore(dev_id)
     if orig is None:
         orig = _get_enhancements_status_com(dev_id)
-        
     try:
         _set_enhancements_propstore(dev_id, True)
     except Exception:
@@ -475,10 +464,8 @@ Type exactly: I UNDERSTAND
         _set_enhancements_registry(dev_id, True, prefer_hklm=is_admin())
     except Exception:
         pass
-        
     _short_settle(0.3)
     snapA = _collect_sysfx_snapshot(dev_id)
-    
     try:
         _set_enhancements_propstore(dev_id, False)
     except Exception:
@@ -487,21 +474,17 @@ Type exactly: I UNDERSTAND
         _set_enhancements_registry(dev_id, False, prefer_hklm=is_admin())
     except Exception:
         pass
-        
     _short_settle(0.3)
     snapB = _collect_sysfx_snapshot(dev_id)
-    
     diffs = _diff_mmdevices_lists(snapA.get("registry") or [], snapB.get("registry") or [])
     snippet, picked = _build_vendor_ini_snippet(target, snapA, snapB, diffs)
     if not picked:
         return False, "No suitable REG_DWORD flip found under FxProperties. Driver may use non-DWORD or a different location."
-        
     value_name = picked["name"]
     dword_enable  = int(picked["before"])
     dword_disable = int(picked["after"])
     section_name  = _sanitize_ini_section_name(value_name)
     notes = f"Auto-learned on '{name}' ({flow}). A=enabled,B=disabled."
-    
     try:
         res = _append_vendor_ini_entry_if_missing(
             ini_path, section_name, value_name,
@@ -512,13 +495,11 @@ Type exactly: I UNDERSTAND
         return False, f"Permission denied writing INI: {ini_path}. Run as Administrator. {e}"
     except OSError as e:
         return False, f"Failed to write INI: {ini_path}. {e}"
-        
     try:
         if orig is True or orig is False:
             _apply_enhancements(dev_id, flow, orig, prefer_hklm=is_admin(), allow_universal_scan=False, vendor_ini_path=ini_path)
     except Exception:
         pass
-        
     return True, {
         "iniPath": ini_path,
         "section": section_name,
@@ -529,7 +510,7 @@ Type exactly: I UNDERSTAND
 def _get_enhancements_status_any(device_id, flow):
     """
     Best-effort read for display (GUI/labels), vendor-only:
-      1) Realtek/code vendors first, then INI vendors (HKCU preferred)
+      1) INI vendors first (user-learned), then built-in code vendors
       2) If no vendor applies -> None
     Returns:
       True  -> enhancements enabled
@@ -566,22 +547,17 @@ def _enhancements_supported(device_id, flow):
         return True if vend else False
     except Exception:
         return False
-
 def _find_fx_for_device(device_id, flow, fx_name, ini_path=None):
     """Find FX entries matching device and effect name. Returns list of matching entries."""
     from .devices import list_devices
-    
     db = _load_vendor_db_split(ini_path)
     matches = []
-    
     devices = list_devices(include_all=False)
     device = next((d for d in devices if d["id"] == device_id), None)
     if not device:
         return []
-    
     device_name = device["name"]
     flow_name = "Render" if str(flow).lower().startswith("r") else "Capture"
-    
     for entry in db["fx"]:
         if entry.get("fx_name", "").lower() != str(fx_name).strip().lower():
             continue
@@ -590,22 +566,17 @@ def _find_fx_for_device(device_id, flow, fx_name, ini_path=None):
         pattern = entry.get("device_name_pattern", "")
         if pattern and pattern.lower() in device_name.lower():
             matches.append(entry)
-    
     return matches
-
 def _list_fx_for_device(device_id, flow, ini_path=None):
     """List all learned FX for a device. Returns list of dicts with fx_name and entry."""
     from .devices import list_devices
-    
     db = _load_vendor_db_split(ini_path)
     devices = list_devices(include_all=False)
     device = next((d for d in devices if d["id"] == device_id), None)
     if not device:
         return []
-    
     device_name = device["name"]
     flow_name = "Render" if str(flow).lower().startswith("r") else "Capture"
-    
     available_fx = []
     seen = set()
     for entry in db["fx"]:
@@ -620,27 +591,20 @@ def _list_fx_for_device(device_id, flow, ini_path=None):
                     "fx_name": fx_name,
                     "entry": entry
                 })
-    
     return available_fx
-
 def _apply_fx(device_id, flow, fx_name, enable, ini_path=None):
     """Toggle a learned FX effect. Returns (success, verified_by, final_state)."""
     entries = _find_fx_for_device(device_id, flow, fx_name, ini_path)
     if not entries:
         return False, None, None
-    
     entry = entries[0]
-    
     wrote = _set_vendor_entry_state(entry, device_id, flow, enable)
     if not wrote:
         return False, None, None
-    
     ok, state = _verify_vendor_entry(entry, device_id, flow, enable, 
                                       timeout=2.5, interval=0.2, consecutive=2)
-    
     verified_by = f"vendor-fx:{entry['fx_name']}" if ok else None
     return ok, verified_by, state
-
 def _learn_fx_and_write_ini(target, fx_name, snapA, snapB, ini_path=None, prefer_hkcu=True):
     """
     Pure logic: Learn a specific FX effect toggle from two pre-captured snapshots.
@@ -651,28 +615,22 @@ def _learn_fx_and_write_ini(target, fx_name, snapA, snapB, ini_path=None, prefer
     """
     import re
     ini_path = ini_path or _vendor_ini_default_path()
-    
     try:
         diffs = _diff_mmdevices_lists(snapA.get("registry") or [], snapB.get("registry") or [])
     except Exception as e:
         return False, f"Diff failed: {e}"
-    
     # Reuse existing DWORD flip finder/snippet builder
     snippet, picked = _build_vendor_ini_snippet(target, snapA, snapB, diffs)
     if not picked:
         return False, "No suitable REG_DWORD flip found under FxProperties"
-    
     value_name = picked["name"]
     dword_enable = int(picked["before"])
     dword_disable = int(picked["after"])
-    
     safe_device_name = re.sub(r'[^A-Za-z0-9_\- ]+', '_', target["name"])
     safe_fx_name = re.sub(r'[^A-Za-z0-9_\-]+', '_', fx_name)
     section_name = f"{safe_device_name}::{safe_fx_name}"
-    
     notes = f"Learned FX '{fx_name}' for '{target['name']}' ({target['flow']})"
     hives = "HKCU,HKLM" if prefer_hkcu else "HKLM,HKCU"
-    
     try:
         _append_fx_ini_entry(
             ini_path, section_name, fx_name, target["name"],
@@ -683,7 +641,6 @@ def _learn_fx_and_write_ini(target, fx_name, snapA, snapB, ini_path=None, prefer
         return False, str(e)
     except Exception as e:
         return False, f"Failed to write INI: {e}"
-    
     return True, {
         "iniPath": ini_path,
         "section": section_name,
@@ -692,7 +649,6 @@ def _learn_fx_and_write_ini(target, fx_name, snapA, snapB, ini_path=None, prefer
         "dword_enable": dword_enable,
         "dword_disable": dword_disable
     }
-
 def _append_fx_ini_entry(ini_path, section_name, fx_name, device_name,
                          value_name, dword_enable, dword_disable,
                          flows, hives, notes):
@@ -703,10 +659,8 @@ def _append_fx_ini_entry(ini_path, section_name, fx_name, device_name,
             cfg.read(ini_path, encoding="utf-8")
     except Exception:
         pass
-    
     if cfg.has_section(section_name):
         raise ValueError(f"Section {section_name} already exists in INI")
-    
     # Ensure directory exists
     try:
         ini_dir = os.path.dirname(ini_path)
@@ -714,7 +668,6 @@ def _append_fx_ini_entry(ini_path, section_name, fx_name, device_name,
             os.makedirs(ini_dir, exist_ok=True)
     except Exception:
         pass
-    
     lines = [
         "",
         f"[{section_name}]",
@@ -728,6 +681,5 @@ def _append_fx_ini_entry(ini_path, section_name, fx_name, device_name,
         f"flows = {flows}",
         f"notes = {notes}",
     ]
-    
     with open(ini_path, "a", encoding="utf-8", errors="replace") as f:
         f.write("\n".join(lines) + "\n")
