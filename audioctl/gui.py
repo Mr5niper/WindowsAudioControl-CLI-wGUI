@@ -588,6 +588,35 @@ class AudioGUI:
             _log(f"Enhancements toggle exception for {d['name']} ({d['id']}): {e!r}")
             messagebox.showerror("Error", f"Failed to toggle Enhancements:\n{e}")
             self.set_status("Failed to toggle Enhancements")
+    def _run_elevated_vendor_ini_append(self, work_dict):
+        """
+        Elevate a tiny CLI helper to append to vendor_toggles.ini at a protected path.
+        We write a temp JSON work order, then ShellExecute 'runas' audioctl vendor-ini-append --work <json>.
+        """
+        import tempfile, json, os, sys, ctypes
+        try:
+            # Write work order file
+            tmp_dir = tempfile.gettempdir()
+            work_path = os.path.join(tmp_dir, f"audioctl_work_{int(time.time())}.json")
+            with open(work_path, "w", encoding="utf-8") as f:
+                json.dump(work_dict, f, indent=2)
+            # Build elevated command
+            if getattr(sys, "frozen", False):
+                exe = sys.executable
+                params = f'vendor-ini-append --work "{work_path}"'
+            else:
+                exe = sys.executable
+                params = f'-m audioctl vendor-ini-append --work "{work_path}"'
+            # ShellExecuteW returns >32 on success
+            ret = ctypes.windll.shell32.ShellExecuteW(None, "runas", exe, params, None, 1)
+            if ret <= 32:
+                messagebox.showerror("Elevation failed", "Could not start elevated helper. Please run as Administrator or choose a user-writable INI path.")
+                return False
+            messagebox.showinfo("Elevated write started", "An elevated helper was launched to write vendor_toggles.ini.\nIf you see a UAC prompt, click Yes.")
+            return True
+        except Exception as e:
+            messagebox.showerror("Elevation error", f"Failed to start elevated helper:\n{e}")
+            return False
     def on_learn_enhancements(self):
         d = self.get_selected_device()
         if not d:
@@ -770,11 +799,45 @@ class AudioGUI:
                 )
                 self.set_status("Learn Enhancements: vendor INI updated")
         except PermissionError:
-            messagebox.showerror(
+            # Offer elevation or fallback
+            if messagebox.askyesno(
                 "Permission denied",
-                f"Could not write INI at:\n{ini_path}\nRun as Administrator or choose a writable location."
-            )
-            self.set_status("Learn Enhancements: permission denied")
+                f"Cannot write INI at:\n{ini_path}\n\n"
+                "Choose Yes to attempt elevation and write here.\n"
+                "Choose No to save into a user-writable location instead."
+            ):
+                # Elevate just the write using a work order
+                work = {
+                    "kind": "main",
+                    "ini_path": ini_path,
+                    "section": section_name,
+                    "value_name": value_name,
+                    "dword_enable": int(dword_enable),
+                    "dword_disable": int(dword_disable),
+                    "flows": "Render,Capture",
+                    "hives": "HKCU,HKLM",
+                    "notes": notes,
+                }
+                ok = self._run_elevated_vendor_ini_append(work)
+                if ok:
+                    self.set_status("Learn Enhancements: elevated write started")
+                else:
+                    self.set_status("Learn Enhancements: elevation failed")
+            else:
+                # Fallback to user-writable INI
+                from .vendor_db import _vendor_ini_default_path
+                user_ini = _vendor_ini_default_path()
+                try:
+                    res = _append_vendor_ini_entry_if_missing(
+                        user_ini, section_name, value_name,
+                        dword_enable, dword_disable,
+                        flows="Render,Capture", hives="HKCU,HKLM", notes=notes
+                    )
+                    messagebox.showinfo("Saved to user INI", f"INI entry written to:\n{user_ini}\nSection: [{section_name}]")
+                    self.set_status("Learn Enhancements: saved to user INI")
+                except Exception as e2:
+                    messagebox.showerror("Write failed", f"Could not write to user INI either:\n{e2}")
+                    self.set_status("Learn Enhancements: write failed")
         except Exception as e:
             messagebox.showerror("Error", f"Failed to write INI: {e}")
             self.set_status("Learn Enhancements: write failed")
@@ -826,17 +889,62 @@ class AudioGUI:
             d, fx_name, snapA, snapB,
             ini_path=ini_path, prefer_hkcu=True
         )
-        
         if ok:
-            messagebox.showinfo(
-                f"Learn FX '{fx_name}'",
-                f"Learned effect '{fx_name}' and appended to:\n{ini_path}\n\n"
-                f"Section: [{info.get('section')}]\n"
-                f"Value: {info.get('value_name')}\n"
-                f"Enabled={info.get('dword_enable')}, Disabled={info.get('dword_disable')}\n\n"
-                "The effect will now appear in the context menu."
-            )
-            self.set_status(f"Learn FX '{fx_name}': vendor INI updated")
+            try:
+                messagebox.showinfo(
+                    f"Learn FX '{fx_name}'",
+                    f"Learned effect '{fx_name}' and appended to:\n{info.get('iniPath', ini_path)}\n\n"
+                    f"Section: [{info.get('section')}]\n"
+                    f"Value: {info.get('value_name')}\n"
+                    f"Enabled={info.get('dword_enable')}, Disabled={info.get('dword_disable')}\n\n"
+                    "The effect will now appear in the context menu."
+                )
+                self.set_status(f"Learn FX '{fx_name}': vendor INI updated")
+            except PermissionError:
+                # Offer elevation or fallback
+                section_name = info.get("section")
+                value_name = info.get("value_name")
+                dword_enable = int(info.get("dword_enable"))
+                dword_disable = int(info.get("dword_disable"))
+                notes = f"Learned FX '{fx_name}' for '{d['name']}' ({d['flow']})"
+                if messagebox.askyesno(
+                    "Permission denied",
+                    f"Cannot write INI at:\n{ini_path}\n\n"
+                    "Choose Yes to attempt elevation and write here.\n"
+                    "Choose No to save into a user-writable location instead."
+                ):
+                    work = {
+                        "kind": "fx",
+                        "ini_path": ini_path,
+                        "section": section_name,
+                        "fx_name": fx_name,
+                        "device_name": d["name"],
+                        "value_name": value_name,
+                        "dword_enable": dword_enable,
+                        "dword_disable": dword_disable,
+                        "flows": "Render,Capture",
+                        "hives": "HKCU,HKLM",
+                        "notes": notes,
+                    }
+                    ok2 = self._run_elevated_vendor_ini_append(work)
+                    if ok2:
+                        self.set_status(f"Learn FX '{fx_name}': elevated write started")
+                    else:
+                        self.set_status(f"Learn FX '{fx_name}': elevation failed")
+                else:
+                    from .vendor_db import _vendor_ini_default_path, _append_fx_ini_entry
+                    user_ini = _vendor_ini_default_path()
+                    try:
+                        _append_fx_ini_entry(
+                            user_ini, section_name, fx_name, d["name"],
+                            value_name, dword_enable, dword_disable,
+                            flows="Render,Capture", hives="HKCU,HKLM", notes=notes
+                        )
+                        messagebox.showinfo("Saved to user INI", f"INI entry written to:\n{user_ini}\nSection: [{section_name}]")
+                        self.set_status(f"Learn FX '{fx_name}': saved to user INI")
+                    except Exception as e2:
+                        messagebox.showerror("Write failed", f"Could not write to user INI either:\n{e2}")
+                        self.set_status(f"Learn FX '{fx_name}': write failed")
         else:
             msg = str(info) if info else "Unknown failure (no details)."
             if "No suitable REG_DWORD flip" in msg:
