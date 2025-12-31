@@ -6,6 +6,7 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 from contextlib import redirect_stderr
 import comtypes
+import re
 from .logging_setup import resource_path, _log, _log_exc, _log_path
 from .compat import is_admin
 from .devices import (
@@ -28,12 +29,10 @@ from .vendor_db import (
     _apply_enhancements,
     _enhancements_supported
 )
-
 class AudioGUI:
     def __init__(self, root):
         self.root = root
         self.root.title("Audio Control v1.4.3.2 12-27-2025")
-
         # Style and theme
         style = ttk.Style(self.root)
         try:
@@ -43,7 +42,6 @@ class AudioGUI:
                     break
         except Exception:
             pass
-
         try:
             from tkinter import font as tkfont
             base_font = tkfont.nametofont(self.root.cget("font"))
@@ -55,46 +53,37 @@ class AudioGUI:
             style.configure("Treeview.Heading", font=heading_font)
         except Exception:
             pass
-
         try:
             style.configure("Treeview.Heading", relief="flat")
             style.map("Treeview.Heading", background=[], relief=[], foreground=[])
         except Exception:
             pass
-
         # Variables
         self.include_all = tk.BooleanVar(value=False)
         self.print_cmd = tk.BooleanVar(value=False)
         self.devices = []
         self.item_to_device = {}
-
         # Layout
         self.container = ttk.Frame(self.root, padding=10)
         self.container.pack(fill="both", expand=True)
-
         self.topbar = ttk.Frame(self.container)
         self.topbar.pack(fill="x", pady=(0, 8))
-
         refresh_btn = ttk.Button(self.topbar, text="Refresh", command=self.refresh_devices)
         refresh_btn.pack(side="left")
-
         ttk.Checkbutton(
             self.topbar,
             text="Show disabled/disconnected",
             variable=self.include_all,
             command=self.refresh_devices
         ).pack(side="left", padx=(10, 0))
-
         ttk.Checkbutton(
             self.topbar,
             text="Print CLI commands",
             variable=self.print_cmd
         ).pack(side="left", padx=(10, 0))
-
         if not is_admin():
             admin_lbl = ttk.Label(self.topbar, text="Note: Some actions may require Administrator", foreground="#CC6600")
             admin_lbl.pack(side="right")
-
         # Treeview
         columns = ("Index", "Name", "Flow", "Defaults", "ID")
         self.tree = ttk.Treeview(
@@ -107,7 +96,6 @@ class AudioGUI:
         self.tree.heading("#0", text="")
         for col in columns:
             self.tree.heading(col, text=col)
-
         self.tree.column("#0", width=120, minwidth=100, anchor="e", stretch=False)
         self.tree.column("Index", width=60, minwidth=50, anchor="e", stretch=False)
         self.tree.column("Name",  width=200, minwidth=200, anchor="w", stretch=True)
@@ -116,18 +104,15 @@ class AudioGUI:
         self.tree.column("ID",    width=260, minwidth=240, anchor="w", stretch=False)
         self.tree["displaycolumns"] = ("Index", "Name", "Flow", "Defaults", "ID")
         self.tree.pack(fill="both", expand=True)
-
         # Scrollbar
         self.yscroll = ttk.Scrollbar(self.tree, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=self.yscroll.set)
         self.yscroll.pack(side="right", fill="y")
-
         # Group tags
         try:
             self.tree.tag_configure("group", foreground="#202020")
         except Exception:
             pass
-
         # Remove indicator element
         try:
             style.layout("Treeview.Item", [
@@ -143,12 +128,10 @@ class AudioGUI:
             ])
         except Exception:
             pass
-
         # Status bar
         self.status = tk.StringVar(value="Ready")
         self.statusbar = ttk.Label(self.root, textvariable=self.status, anchor="w", padding=(10, 3))
         self.statusbar.pack(fill="x", side="bottom")
-
         # Context menu
         self.menu = tk.Menu(self.root, tearoff=0)
         self.menu.add_command(label="Set as Default (all roles)", command=self.on_set_default)
@@ -165,9 +148,9 @@ class AudioGUI:
         self.enh_menu_index = self.menu.index("end")
         self.menu.add_command(label="Learn Enhancements", command=self.on_learn_enhancements)
         self.learn_menu_index = self.menu.index("end")
-
+        # NEW: Track dynamically added FX menu items
+        self._dynamic_fx_menu_items = []
         self._pending_enh = None
-
         # Bindings
         self.tree.bind("<Button-3>", self.on_right_click)
         self.tree.bind("<ButtonRelease-1>", self.on_left_release)
@@ -175,14 +158,11 @@ class AudioGUI:
         self.root.bind("<F5>", lambda e: self.refresh_devices())
         self.tree.bind("<Button-1>", self.on_left_click, add="+")
         self.tree.bind("<<TreeviewSelect>>", self.on_select_change)
-
         # Initial load
         self.refresh_devices()
         self.root.after_idle(self.adjust_layout_to_content)
-
     def is_group_row(self, iid):
         return iid not in self.item_to_device
-
     def on_left_click(self, event):
         region = self.tree.identify_region(event.x, event.y)
         if region == "heading":
@@ -192,7 +172,6 @@ class AudioGUI:
             return
         if self.is_group_row(iid):
             return "break"
-
     def on_select_change(self, event):
         sel = self.tree.selection()
         if not sel:
@@ -205,33 +184,25 @@ class AudioGUI:
                 self.tree.focus(children[0])
             else:
                 self.tree.selection_remove(iid)
-
     def set_status(self, text):
         self.status.set(text)
         try:
             print(text)
         except Exception:
             pass
-
     def refresh_devices(self):
         try:
             from .logging_setup import _dbg
             _dbg("GUI: refresh_devices begin")
-
             self.devices = list_devices(include_all=self.include_all.get())
-
             _dbg("GUI: refresh_devices end")
-
             self.item_to_device.clear()
             for item in self.tree.get_children():
                 self.tree.delete(item)
-
             render_devs = sorted([d for d in self.devices if d["flow"] == "Render"], key=lambda x: x["name"].lower())
             capture_devs = sorted([d for d in self.devices if d["flow"] == "Capture"], key=lambda x: x["name"].lower())
-
             grp_render = self.tree.insert("", "end", text="Playback (Render)", values=("", "", "", "", ""), open=True, tags=("group",))
             grp_capture = self.tree.insert("", "end", text="Recording (Capture)", values=("", "", "", "", ""), open=True, tags=("group",))
-
             def insert_group(parent, devs, flow_name):
                 for idx, d in enumerate(devs):
                     flags = [k for k, v in d["isDefault"].items() if v]
@@ -241,17 +212,14 @@ class AudioGUI:
                     d_copy["_group"] = flow_name
                     iid = self.tree.insert(parent, "end", text="", values=(idx, d["name"], d["flow"], defaults_txt, d["id"]))
                     self.item_to_device[iid] = d_copy
-
             insert_group(grp_render, render_devs, "Render")
             insert_group(grp_capture, capture_devs, "Capture")
-
             self.set_status("Device list updated")
             self.adjust_layout_to_content()
             self.root.after_idle(self.adjust_layout_to_content)
         except Exception as e:
             messagebox.showerror("Error", f"Failed to list devices:\n{e}")
             self.set_status("Failed to refresh devices")
-
     def adjust_layout_to_content(self):
         self.root.update_idletasks()
         try:
@@ -260,7 +228,6 @@ class AudioGUI:
             tv_font = tkfont.nametofont(tv_font_name)
         except Exception:
             tv_font = None
-
         names = [d["name"] for d in self.devices] or ["Name"]
         defaults_list = []
         for d in self.devices:
@@ -268,25 +235,21 @@ class AudioGUI:
             defaults_list.append(", ".join(flags) if flags else "-")
         if not defaults_list:
             defaults_list = ["-"]
-
         ids = [d["id"] for d in self.devices] or ["ID"]
         longest_name = max(names, key=len)
         longest_defaults = max(defaults_list, key=len)
         longest_id = max(ids, key=len)
-
         group_labels = ["Playback (Render)", "Recording (Capture)"]
         longest_group = max(group_labels, key=len)
         render_count = sum(1 for d in self.devices if d["flow"] == "Render")
         capture_count = sum(1 for d in self.devices if d["flow"] == "Capture")
         max_index_value = max(render_count - 1, capture_count - 1, 0)
         pad = 32
-
         def measure(text, fallback):
             try:
                 return tv_font.measure(text) if tv_font else fallback
             except Exception:
                 return fallback
-
         group_w = max(100, min(180, measure(longest_group, 140) + 12))
         name_w    = max(240, min(700, max(measure(longest_name, 300), measure("Name", 60)) + pad))
         flow_w    = max(80, max(measure("Recording", 90), measure("Flow", 60)) + 30)
@@ -294,7 +257,6 @@ class AudioGUI:
         id_w      = max(240, min(560, max(measure(longest_id, 340), measure("ID", 60)) + pad))
         index_digits = max(2, len(str(max_index_value)))
         index_w = max(60, measure("9" * index_digits, 30) + 24)
-
         try:
             self.tree.column("#0", width=int(group_w), minwidth=140, anchor="w", stretch=False)
             self.tree.column("Index", width=int(index_w), minwidth=50, anchor="e", stretch=False)
@@ -304,16 +266,13 @@ class AudioGUI:
             self.tree.column("ID",    width=int(id_w),    minwidth=240, anchor="w", stretch=False)
         except Exception:
             pass
-
         rows = len(self.devices) + 4 if self.devices else 4
         self.tree.configure(height=min(max(rows, 6), 50))
         self.root.update_idletasks()
-
         try:
             sb_w = max(self.yscroll.winfo_reqwidth(), 16) if self.yscroll else 16
         except Exception:
             sb_w = 16
-
         total_cols = int(group_w + index_w + name_w + flow_w + defaults_w + id_w + sb_w + 40)
         desired_w = max(total_cols, self.container.winfo_reqwidth() + 10, 600)
         desired_h = max(self.root.winfo_reqheight(), 325)
@@ -324,20 +283,17 @@ class AudioGUI:
         h = min(desired_h, scr_h - margin)
         self.root.geometry(f"{int(w)}x{int(h)}")
         self.root.minsize(int(min(w, scr_w - margin)), int(min(h, scr_h - margin)))
-
     def maybe_print_cli(self, cmd_str: str):
         if self.print_cmd.get():
             try:
                 print(cmd_str)
             except Exception:
                 pass
-
     def get_selected_device(self):
         sel = self.tree.selection()
         if not sel:
             return None
         return self.item_to_device.get(sel[0])
-
     def show_menu_for_item(self, event, iid=None):
         try:
             if iid is None:
@@ -345,15 +301,20 @@ class AudioGUI:
             if not iid:
                 return
             d = self.item_to_device.get(iid)
-
             if d:
                 self.tree.selection_set(iid)
             else:
                 self.tree.selection_remove(iid)
-
+            # Clear any dynamically added FX menu items
+            if hasattr(self, "_dynamic_fx_menu_items"):
+                for idx in reversed(self._dynamic_fx_menu_items):
+                    try:
+                        self.menu.delete(idx)
+                    except Exception:
+                        pass
+            self._dynamic_fx_menu_items = []
             end_idx = self.menu.index("end")
             end_idx = end_idx if end_idx is not None else -1
-
             if not d:
                 for i in range(end_idx + 1):
                     etype = self.menu.type(i)
@@ -361,17 +322,16 @@ class AudioGUI:
                         self.menu.entryconfig(i, state="disabled")
                 self.menu.tk_popup(event.x_root, event.y_root)
                 return
-
+            # Enable all standard menu items
             for i in range(end_idx + 1):
                 etype = self.menu.type(i)
                 if etype in ("command", "cascade", "checkbutton", "radiobutton"):
                     self.menu.entryconfig(i, state="normal")
-
+            # Mute label
             try:
                 muted = get_endpoint_mute(d["id"])
             except Exception:
                 muted = None
-
             if muted is True:
                 mute_label = "Unmute"
             elif muted is False:
@@ -379,7 +339,7 @@ class AudioGUI:
             else:
                 mute_label = "Unmute"
             self.menu.entryconfig(self.mute_menu_index, label=mute_label, state="normal")
-
+            # Listen label (Capture only)
             if d["flow"] == "Capture":
                 try:
                     current = _get_listen_to_device_status_ps(d["id"])
@@ -396,13 +356,12 @@ class AudioGUI:
                 self.menu.entryconfig(self.listen_menu_index, label=label, state="normal")
             else:
                 self.menu.entryconfig(self.listen_menu_index, label=self.listen_menu_default_label, state="disabled")
-
+            # Main enhancements toggle (as before)
             vend_available = False
             try:
                 vend_available = bool(_find_first_vendor_entry(d["id"], d["flow"], ini_path=_vendor_ini_default_path()))
             except Exception:
                 vend_available = False
-
             if vend_available:
                 try:
                     enh = _get_enhancements_status_any(d["id"], d["flow"])
@@ -417,20 +376,55 @@ class AudioGUI:
                 else:
                     enh_label = "Enable Enhancements"
                     target_enable_next = True
-
                 self._pending_enh = {"id": d["id"], "enable": target_enable_next}
                 self.menu.entryconfig(self.enh_menu_index, label=enh_label, state="normal")
             else:
                 self._pending_enh = None
                 self.menu.entryconfig(self.enh_menu_index, label=self.enh_menu_default_label, state="disabled")
-
+            # === NEW: Add learned FX items (using vendor_db high-level functions) ===
+            try:
+                from .vendor_db import _list_fx_for_device, _read_vendor_entry_state
+                fx_list = _list_fx_for_device(d["id"], d["flow"], ini_path=_vendor_ini_default_path())
+                if fx_list:
+                    sep_idx = self.menu.index("end") + 1
+                    self.menu.add_separator()
+                    self._dynamic_fx_menu_items.append(sep_idx)
+                    for fx_info in fx_list:
+                        fx_name = fx_info["fx_name"]
+                        entry = fx_info["entry"]
+                        try:
+                            current_state = _read_vendor_entry_state(entry, d["id"], d["flow"])
+                        except Exception:
+                            current_state = None
+                        if current_state is True:
+                            label = f"Disable {fx_name}"
+                            target_enable = False
+                        elif current_state is False:
+                            label = f"Enable {fx_name}"
+                            target_enable = True
+                        else:
+                            label = f"Toggle {fx_name}"
+                            target_enable = True
+                        def make_fx_command(fx_n, enable_flag):
+                            def cmd():
+                                self.on_toggle_fx(fx_n, enable_flag)
+                            return cmd
+                        fx_idx = self.menu.index("end") + 1
+                        self.menu.add_command(label=label, command=make_fx_command(fx_name, target_enable))
+                        self._dynamic_fx_menu_items.append(fx_idx)
+            except Exception as e:
+                try:
+                    from .logging_setup import _log
+                    _log(f"Failed to load FX for device {d['name']}: {e}")
+                except Exception:
+                    pass
+            # Show menu
             self.menu.tk_popup(event.x_root, event.y_root)
         finally:
             try:
                 self.menu.grab_release()
             except Exception:
                 pass
-
     def on_right_click(self, event):
         iid = self.tree.identify_row(event.y)
         if not iid:
@@ -438,7 +432,6 @@ class AudioGUI:
         if not self.is_group_row(iid):
             self.tree.selection_set(iid)
         self.show_menu_for_item(event, iid=iid)
-
     def on_left_release(self, event):
         iid = self.tree.identify_row(event.y)
         if not iid:
@@ -447,7 +440,6 @@ class AudioGUI:
             self.tree.selection_remove(iid)
             return
         self.tree.selection_set(iid)
-
     def on_double_click(self, event):
         iid = self.tree.identify_row(event.y)
         if not iid:
@@ -457,7 +449,6 @@ class AudioGUI:
             self.tree.selection_remove(iid)
             return
         self.show_menu_for_item(event, iid=iid)
-
     def on_set_default(self):
         d = self.get_selected_device()
         if not d:
@@ -469,7 +460,6 @@ class AudioGUI:
                 cmd = f'audioctl set-default --playback-id "{d["id"]}" --playback-role all'
             else:
                 cmd = f'audioctl set-default --recording-id "{d["id"]}" --recording-role all'
-
             if not is_admin():
                 if not messagebox.askyesno(
                     "Administrator recommended",
@@ -484,7 +474,6 @@ class AudioGUI:
         except Exception as e:
             messagebox.showerror("Error", f"Failed to set default:\n{e}")
             self.set_status("Failed to set default")
-
     def on_set_volume(self):
         d = self.get_selected_device()
         if not d:
@@ -504,7 +493,6 @@ class AudioGUI:
         except Exception as e:
             messagebox.showerror("Error", f"Failed to set volume:\n{e}")
             self.set_status("Failed to set volume")
-
     def on_toggle_mute(self):
         d = self.get_selected_device()
         if not d:
@@ -523,7 +511,6 @@ class AudioGUI:
         except Exception as e:
             messagebox.showerror("Error", f"Failed to toggle mute:\n{e}")
             self.set_status("Failed to toggle mute")
-
     def on_toggle_listen(self):
         d = self.get_selected_device()
         if not d:
@@ -537,14 +524,11 @@ class AudioGUI:
             if current is None:
                 current = _read_listen_enable_from_registry(d["id"])
             enable = not bool(current)
-
             cmd = f'audioctl listen --id "{d["id"]}" --{"enable" if enable else "disable"}'
             self.maybe_print_cli(cmd)
-
             captured_stderr = io.StringIO()
             with redirect_stderr(captured_stderr):
                 ok = set_listen_to_device_ps(d["id"], enable, render_device_id=None)
-
             if not ok:
                 actual = _get_listen_to_device_status_ps(d["id"])
                 if actual is None:
@@ -555,7 +539,6 @@ class AudioGUI:
                 if actual is None:
                     verified, reg_state = _verify_listen_via_registry(d["id"], enable, timeout=3.0, interval=0.20)
                     actual = reg_state if verified or reg_state is not None else None
-
             if actual is None:
                 _log(f"Listen toggle result unknown for {d['name']} ({d['id']}); requested={enable}")
                 messagebox.showwarning("Listen status unknown", "Could not verify final 'Listen' state. It may still have applied.")
@@ -568,27 +551,22 @@ class AudioGUI:
             _log(f"Listen toggle exception for {d['name']} ({d['id']}): {e!r}")
             messagebox.showerror("Error", f"Failed to toggle Listen:\n{e}")
             self.set_status("Failed to toggle Listen")
-
     def on_toggle_enhancements(self):
         d = self.get_selected_device()
         if not d:
             return
         try:
             _log(f"Enhancements toggle requested for {d['name']} ({d['id']})")
-
             if getattr(self, "_pending_enh", None) and self._pending_enh.get("id") == d["id"]:
                 enable = bool(self._pending_enh["enable"])
             else:
                 current = _get_enhancements_status_any(d["id"], d["flow"])
                 enable = True if current is None else (not bool(current))
-
             if not _enhancements_supported(d["id"], d["flow"]):
                 messagebox.showinfo("Not supported", "This endpoint does not have a configured vendor toggle for 'Audio Enhancements'. Use 'Learn Enhancements' first.")
                 self.set_status("Enhancements toggle failed: No vendor method.")
                 return
-
             self.maybe_print_cli(f'audioctl enhancements --id "{d["id"]}" --flow {d["flow"]} --{"enable" if enable else "disable"}')
-
             ok, verified_by, state = _apply_enhancements(
                 d["id"], d["flow"], enable,
                 prefer_hklm=is_admin(),
@@ -596,7 +574,6 @@ class AudioGUI:
                 vendor_ini_path=_vendor_ini_default_path()
             )
             self._pending_enh = None
-
             if ok and (state is None or state == enable):
                 state_txt = "enabled" if state else "disabled"
                 _log(f"Enhancements toggle result for {d['name']} ({d['id']}): final={state_txt} via {verified_by}")
@@ -611,87 +588,246 @@ class AudioGUI:
             _log(f"Enhancements toggle exception for {d['name']} ({d['id']}): {e!r}")
             messagebox.showerror("Error", f"Failed to toggle Enhancements:\n{e}")
             self.set_status("Failed to toggle Enhancements")
-
     def on_learn_enhancements(self):
         d = self.get_selected_device()
         if not d:
             return
+        
         try:
-            ini_path = _vendor_ini_default_path()
-            warn_txt = (
-                "READ CAREFULLY\n\n"
-                "This Learn mode will capture two registry snapshots and write a vendor entry into:\n"
-                f"  {ini_path}\n\n"
-                "From now on, future 'Enhancements' commands for this device WILL WRITE registry values on this machine "
-                "(HKCU/optional HKLM) to toggle Enhancements. This is persistent until you manually remove the learned section.\n\n"
-                "Critical rules during Learn:\n"
-                "- Do NOT change any other audio settings.\n"
-                "- Do NOT switch default devices.\n"
-                "- Do NOT open other audio/control apps.\n"
-                "- Only toggle 'Audio Enhancements' for THIS device exactly when asked.\n\n"
-                "Click OK to continue, or Cancel to abort."
-            )
-            if not messagebox.askokcancel("Warning – Learn writes registry (persistent)", warn_txt):
-                self.set_status("Learn Enhancements: aborted by user")
-                return
-
-            messagebox.showinfo(
-                "Learn Enhancements - Step 1",
-                "Set 'Audio Enhancements' to ENABLED for this device in Windows Sound settings.\n\nClick OK to capture snapshot A."
-            )
-            snapA = _collect_sysfx_snapshot(d["id"])
-
-            messagebox.showinfo(
-                "Learn Enhancements - Step 2",
-                "Set 'Audio Enhancements' to DISABLED for the same device.\n\nClick OK to capture snapshot B."
-            )
-            snapB = _collect_sysfx_snapshot(d["id"])
-
-            diffs = _diff_mmdevices_lists(snapA.get("registry") or [], snapB.get("registry") or [])
-            snippet, picked = _build_vendor_ini_snippet(d, snapA, snapB, diffs)
-
-            if not picked:
-                messagebox.showwarning("Learn Enhancements", "No suitable REG_DWORD flip found under FxProperties.\nThe driver may use non-DWORD or a different location.")
-                self.set_status("Learn Enhancements: no DWORD flip found")
-                return
-
-            value_name    = picked["name"]
-            dword_enable  = int(picked["before"])
-            dword_disable = int(picked["after"])
-            section_name  = _sanitize_ini_section_name(value_name)
-            notes = f"Auto-learned (manual UI) on '{d['name']}' ({d['flow']}). A=enabled,B=disabled."
-
+            # Choice Dialog
+            choice_dialog = tk.Toplevel(self.root)
+            choice_dialog.title("Learn Enhancements")
+            choice_dialog.transient(self.root)
+            choice_dialog.grab_set()
+            choice_dialog.resizable(False, False)
+            
             try:
-                res = _append_vendor_ini_entry_if_missing(
-                    ini_path, section_name, value_name,
-                    dword_enable, dword_disable,
-                    flows="Render,Capture", hives="HKCU,HKLM", notes=notes
-                )
-                if res == "exists":
-                    messagebox.showinfo(
-                        "Learn Enhancements",
-                        f"Vendor section already exists:\n{ini_path}\n\nSection: [{section_name}]\nNo changes were made."
-                    )
-                    self.set_status("Learn Enhancements: entry already exists")
+                if sys.platform.startswith("win"):
+                    choice_dialog.iconbitmap(resource_path("audio.ico"))
+            except Exception:
+                pass
+            
+            frm = ttk.Frame(choice_dialog, padding=20)
+            frm.pack(fill="both", expand=True)
+            
+            ttk.Label(frm, text="What are you learning?", 
+                      font=("", 10, "bold")).pack(pady=(0, 15))
+            
+            learn_type = tk.StringVar(value="main")
+            fx_name_var = tk.StringVar()
+            fx_entry_widget = None
+            
+            def on_radio_change():
+                if learn_type.get() == "fx":
+                    fx_entry_widget.config(state="normal")
+                    fx_entry_widget.focus_set()
                 else:
-                    messagebox.showinfo(
-                        "Learn Enhancements",
-                        f"Learned vendor toggle and appended to:\n{ini_path}\n\nSection: [{section_name}]\nValue: {value_name}\nEnabled={dword_enable}, Disabled={dword_disable}"
-                    )
-                    self.set_status("Learn Enhancements: vendor INI updated")
-            except PermissionError:
-                messagebox.showerror(
-                    "Permission denied",
-                    f"Could not write INI at:\n{ini_path}\nRun as Administrator or choose a writable location."
-                )
-                self.set_status("Learn Enhancements: permission denied")
-            except Exception as e:
-                messagebox.showerror("Error", f"Failed to write INI: {e}")
-                self.set_status("Learn Enhancements: write failed")
+                    fx_entry_widget.config(state="disabled")
+            
+            rb1 = ttk.Radiobutton(
+                frm, 
+                text="The main 'Audio Enhancements' on/off switch",
+                variable=learn_type,
+                value="main",
+                command=on_radio_change
+            )
+            rb1.pack(anchor="w", pady=5)
+            
+            rb2 = ttk.Radiobutton(
+                frm,
+                text="A specific effect (e.g., Bass Boost, Loudness):",
+                variable=learn_type,
+                value="fx",
+                command=on_radio_change
+            )
+            rb2.pack(anchor="w", pady=5)
+            
+            fx_name_frame = ttk.Frame(frm)
+            fx_name_frame.pack(anchor="w", padx=(30, 0), pady=(5, 15))
+            
+            ttk.Label(fx_name_frame, text="Effect name:").pack(side="left", padx=(0, 5))
+            fx_entry_widget = ttk.Entry(fx_name_frame, textvariable=fx_name_var, width=25)
+            fx_entry_widget.pack(side="left")
+            fx_entry_widget.config(state="disabled")
+            
+            result = {"proceed": False, "type": None, "fx_name": None}
+            
+            def on_ok():
+                if learn_type.get() == "fx":
+                    fx = fx_name_var.get().strip()
+                    if not fx:
+                        messagebox.showerror("Invalid Input", 
+                                           "Please enter an effect name.", 
+                                           parent=choice_dialog)
+                        return
+                    result["fx_name"] = fx
+                result["type"] = learn_type.get()
+                result["proceed"] = True
+                choice_dialog.destroy()
+            
+            def on_cancel():
+                result["proceed"] = False
+                choice_dialog.destroy()
+            
+            btn_frame = ttk.Frame(frm)
+            btn_frame.pack(anchor="e")
+            
+            ttk.Button(btn_frame, text="OK", command=on_ok).pack(side="right", padx=(5, 0))
+            ttk.Button(btn_frame, text="Cancel", command=on_cancel).pack(side="right")
+            
+            choice_dialog.bind("<Return>", lambda e: on_ok())
+            choice_dialog.bind("<Escape>", lambda e: on_cancel())
+            
+            choice_dialog.update_idletasks()
+            x = self.root.winfo_x() + (self.root.winfo_width() - choice_dialog.winfo_width()) // 2
+            y = self.root.winfo_y() + (self.root.winfo_height() - choice_dialog.winfo_height()) // 2
+            choice_dialog.geometry(f"+{x}+{y}")
+            
+            choice_dialog.wait_window()
+            
+            if not result["proceed"]:
+                self.set_status("Learn: cancelled by user")
+                return
+            
+            if result["type"] == "main":
+                self._learn_main_toggle(d)
+            else:
+                self._learn_fx_toggle(d, result["fx_name"])
+        
         except Exception as e:
-            messagebox.showerror("Error", f"Learn Enhancements failed:\n{e}")
-            self.set_status("Learn Enhancements: failed")
-
+            messagebox.showerror("Error", f"Learn failed:\n{e}")
+            self.set_status("Learn failed")
+    def _learn_main_toggle(self, d):
+        """Existing learn logic (main Enhancements switch)."""
+        ini_path = _vendor_ini_default_path()
+        warn_txt = (
+            "READ CAREFULLY\n\n"
+            "This Learn mode will capture two registry snapshots and write a vendor entry into:\n"
+            f"  {ini_path}\n\n"
+            "From now on, future 'Enhancements' commands for this device WILL WRITE registry values on this machine "
+            "(HKCU/optional HKLM) to toggle Enhancements. This is persistent until you manually remove the learned section.\n\n"
+            "Critical rules during Learn:\n"
+            "- Do NOT change any other audio settings.\n"
+            "- Do NOT switch default devices.\n"
+            "- Do NOT open other audio/control apps.\n"
+            "- Only toggle 'Audio Enhancements' for THIS device exactly when asked.\n\n"
+            "Click OK to continue, or Cancel to abort."
+        )
+        
+        if not messagebox.askokcancel("Warning – Learn writes registry (persistent)", warn_txt):
+            self.set_status("Learn Enhancements: aborted by user")
+            return
+        
+        messagebox.showinfo(
+            "Learn Enhancements - Step 1",
+            "Set 'Audio Enhancements' to ENABLED for this device in Windows Sound settings.\n\nClick OK to capture snapshot A."
+        )
+        snapA = _collect_sysfx_snapshot(d["id"])
+        
+        messagebox.showinfo(
+            "Learn Enhancements - Step 2",
+            "Set 'Audio Enhancements' to DISABLED for the same device.\n\nClick OK to capture snapshot B."
+        )
+        snapB = _collect_sysfx_snapshot(d["id"])
+        
+        diffs = _diff_mmdevices_lists(snapA.get("registry") or [], snapB.get("registry") or [])
+        snippet, picked = _build_vendor_ini_snippet(d, snapA, snapB, diffs)
+        
+        if not picked:
+            messagebox.showwarning("Learn Enhancements", 
+                                  "No suitable REG_DWORD flip found under FxProperties.\nThe driver may use non-DWORD or a different location.")
+            self.set_status("Learn Enhancements: no DWORD flip found")
+            return
+        
+        value_name = picked["name"]
+        dword_enable = int(picked["before"])
+        dword_disable = int(picked["after"])
+        section_name = _sanitize_ini_section_name(value_name)
+        notes = f"Auto-learned (manual UI) on '{d['name']}' ({d['flow']}). A=enabled,B=disabled."
+        
+        try:
+            res = _append_vendor_ini_entry_if_missing(
+                ini_path, section_name, value_name,
+                dword_enable, dword_disable,
+                flows="Render,Capture", hives="HKCU,HKLM", notes=notes
+            )
+            if res == "exists":
+                messagebox.showinfo(
+                    "Learn Enhancements",
+                    f"Vendor section already exists:\n{ini_path}\n\nSection: [{section_name}]\nNo changes were made."
+                )
+                self.set_status("Learn Enhancements: entry already exists")
+            else:
+                messagebox.showinfo(
+                    "Learn Enhancements",
+                    f"Learned vendor toggle and appended to:\n{ini_path}\n\nSection: [{section_name}]\nValue: {value_name}\nEnabled={dword_enable}, Disabled={dword_disable}"
+                )
+                self.set_status("Learn Enhancements: vendor INI updated")
+        except PermissionError:
+            messagebox.showerror(
+                "Permission denied",
+                f"Could not write INI at:\n{ini_path}\nRun as Administrator or choose a writable location."
+            )
+            self.set_status("Learn Enhancements: permission denied")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to write INI: {e}")
+            self.set_status("Learn Enhancements: write failed")
+    def _learn_fx_toggle(self, d, fx_name):
+        """Learn a specific FX effect using GUI prompts and core logic."""
+        from .vendor_db import _learn_fx_and_write_ini, _vendor_ini_default_path
+        
+        ini_path = _vendor_ini_default_path()
+        
+        warn_txt = (
+            "READ CAREFULLY\n\n"
+            f"This Learn mode will capture two registry snapshots for the effect '{fx_name}' "
+            f"and write a vendor entry into:\n  {ini_path}\n\n"
+            "From now on, this effect WILL BE CONTROLLABLE via registry writes.\n\n"
+            "Critical rules during Learn:\n"
+            f"- ONLY toggle the '{fx_name}' checkbox/effect\n"
+            "- Do NOT toggle the main 'Audio Enhancements' switch\n"
+            "- Do NOT change any other audio settings\n"
+            "- Do NOT switch devices\n\n"
+            "Click OK to continue, or Cancel to abort."
+        )
+        
+        if not messagebox.askokcancel(f"Warning – Learn FX '{fx_name}'", warn_txt):
+            self.set_status(f"Learn FX '{fx_name}': aborted by user")
+            return
+        
+        messagebox.showinfo(
+            f"Learn FX '{fx_name}' - Step 1",
+            f"ENABLE the '{fx_name}' effect for this device.\n"
+            "(Do NOT toggle the main switch, only this specific effect)\n\n"
+            "Click OK to capture snapshot A."
+        )
+        snapA = _collect_sysfx_snapshot(d["id"])
+        
+        messagebox.showinfo(
+            f"Learn FX '{fx_name}' - Step 2",
+            f"DISABLE the '{fx_name}' effect for the same device.\n\n"
+            "Click OK to capture snapshot B."
+        )
+        snapB = _collect_sysfx_snapshot(d["id"])
+        
+        ok, info = _learn_fx_and_write_ini(
+            d, fx_name, snapA, snapB,
+            ini_path=ini_path, prefer_hkcu=True
+        )
+        
+        if ok:
+            messagebox.showinfo(
+                f"Learn FX '{fx_name}'",
+                f"Learned effect '{fx_name}' and appended to:\n{ini_path}\n\n"
+                f"Section: [{info.get('section')}]\n"
+                f"Value: {info.get('value_name')}\n"
+                f"Enabled={info.get('dword_enable')}, Disabled={info.get('dword_disable')}\n\n"
+                "The effect will now appear in the context menu."
+            )
+            self.set_status(f"Learn FX '{fx_name}': vendor INI updated")
+        else:
+            messagebox.showerror("Error", f"FX learn failed:\n{info}")
+            self.set_status(f"Learn FX '{fx_name}': failed")
     def open_volume_dialog(self, device_id, device_name):
         top = tk.Toplevel(self.root)
         try:
@@ -703,17 +839,14 @@ class AudioGUI:
         top.transient(self.root)
         top.grab_set()
         top.resizable(False, False)
-
         frm = ttk.Frame(top, padding=12)
         frm.pack(fill="both", expand=True)
         ttk.Label(frm, text=device_name, anchor="w").grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 8))
-
         initial = get_endpoint_volume(device_id)
         if initial is None:
             initial = 50
         v = tk.IntVar(value=initial)
         syncing = {"entry": False, "scale": False}
-
         def _validate(P):
             if P == "":
                 return True
@@ -726,12 +859,10 @@ class AudioGUI:
             except Exception:
                 return False
             return 0 <= val <= 100
-
         vcmd = (top.register(_validate), "%P")
         entry = ttk.Entry(frm, width=3, textvariable=v, validate="key", validatecommand=vcmd, justify="right")
         entry.grid(row=1, column=0, sticky="w")
         ttk.Label(frm, text="%").grid(row=1, column=1, sticky="w", padx=(4, 12))
-
         def on_scale(valstr):
             if syncing["entry"]:
                 return
@@ -740,12 +871,10 @@ class AudioGUI:
                 v.set(int(float(valstr)))
             finally:
                 syncing["scale"] = False
-
         scale = ttk.Scale(frm, from_=0, to=100, orient="horizontal", command=on_scale)
         scale.set(initial)
         scale.grid(row=1, column=2, sticky="we")
         frm.columnconfigure(2, weight=1)
-
         def on_entry_change(*_):
             if syncing["scale"]:
                 return
@@ -757,13 +886,10 @@ class AudioGUI:
                     pass
             finally:
                 syncing["entry"] = False
-
         v.trace_add("write", on_entry_change)
-
         btns = ttk.Frame(frm)
         btns.grid(row=2, column=0, columnspan=3, sticky="e", pady=(12, 0))
         result = {"value": None}
-
         def ok():
             try:
                 result["value"] = max(0, min(100, int(v.get())))
@@ -780,6 +906,30 @@ class AudioGUI:
         entry.focus_set()
         top.wait_window()
         return result["value"]
+    def on_toggle_fx(self, fx_name, enable):
+        """Toggle an FX via high-level vendor_db function."""
+        d = self.get_selected_device()
+        if not d:
+            return
+        try:
+            from .vendor_db import _apply_fx, _vendor_ini_default_path
+            ok, verified_by, state = _apply_fx(
+                d["id"], d["flow"], fx_name, bool(enable),
+                ini_path=_vendor_ini_default_path()
+            )
+            if ok:
+                state_txt = "enabled" if state else "disabled"
+                self.set_status(f"{fx_name} {state_txt} for: {d['name']}")
+            else:
+                messagebox.showwarning(
+                    "FX Toggle Failed",
+                    f"Could not toggle effect '{fx_name}'.\n"
+                    "The effect may not be properly learned for this device."
+                )
+                self.set_status(f"Failed to toggle {fx_name}")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to toggle {fx_name}:\n{e}")
+            self.set_status(f"Error toggling {fx_name}")
 def launch_gui():
     try:
         # Use the library's own initializer
@@ -842,7 +992,3 @@ def launch_gui():
         pass
         
     return 0
-
-
-
-
