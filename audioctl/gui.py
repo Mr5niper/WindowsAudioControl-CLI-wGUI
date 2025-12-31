@@ -24,6 +24,7 @@ from .vendor_db import (
     _find_first_vendor_entry,
     _get_enhancements_status_any,
     _append_vendor_ini_entry_if_missing,
+    _append_fx_ini_entry,             # ADDED
     _sanitize_ini_section_name,
     _build_vendor_ini_snippet,
     _apply_enhancements,
@@ -824,8 +825,7 @@ class AudioGUI:
                 else:
                     self.set_status("Learn Enhancements: elevation failed")
             else:
-                # Fallback to user-writable INI
-                from .vendor_db import _vendor_ini_default_path
+                # Fallback to user-writable INI (use module-level import)
                 user_ini = _vendor_ini_default_path()
                 try:
                     res = _append_vendor_ini_entry_if_missing(
@@ -932,7 +932,6 @@ class AudioGUI:
                     else:
                         self.set_status(f"Learn FX '{fx_name}': elevation failed")
                 else:
-                    from .vendor_db import _vendor_ini_default_path, _append_fx_ini_entry
                     user_ini = _vendor_ini_default_path()
                     try:
                         _append_fx_ini_entry(
