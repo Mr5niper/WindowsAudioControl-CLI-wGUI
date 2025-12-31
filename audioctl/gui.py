@@ -826,8 +826,18 @@ class AudioGUI:
             )
             self.set_status(f"Learn FX '{fx_name}': vendor INI updated")
         else:
-            messagebox.showerror("Error", f"FX learn failed:\n{info}")
-            self.set_status(f"Learn FX '{fx_name}': failed")
+            msg = str(info) if info else "Unknown failure (no details)."
+            if "No suitable REG_DWORD flip" in msg:
+                messagebox.showwarning(
+                    f"Learn FX '{fx_name}'",
+                    f"No suitable REG_DWORD flip was found for effect '{fx_name}'.\n"
+                    "The driver may use a non-DWORD or a different location.\n\n"
+                    f"Details: {msg}"
+                )
+                self.set_status(f"Learn FX '{fx_name}': no DWORD flip found")
+            else:
+                messagebox.showerror("Error", f"FX learn failed:\n{msg}")
+                self.set_status(f"Learn FX '{fx_name}': failed")
     def open_volume_dialog(self, device_id, device_name):
         top = tk.Toplevel(self.root)
         try:
