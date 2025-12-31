@@ -21,10 +21,8 @@ from .logging_setup import _log, _log_exc, _dbg
 # Removed: from .vendor_db import ...
 import comtypes.automation as automation
 import copy
-
 # Global cache for PropertyStore interface definitions to avoid GC-related COM crashes
 _PROPERTY_STORE_INTERFACES_CACHE = None
-
 def _short_settle(sec=0.15):
     try:
         time.sleep(float(sec))
@@ -1072,10 +1070,17 @@ def _collect_sysfx_snapshot(device_id):
         snap["propStore"] = {"error": str(e)}
         
     # Registry (all values under MMDevices for this endpoint)
+    import gc
+    gc_was_enabled = gc.isenabled()
+    if gc_was_enabled:
+        gc.disable()
     try:
         snap["registry"] = _dump_mmdevices_all_values(device_id)
     except Exception as e:
         snap["registry"] = [{"error": str(e)}]
+    finally:
+        if gc_was_enabled:
+            gc.enable()
         
     return snap
 def _generate_enh_discovery_report(target, snapA, snapB, diffs):
@@ -1589,4 +1594,3 @@ def _verify_effect_only(device_id, flow, expected_enabled, timeout=2.5, interval
             ok_streak = 0
         _time.sleep(interval)
     return False, None, last_state
-
