@@ -37,6 +37,58 @@ def _vendor_ini_default_path():
         return os.path.join(_exe_dir(), "vendor_toggles.ini")
     except Exception:
         return os.path.join(os.getcwd(), "vendor_toggles.ini")
+
+def _load_vendor_db_split(ini_path=None):
+    """Load vendor toggles from INI. Returns dict with 'main' and 'fx' lists."""
+    path = ini_path or _vendor_ini_default_path()
+    cfg = configparser.ConfigParser()
+    entries = {"main": [], "fx": []}
+    
+    try:
+        if not os.path.exists(path):
+            return entries
+        cfg.read(path, encoding="utf-8")
+    except Exception:
+        return entries
+        
+    for sec in cfg.sections():
+        try:
+            # Get type, default to "main" for backward compatibility
+            entry_type = cfg.get(sec, "type", fallback="main").strip().lower()
+            
+            value_name = cfg.get(sec, "value_name").strip().lower()
+            en = int(cfg.get(sec, "dword_enable"))
+            di = int(cfg.get(sec, "dword_disable"))
+            if en not in (0, 1) or di not in (0, 1) or en == di:
+                continue
+            hives = [x.strip().upper() for x in cfg.get(sec, "hives", fallback="HKLM,HKCU").split(",") if x.strip()]
+            flows = [x.strip().capitalize() for x in cfg.get(sec, "flows", fallback="Render,Capture").split(",") if x.strip()]
+            notes = cfg.get(sec, "notes", fallback="")
+            
+            entry = {
+                "name": sec,
+                "type": entry_type,
+                "value_name": value_name,
+                "enable": en,
+                "disable": di,
+                "hives": [h for h in hives if h in ("HKLM", "HKCU")],
+                "flows": [f for f in flows if f in ("Render", "Capture")],
+                "notes": notes,
+            }
+            
+            if entry_type == "fx":
+                entry["fx_name"] = cfg.get(sec, "fx_name", fallback="").strip()
+                entry["device_name_pattern"] = cfg.get(sec, "device_name_pattern", fallback="").strip()
+                if entry["fx_name"] and entry["device_name_pattern"]:
+                    entries["fx"].append(entry)
+            else:
+                entries["main"].append(entry)
+                
+        except Exception:
+            continue
+    
+    return entries
+
 def _load_vendor_db(ini_path=None):
     """
     Load vendor toggles from INI. Returns list of normalized entries.
@@ -478,3 +530,168 @@ def _enhancements_supported(device_id, flow):
         return True if vend else False
     except Exception:
         return False
+
+def _find_fx_for_device(device_id, flow, fx_name, ini_path=None):
+    """Find FX entries matching device and effect name. Returns list of matching entries."""
+    from .devices import list_devices
+    
+    db = _load_vendor_db_split(ini_path)
+    matches = []
+    
+    devices = list_devices(include_all=False)
+    device = next((d for d in devices if d["id"] == device_id), None)
+    if not device:
+        return []
+    
+    device_name = device["name"]
+    flow_name = "Render" if str(flow).lower().startswith("r") else "Capture"
+    
+    for entry in db["fx"]:
+        if entry.get("fx_name", "").lower() != str(fx_name).strip().lower():
+            continue
+        if flow_name not in entry.get("flows", []):
+            continue
+        pattern = entry.get("device_name_pattern", "")
+        if pattern and pattern.lower() in device_name.lower():
+            matches.append(entry)
+    
+    return matches
+
+def _list_fx_for_device(device_id, flow, ini_path=None):
+    """List all learned FX for a device. Returns list of dicts with fx_name and entry."""
+    from .devices import list_devices
+    
+    db = _load_vendor_db_split(ini_path)
+    devices = list_devices(include_all=False)
+    device = next((d for d in devices if d["id"] == device_id), None)
+    if not device:
+        return []
+    
+    device_name = device["name"]
+    flow_name = "Render" if str(flow).lower().startswith("r") else "Capture"
+    
+    available_fx = []
+    seen = set()
+    for entry in db["fx"]:
+        if flow_name not in entry.get("flows", []):
+            continue
+        pattern = entry.get("device_name_pattern", "")
+        if pattern and pattern.lower() in device_name.lower():
+            fx_name = entry.get("fx_name") or ""
+            if fx_name and fx_name.lower() not in seen:
+                seen.add(fx_name.lower())
+                available_fx.append({
+                    "fx_name": fx_name,
+                    "entry": entry
+                })
+    
+    return available_fx
+
+def _apply_fx(device_id, flow, fx_name, enable, ini_path=None):
+    """Toggle a learned FX effect. Returns (success, verified_by, final_state)."""
+    entries = _find_fx_for_device(device_id, flow, fx_name, ini_path)
+    if not entries:
+        return False, None, None
+    
+    entry = entries[0]
+    
+    wrote = _set_vendor_entry_state(entry, device_id, flow, enable)
+    if not wrote:
+        return False, None, None
+    
+    ok, state = _verify_vendor_entry(entry, device_id, flow, enable, 
+                                      timeout=2.5, interval=0.2, consecutive=2)
+    
+    verified_by = f"vendor-fx:{entry['fx_name']}" if ok else None
+    return ok, verified_by, state
+
+def _learn_fx_and_write_ini(target, fx_name, snapA, snapB, ini_path=None, prefer_hkcu=True):
+    """
+    Pure logic: Learn a specific FX effect toggle from two pre-captured snapshots.
+    target: dict with 'id', 'name', 'flow'
+    fx_name: string name for the effect
+    snapA, snapB: results from _collect_sysfx_snapshot(device_id)
+    Returns (success, info_dict_or_error_string)
+    """
+    import re
+    ini_path = ini_path or _vendor_ini_default_path()
+    
+    try:
+        diffs = _diff_mmdevices_lists(snapA.get("registry") or [], snapB.get("registry") or [])
+    except Exception as e:
+        return False, f"Diff failed: {e}"
+    
+    # Reuse existing DWORD flip finder/snippet builder
+    snippet, picked = _build_vendor_ini_snippet(target, snapA, snapB, diffs)
+    if not picked:
+        return False, "No suitable REG_DWORD flip found under FxProperties"
+    
+    value_name = picked["name"]
+    dword_enable = int(picked["before"])
+    dword_disable = int(picked["after"])
+    
+    safe_device_name = re.sub(r'[^A-Za-z0-9_\- ]+', '_', target["name"])
+    safe_fx_name = re.sub(r'[^A-Za-z0-9_\-]+', '_', fx_name)
+    section_name = f"{safe_device_name}::{safe_fx_name}"
+    
+    notes = f"Learned FX '{fx_name}' for '{target['name']}' ({target['flow']})"
+    hives = "HKCU,HKLM" if prefer_hkcu else "HKLM,HKCU"
+    
+    try:
+        _append_fx_ini_entry(
+            ini_path, section_name, fx_name, target["name"],
+            value_name, dword_enable, dword_disable,
+            flows="Render,Capture", hives=hives, notes=notes
+        )
+    except ValueError as e:
+        return False, str(e)
+    except Exception as e:
+        return False, f"Failed to write INI: {e}"
+    
+    return True, {
+        "iniPath": ini_path,
+        "section": section_name,
+        "fx_name": fx_name,
+        "value_name": value_name,
+        "dword_enable": dword_enable,
+        "dword_disable": dword_disable
+    }
+
+def _append_fx_ini_entry(ini_path, section_name, fx_name, device_name,
+                         value_name, dword_enable, dword_disable,
+                         flows, hives, notes):
+    """Append FX entry to INI. Raises ValueError if section exists."""
+    cfg = configparser.ConfigParser()
+    try:
+        if os.path.exists(ini_path):
+            cfg.read(ini_path, encoding="utf-8")
+    except Exception:
+        pass
+    
+    if cfg.has_section(section_name):
+        raise ValueError(f"Section {section_name} already exists in INI")
+    
+    # Ensure directory exists
+    try:
+        ini_dir = os.path.dirname(ini_path)
+        if ini_dir:
+            os.makedirs(ini_dir, exist_ok=True)
+    except Exception:
+        pass
+    
+    lines = [
+        "",
+        f"[{section_name}]",
+        "type = fx",
+        f"fx_name = {fx_name}",
+        f"device_name_pattern = {device_name}",
+        f"value_name = {value_name}",
+        f"dword_enable = {dword_enable}",
+        f"dword_disable = {dword_disable}",
+        f"hives = {hives}",
+        f"flows = {flows}",
+        f"notes = {notes}",
+    ]
+    
+    with open(ini_path, "a", encoding="utf-8", errors="replace") as f:
+        f.write("\n".join(lines) + "\n")
