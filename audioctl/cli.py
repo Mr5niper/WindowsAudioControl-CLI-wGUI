@@ -41,7 +41,6 @@ from .vendor_db import (
     _find_first_vendor_entry,
     _read_vendor_entry_state,
 )
-from .gui import launch_gui
 def cmd_list(args):
     devices = list_devices(include_all=args.all)
     buckets = _sort_and_tag_gui_indices(devices)
@@ -576,6 +575,10 @@ def build_parser():
     p_w.add_argument("--index", type=int)
     p_w.add_argument("--regex", action="store_true")
     p_w.set_defaults(func=cmd_wait)
+    # Hidden helper: elevated INI append (used by GUI to write into Program Files)
+    p_vi = sub.add_parser("vendor-ini-append", help=argparse.SUPPRESS)
+    p_vi.add_argument("--work", required=True, help=argparse.SUPPRESS)  # path to JSON work order
+    p_vi.set_defaults(func=cmd_vendor_ini_append)
     return p
 def cmd_diag_mmdevices(args):
     devices = list_devices(include_all=False)
@@ -604,9 +607,69 @@ def cmd_diag_mmdevices(args):
     dump = _dump_mmdevices_all_values(target["id"])
     print(json.dumps({"id": target["id"], "name": target["name"], "flow": target["flow"], "mmdevices": dump}, indent=2))
     return 0
+def cmd_vendor_ini_append(args):
+    try:
+        with open(args.work, "r", encoding="utf-8") as f:
+            work = json.load(f)
+    except Exception as e:
+        print(f"ERROR: failed to read work file: {e}", file=sys.stderr)
+        return 1
+    kind = (work.get("kind") or "").lower()
+    ini_path = work.get("ini_path")
+    if not ini_path or not kind:
+        print("ERROR: invalid work order (missing kind or ini_path)", file=sys.stderr)
+        return 1
+    try:
+        if kind == "main":
+            from .vendor_db import _append_vendor_ini_entry_if_missing
+            section = work["section"]
+            value_name = work["value_name"]
+            dword_enable = int(work["dword_enable"])
+            dword_disable = int(work["dword_disable"])
+            flows = work.get("flows", "Render,Capture")
+            hives = work.get("hives", "HKCU,HKLM")
+            notes = work.get("notes", "")
+            res = _append_vendor_ini_entry_if_missing(
+                ini_path, section, value_name,
+                dword_enable, dword_disable,
+                flows=flows, hives=hives, notes=notes
+            )
+            print(json.dumps({"iniAppend": {"kind": "main", "result": res, "iniPath": ini_path, "section": section}}))
+            return 0
+        elif kind == "fx":
+            from .vendor_db import _append_fx_ini_entry
+            section = work["section"]
+            fx_name = work["fx_name"]
+            device_name = work["device_name"]
+            value_name = work["value_name"]
+            dword_enable = int(work["dword_enable"])
+            dword_disable = int(work["dword_disable"])
+            flows = work.get("flows", "Render,Capture")
+            hives = work.get("hives", "HKCU,HKLM")
+            notes = work.get("notes", "")
+            _append_fx_ini_entry(
+                ini_path, section, fx_name, device_name,
+                value_name, dword_enable, dword_disable,
+                flows=flows, hives=hives, notes=notes
+            )
+            print(json.dumps({"iniAppend": {"kind": "fx", "result": "appended", "iniPath": ini_path, "section": section}}))
+            return 0
+        else:
+            print("ERROR: unknown work kind (expected 'main' or 'fx')", file=sys.stderr)
+            return 1
+    except PermissionError as e:
+        print(f"ERROR: permission denied writing INI: {e}", file=sys.stderr)
+        return 1
+    except FileExistsError as e:
+        print(json.dumps({"iniAppend": {"kind": kind, "result": "exists", "iniPath": ini_path}}))
+        return 0
+    except Exception as e:
+        print(f"ERROR: failed to append INI: {e}", file=sys.stderr)
+        return 1
 def main(argv=None):
     if argv is None and len(sys.argv) <= 1:
         try:
+            from .gui import launch_gui  # Lazy import only if we actually need the GUI
             return launch_gui()
         except Exception as e:
             print(f"ERROR: GUI failed to start: {e}", file=sys.stderr)
