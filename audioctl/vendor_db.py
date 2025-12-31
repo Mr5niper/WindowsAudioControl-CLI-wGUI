@@ -33,10 +33,46 @@ _CODE_VENDOR_ENTRIES = [
     },
 ]
 def _vendor_ini_default_path():
+    """
+    Return a default vendor_toggles.ini path:
+    - Prefer next to the EXE (or module) if writable.
+    - Otherwise, fall back to a user-writable location under %LOCALAPPDATA%\audioctl\vendor_toggles.ini.
+    """
+    def _is_writable_dir(path_dir):
+        try:
+            os.makedirs(path_dir, exist_ok=True)
+            probe = os.path.join(path_dir, ".writetest")
+            with open(probe, "w", encoding="utf-8") as _:
+                pass
+            os.remove(probe)
+            return True
+        except Exception:
+            return False
     try:
-        return os.path.join(_exe_dir(), "vendor_toggles.ini")
+        base = _exe_dir()
     except Exception:
-        return os.path.join(os.getcwd(), "vendor_toggles.ini")
+        base = os.getcwd()
+    preferred_dir = base
+    preferred_path = os.path.join(preferred_dir, "vendor_toggles.ini")
+    if _is_writable_dir(preferred_dir):
+        return preferred_path
+    # Fallback to user-writable location
+    local = os.environ.get("LOCALAPPDATA")
+    if not local:
+        try:
+            home = os.path.expanduser("~")
+            local = os.path.join(home, "AppData", "Local")
+        except Exception:
+            local = None
+    if not local:
+        import tempfile
+        local = tempfile.gettempdir()
+    fallback_dir = os.path.join(local, "audioctl")
+    try:
+        os.makedirs(fallback_dir, exist_ok=True)
+    except Exception:
+        pass
+    return os.path.join(fallback_dir, "vendor_toggles.ini")
 
 def _load_vendor_db_split(ini_path=None):
     """Load vendor toggles from INI. Returns dict with 'main' and 'fx' lists."""
