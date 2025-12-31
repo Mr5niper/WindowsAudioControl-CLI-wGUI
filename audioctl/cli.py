@@ -40,6 +40,8 @@ from .vendor_db import (
     _build_vendor_ini_snippet,
     _find_first_vendor_entry,
     _read_vendor_entry_state,
+    _list_fx_for_device,          # ADDED
+    _learn_fx_and_write_ini       # ADDED
 )
 def cmd_list(args):
     devices = list_devices(include_all=args.all)
@@ -251,7 +253,6 @@ def cmd_enhancements(args):
     target = ordered[args.index] if args.index is not None else ordered[0]
     # === NEW: FX Operations ===
     if args.list_fx:
-        from .vendor_db import _list_fx_for_device, _read_vendor_entry_state
         fx_list = _list_fx_for_device(target["id"], target["flow"], 
                                        ini_path=getattr(args, "vendor_ini", None))
         result = {
@@ -272,7 +273,6 @@ def cmd_enhancements(args):
         print(json.dumps(result))
         return 0
     if args.learn_fx:
-        from .vendor_db import _learn_fx_and_write_ini, _vendor_ini_default_path
         fx_name = args.learn_fx.strip()
         if not fx_name:
             print("ERROR: FX name cannot be empty", file=sys.stderr)
