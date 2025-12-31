@@ -1070,17 +1070,10 @@ def _collect_sysfx_snapshot(device_id):
         snap["propStore"] = {"error": str(e)}
         
     # Registry (all values under MMDevices for this endpoint)
-    import gc
-    gc_was_enabled = gc.isenabled()
-    if gc_was_enabled:
-        gc.disable()
     try:
         snap["registry"] = _dump_mmdevices_all_values(device_id)
     except Exception as e:
         snap["registry"] = [{"error": str(e)}]
-    finally:
-        if gc_was_enabled:
-            gc.enable()
         
     return snap
 def _generate_enh_discovery_report(target, snapA, snapB, diffs):
