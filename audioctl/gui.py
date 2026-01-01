@@ -34,7 +34,7 @@ from .vendor_db import (
 class AudioGUI:
     def __init__(self, root):
         self.root = root
-        self.root.title("Audio Control v1.4.3.227 12-31-2025")
+        self.root.title("Audio Control v1.4.3.229 12-31-2025")
 
         # Style and theme
         style = ttk.Style(self.root)
@@ -1360,3 +1360,4 @@ def launch_gui():
         pass
         
     return 0
+
