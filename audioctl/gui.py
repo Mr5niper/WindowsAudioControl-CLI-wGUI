@@ -1,4 +1,5 @@
 # audioctl/gui.py
+# audioctl/gui.py
 import sys
 import io
 import time
@@ -798,9 +799,135 @@ class AudioGUI:
         snippet, picked = _build_vendor_ini_snippet(d, snapA, snapB, diffs)
         if not picked:
             _log(f"GUI action: learn-main no-dword-flip id={d['id']} name={d['name']}")
-            messagebox.showwarning("Learn Enhancements", 
-                                  "No suitable REG_DWORD flip found under FxProperties.\nThe driver may use non-DWORD or a different location.")
-            self.set_status("Learn Enhancements: no DWORD flip found")
+            # First vendor availability check
+            try:
+                vend_entry = _find_first_vendor_entry(d["id"], d["flow"], ini_path=_vendor_ini_default_path())
+            except Exception:
+                vend_entry = None
+            if vend_entry:
+                # Vendor path is already available (INI or built-in) due to your toggle
+                messagebox.showinfo(
+                    "Enhancements vendor available",
+                    "A vendor method was detected for this device after your toggle.\n\n"
+                    "No INI write was needed. You can now use 'Enable/Disable Enhancements' from the menu."
+                )
+                self.set_status("Vendor method available (no INI required)")
+                return
+            # Guide user to try again (drivers often materialize keys only after the first toggle)
+            retry = messagebox.askyesno(
+                "Try again?",
+                "No DWORD flip was detected.\n\n"
+                "This may be the first time this endpoint was toggled. Drivers often create keys only after the first toggle.\n\n"
+                "Would you like to try again? Please toggle 'Audio Enhancements' to ENABLED, then DISABLED when prompted."
+            )
+            if not retry:
+                self.set_status("Learn Enhancements: user skipped retry")
+                return
+            # Second pass: capture snapshots again
+            messagebox.showinfo(
+                "Learn Enhancements - Retry Step 1",
+                "Set 'Audio Enhancements' to ENABLED for this device.\n\nClick OK to capture snapshot A."
+            )
+            captured_stderr = io.StringIO()
+            with redirect_stderr(captured_stderr):
+                snapA2 = _collect_sysfx_snapshot(d["id"])
+            _reemit_non_error_stderr(captured_stderr.getvalue())
+            messagebox.showinfo(
+                "Learn Enhancements - Retry Step 2",
+                "Set 'Audio Enhancements' to DISABLED for the same device.\n\nClick OK to capture snapshot B."
+            )
+            captured_stderr = io.StringIO()
+            with redirect_stderr(captured_stderr):
+                snapB2 = _collect_sysfx_snapshot(d["id"])
+            _reemit_non_error_stderr(captured_stderr.getvalue())
+            diffs2 = _diff_mmdevices_lists(snapA2.get("registry") or [], snapB2.get("registry") or [])
+            snippet2, picked2 = _build_vendor_ini_snippet(d, snapA2, snapB2, diffs2)
+            if picked2:
+                # Proceed with writing INI (same as original success path)
+                value_name2 = picked2["name"]
+                dword_enable2 = int(picked2["before"])
+                dword_disable2 = int(picked2["after"])
+                section_name2 = _sanitize_ini_section_name(value_name2)
+                notes2 = f"Auto-learned (retry) on '{d['name']}' ({d['flow']}). A=enabled,B=disabled."
+                try:
+                    res = _append_vendor_ini_entry_if_missing(
+                        _vendor_ini_default_path(), section_name2, value_name2,
+                        dword_enable2, dword_disable2,
+                        flows="Render,Capture", hives="HKCU,HKLM", notes=notes2
+                    )
+                    if res == "exists":
+                        messagebox.showinfo(
+                            "Learn Enhancements",
+                            f"Vendor section already exists:\n{_vendor_ini_default_path()}\n\nSection: [{section_name2}]\nNo changes were made."
+                        )
+                        self.set_status("Learn Enhancements: entry already exists (retry)")
+                    else:
+                        messagebox.showinfo(
+                            "Learn Enhancements",
+                            f"Learned vendor toggle (retry) and appended to:\n{_vendor_ini_default_path()}\n\n"
+                            f"Section: [{section_name2}]\nValue: {value_name2}\nEnabled={dword_enable2}, Disabled={dword_disable2}"
+                        )
+                        self.set_status("Learn Enhancements: vendor INI updated (retry)")
+                except PermissionError:
+                    # Elevation or fallback to user INI (same as original block)
+                    if messagebox.askyesno(
+                        "Permission denied",
+                        f"Cannot write INI at:\n{_vendor_ini_default_path()}\n\n"
+                        "Choose Yes to attempt elevation and write here.\n"
+                        "Choose No to save into a user-writable location instead."
+                    ):
+                        work = {
+                            "kind": "main",
+                            "ini_path": _vendor_ini_default_path(),
+                            "section": section_name2,
+                            "value_name": value_name2,
+                            "dword_enable": int(dword_enable2),
+                            "dword_disable": int(dword_disable2),
+                            "flows": "Render,Capture",
+                            "hives": "HKCU,HKLM",
+                            "notes": notes2,
+                        }
+                        ok = self._run_elevated_vendor_ini_append(work)
+                        if ok:
+                            self.set_status("Learn Enhancements: elevated write started (retry)")
+                        else:
+                            self.set_status("Learn Enhancements: elevation failed (retry)")
+                    else:
+                        user_ini = _vendor_ini_default_path()
+                        try:
+                            res = _append_vendor_ini_entry_if_missing(
+                                user_ini, section_name2, value_name2,
+                                dword_enable2, dword_disable2,
+                                flows="Render,Capture", hives="HKCU,HKLM", notes=notes2
+                            )
+                            messagebox.showinfo("Saved to user INI", f"INI entry written to:\n{user_ini}\nSection: [{section_name2}]")
+                            self.set_status("Learn Enhancements: saved to user INI (retry)")
+                        except Exception as e2:
+                            messagebox.showerror("Write failed", f"Could not write to user INI either:\n{e2}")
+                            self.set_status("Learn Enhancements: write failed (retry)")
+                except Exception as e:
+                    messagebox.showerror("Error", f"Failed to write INI (retry): {e}")
+                    self.set_status("Learn Enhancements: write failed (retry)")
+                return  # retry path done
+            # Still no DWORD flip after retry: vendor availability final check
+            try:
+                vend_entry3 = _find_first_vendor_entry(d["id"], d["flow"], ini_path=_vendor_ini_default_path())
+            except Exception:
+                vend_entry3 = None
+            if vend_entry3:
+                messagebox.showinfo(
+                    "Enhancements vendor available",
+                    "A vendor method is now available for this device after your toggles.\n\n"
+                    "No INI write was needed. You can now use 'Enable/Disable Enhancements'."
+                )
+                self.set_status("Vendor method available (retry)")
+                return
+            # Nothing found
+            messagebox.showwarning(
+                "Learn Enhancements",
+                "No suitable REG_DWORD flip found under FxProperties and no vendor method became available after retry."
+            )
+            self.set_status("Learn Enhancements: no DWORD flip and no vendor method after retry")
             return
         value_name = picked["name"]
         dword_enable = int(picked["before"])
