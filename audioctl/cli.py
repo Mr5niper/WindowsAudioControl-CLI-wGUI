@@ -390,8 +390,9 @@ def cmd_enhancements(args):
         else:
             print(f"ERROR: FX '{chosen_name}' toggle failed for this device", file=sys.stderr)
             return 1
-    # === EXISTING: Main toggle operations (UNCHANGED) ===
+    # === EXISTING: Main toggle operations (MODIFIED: learn fallback) ===
     if args.learn:
+        # First attempt: run standard learn flow (prompts inside vendor_db)
         ok, info = _learn_vendor_from_discovery_and_write_ini(
             target,
             ini_path=getattr(args, "vendor_ini", None) or _vendor_ini_default_path(),
@@ -400,9 +401,50 @@ def cmd_enhancements(args):
         if ok:
             print(json.dumps({"vendorLearned": {"id": target["id"], "name": target["name"], "flow": target["flow"], **info}}, indent=2))
             return 0
-        else:
-            print(f"ERROR: learn failed: {info}", file=sys.stderr)
-            return 1
+        # No DWORD flip detected. Explain and check for vendor availability (INI or code fallback).
+        print("INFO: No clean DWORD flip detected. Checking for vendor methods initialized by your toggle...", file=sys.stderr)
+        vend_entry = _find_first_vendor_entry(target["id"], target["flow"], ini_path=getattr(args, "vendor_ini", None))
+        if vend_entry:
+            print(json.dumps({
+                "vendorAvailable": {
+                    "id": target["id"],
+                    "name": target["name"],
+                    "flow": target["flow"],
+                    "vendor": vend_entry.get("name"),
+                    "value_name": vend_entry.get("value_name"),
+                    "note": "Device can be controlled via vendor method (INI or built-in)."
+                }
+            }, indent=2))
+            return 0
+        # Still not found. Guide user to try toggling again (second pass).
+        print("INFO: This may be the first time this endpoint was toggled. The driver often creates keys only after the first toggle.", file=sys.stderr)
+        print("INFO: Please toggle Enhancements again (Enable, then Disable) for this same device when prompted.", file=sys.stderr)
+        # Second attempt
+        ok2, info2 = _learn_vendor_from_discovery_and_write_ini(
+            target,
+            ini_path=getattr(args, "vendor_ini", None) or _vendor_ini_default_path(),
+            prefer_hkcu=True
+        )
+        if ok2:
+            print(json.dumps({"vendorLearned": {"id": target["id"], "name": target["name"], "flow": target["flow"], **info2}}, indent=2))
+            return 0
+        # Final vendor re-check after second user toggle
+        vend_entry2 = _find_first_vendor_entry(target["id"], target["flow"], ini_path=getattr(args, "vendor_ini", None))
+        if vend_entry2:
+            print(json.dumps({
+                "vendorAvailable": {
+                    "id": target["id"],
+                    "name": target["name"],
+                    "flow": target["flow"],
+                    "vendor": vend_entry2.get("name"),
+                    "value_name": vend_entry2.get("value_name"),
+                    "note": "Device can be controlled via vendor method (initialized by your toggles)."
+                }
+            }, indent=2))
+            return 0
+        # Nothing found after retry
+        print("ERROR: No DWORD flip found and no vendor method became available after a retry. Learn failed.", file=sys.stderr)
+        return 1
     enable = True if args.enable else False
     if not _enhancements_supported(target["id"], target["flow"]):
         print("ERROR: No vendor toggle available for this device. Use --learn to teach a vendor method.", file=sys.stderr)
