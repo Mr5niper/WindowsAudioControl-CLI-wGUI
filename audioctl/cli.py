@@ -8,11 +8,12 @@ import os
 import warnings
 import re
 from contextlib import redirect_stderr
-import comtypes
+# Import compat BEFORE any comtypes usage
 from .compat import (
     E_RENDER, E_CAPTURE,
     ROLES, DEVICE_STATE_ACTIVE, DEVICE_STATE_ALL, is_admin,
 )
+import comtypes
 from .logging_setup import _log, _log_exc
 from .devices import (
     list_devices, find_devices_by_selector, _sort_and_tag_gui_indices,
