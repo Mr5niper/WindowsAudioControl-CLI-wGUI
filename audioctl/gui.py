@@ -1,4 +1,5 @@
 # audioctl/gui.py
+# audioctl/gui.py
 import sys
 import io
 import time
@@ -1071,8 +1072,9 @@ class AudioGUI:
             "Click OK to capture snapshot A."
         )
         captured_stderr = io.StringIO()
+        from .devices import _collect_registry_only_snapshot
         with redirect_stderr(captured_stderr):
-            snapA = _collect_sysfx_snapshot(d["id"])
+            snapA = _collect_registry_only_snapshot(d["id"])
         _reemit_non_error_stderr(captured_stderr.getvalue())
         messagebox.showinfo(
             f"Learn FX '{fx_name}' - Step 2",
@@ -1080,8 +1082,9 @@ class AudioGUI:
             "Click OK to capture snapshot B."
         )
         captured_stderr = io.StringIO()
+        from .devices import _collect_registry_only_snapshot
         with redirect_stderr(captured_stderr):
-            snapB = _collect_sysfx_snapshot(d["id"])
+            snapB = _collect_registry_only_snapshot(d["id"])
         _reemit_non_error_stderr(captured_stderr.getvalue())
         ok, info = _learn_fx_and_write_ini(
             d, fx_name, snapA, snapB,
@@ -1098,7 +1101,7 @@ class AudioGUI:
                     "The effect will now appear in the context menu."
                 )
                 self.set_status(f"Learn FX '{fx_name}': vendor INI updated")
-                _log(f"GUI action: learn-fx success id={d['id']} name={d['name']} fx={fx_name} section={info.get('section')} value={info.get('value_name')}")
+                _log(f"GUI action: learn-fx success id={d['id']} name={d['name']} fx={fx_name} section={info.get('section')} value={info.get('value_name'] if isinstance(info, dict) else ''}")
             except PermissionError:
                 # Offer elevation or fallback
                 section_name = info.get("section")
@@ -1393,4 +1396,3 @@ def launch_gui():
         pass
         
     return 0
-
