@@ -23,98 +23,92 @@ from .logging_setup import _log, _log_exc, _dbg
 import comtypes.automation as automation
 import copy
 
-# --- Cached PolicyConfigFx interface definitions (define once at import time) ---
-_POLICY_CONFIG_FX_DEFS = None
+# --- PolicyConfigFx interfaces: define once at module import; never redefine ---
+# These must NOT be defined inside a function. Defining them during GUI operations lets GC
+# and comtypes class creation race, causing access violations.
 
-def _init_policyconfig_fx_defs_once():
-    global _POLICY_CONFIG_FX_DEFS
-    if _POLICY_CONFIG_FX_DEFS is not None:
-        return
+# PROPERTYKEY for PolicyConfigFx
+class _POLICYCFG_PROPERTYKEY(ctypes.Structure):
+    _fields_ = (("fmtid", GUID), ("pid", wintypes.DWORD))
 
-    class PROPERTYKEY(ctypes.Structure):
-        _fields_ = (("fmtid", GUID), ("pid", wintypes.DWORD))
+# Resolve PROPVARIANT from comtypes.automation, with a safe fallback
+try:
+    _POLICYCFG_PROPVARIANT = getattr(automation, "PROPVARIANT", getattr(automation, "tagPROPVARIANT"))
+except Exception:
+    class _PVU(ctypes.Union):
+        _fields_ = [
+            ("boolVal", ctypes.c_short),
+            ("uiVal", ctypes.c_ushort),
+            ("ulVal", ctypes.c_ulong),
+            ("pwszVal", ctypes.c_wchar_p),
+        ]
+    class _POLICYCFG_PROPVARIANT(ctypes.Structure):
+        _anonymous_ = ("data",)
+        _fields_ = [
+            ("vt", ctypes.c_ushort),
+            ("wReserved1", ctypes.c_ushort),
+            ("wReserved2", ctypes.c_ushort),
+            ("wReserved3", ctypes.c_ushort),
+            ("data", _PVU),
+        ]
 
-    # Prefer comtypes.automation PROPVARIANT, with a small fallback
-    try:
-        PROPVARIANT = getattr(automation, "PROPVARIANT", getattr(automation, "tagPROPVARIANT"))
-    except Exception:
-        class _PVU(ctypes.Union):
-            _fields_ = [
-                ("boolVal", ctypes.c_short),
-                ("uiVal", ctypes.c_ushort),
-                ("ulVal", ctypes.c_ulong),
-                ("pwszVal", ctypes.c_wchar_p),
-            ]
-        class PROPVARIANT(ctypes.Structure):
-            _anonymous_ = ("data",)
-            _fields_ = [
-                ("vt", ctypes.c_ushort),
-                ("wReserved1", ctypes.c_ushort),
-                ("wReserved2", ctypes.c_ushort),
-                ("wReserved3", ctypes.c_ushort),
-                ("data", _PVU),
-            ]
+# IPolicyConfigFx IID {F8679F50-850A-41CF-9C72-430F290290C8}
+_IID_PolicyConfigFx = GUID(_guid_from_parts("F8679F50", "-850A-41CF-", "9C72-", "430F290290C8"))
 
-    # IPolicyConfigFx IID {F8679F50-850A-41CF-9C72-430F290290C8}
-    _IID_PolicyConfig = GUID(_guid_from_parts("F8679F50", "-850A-41CF-", "9C72-", "430F290290C8"))
+class _IPolicyConfigFx(IUnknown):
+    _iid_ = _IID_PolicyConfigFx
+    _methods_ = (
+        COMMETHOD([], HRESULT, 'GetMixFormat',
+                  (['in'], wintypes.LPCWSTR, 'wszDeviceId'),
+                  (['out'], POINTER(ctypes.c_void_p), 'ppFormat')),
+        COMMETHOD([], HRESULT, 'GetDeviceFormat',
+                  (['in'], wintypes.LPCWSTR, 'wszDeviceId'),
+                  (['in'], wintypes.BOOL, 'bDefault'),
+                  (['out'], POINTER(ctypes.c_void_p), 'ppFormat')),
+        COMMETHOD([], HRESULT, 'SetDeviceFormat',
+                  (['in'], wintypes.LPCWSTR, 'wszDeviceId'),
+                  (['in'], ctypes.c_void_p, 'pEndpointFormat'),
+                  (['in'], ctypes.c_void_p, 'mixFormat')),
+        COMMETHOD([], HRESULT, 'GetProcessingPeriod',
+                  (['in'], wintypes.LPCWSTR, 'wszDeviceId'),
+                  (['in'], wintypes.BOOL, 'bDefault'),
+                  (['out'], POINTER(ctypes.c_longlong), 'pmftDefaultPeriod'),
+                  (['out'], POINTER(ctypes.c_longlong), 'pmftMinimumPeriod')),
+        COMMETHOD([], HRESULT, 'SetProcessingPeriod',
+                  (['in'], wintypes.LPCWSTR, 'wszDeviceId'),
+                  (['in'], POINTER(ctypes.c_longlong), 'pmftPeriod')),
+        COMMETHOD([], HRESULT, 'GetShareMode',
+                  (['in'], wintypes.LPCWSTR, 'wszDeviceId'),
+                  (['out'], POINTER(ctypes.c_void_p), 'pMode')),
+        COMMETHOD([], HRESULT, 'SetShareMode',
+                  (['in'], wintypes.LPCWSTR, 'wszDeviceId'),
+                  (['in'], ctypes.c_void_p, 'mode')),
+        COMMETHOD([], HRESULT, 'GetPropertyValue',
+                  (['in'], wintypes.LPCWSTR, 'pszDeviceName'),
+                  (['in'], wintypes.BOOL, 'bFxStore'),
+                  (['in'], POINTER(_POLICYCFG_PROPERTYKEY), 'pKey'),
+                  (['out'], POINTER(_POLICYCFG_PROPVARIANT), 'pv')),
+        COMMETHOD([], HRESULT, 'SetPropertyValue',
+                  (['in'], wintypes.LPCWSTR, 'pszDeviceName'),
+                  (['in'], wintypes.BOOL, 'bFxStore'),
+                  (['in'], POINTER(_POLICYCFG_PROPERTYKEY), 'pKey'),
+                  (['in'], POINTER(_POLICYCFG_PROPVARIANT), 'pv')),
+        COMMETHOD([], HRESULT, 'SetDefaultEndpoint',
+                  (['in'], wintypes.LPCWSTR, 'wszDeviceId'),
+                  (['in'], wintypes.DWORD, 'role')),
+        COMMETHOD([], HRESULT, 'SetEndpointVisibility',
+                  (['in'], wintypes.LPCWSTR, 'wszDeviceId'),
+                  (['in'], wintypes.BOOL, 'bVisible')),
+    )
 
-    class IPolicyConfigFx(IUnknown):
-        _iid_ = _IID_PolicyConfig
-        _methods_ = (
-            COMMETHOD([], HRESULT, 'GetMixFormat',
-                      (['in'], wintypes.LPCWSTR, 'wszDeviceId'),
-                      (['out'], POINTER(ctypes.c_void_p), 'ppFormat')),
-            COMMETHOD([], HRESULT, 'GetDeviceFormat',
-                      (['in'], wintypes.LPCWSTR, 'wszDeviceId'),
-                      (['in'], wintypes.BOOL, 'bDefault'),
-                      (['out'], POINTER(ctypes.c_void_p), 'ppFormat')),
-            COMMETHOD([], HRESULT, 'SetDeviceFormat',
-                      (['in'], wintypes.LPCWSTR, 'wszDeviceId'),
-                      (['in'], ctypes.c_void_p, 'pEndpointFormat'),
-                      (['in'], ctypes.c_void_p, 'mixFormat')),
-            COMMETHOD([], HRESULT, 'GetProcessingPeriod',
-                      (['in'], wintypes.LPCWSTR, 'wszDeviceId'),
-                      (['in'], wintypes.BOOL, 'bDefault'),
-                      (['out'], POINTER(ctypes.c_longlong), 'pmftDefaultPeriod'),
-                      (['out'], POINTER(ctypes.c_longlong), 'pmftMinimumPeriod')),
-            COMMETHOD([], HRESULT, 'SetProcessingPeriod',
-                      (['in'], wintypes.LPCWSTR, 'wszDeviceId'),
-                      (['in'], POINTER(ctypes.c_longlong), 'pmftPeriod')),
-            COMMETHOD([], HRESULT, 'GetShareMode',
-                      (['in'], wintypes.LPCWSTR, 'wszDeviceId'),
-                      (['out'], POINTER(ctypes.c_void_p), 'pMode')),
-            COMMETHOD([], HRESULT, 'SetShareMode',
-                      (['in'], wintypes.LPCWSTR, 'wszDeviceId'),
-                      (['in'], ctypes.c_void_p, 'mode')),
-            # NOTE: bFxStore variants we need:
-            COMMETHOD([], HRESULT, 'GetPropertyValue',
-                      (['in'], wintypes.LPCWSTR, 'pszDeviceName'),
-                      (['in'], wintypes.BOOL, 'bFxStore'),
-                      (['in'], POINTER(PROPERTYKEY), 'pKey'),
-                      (['out'], POINTER(PROPVARIANT), 'pv')),
-            COMMETHOD([], HRESULT, 'SetPropertyValue',
-                      (['in'], wintypes.LPCWSTR, 'pszDeviceName'),
-                      (['in'], wintypes.BOOL, 'bFxStore'),
-                      (['in'], POINTER(PROPERTYKEY), 'pKey'),
-                      (['in'], POINTER(PROPVARIANT), 'pv')),
-            COMMETHOD([], HRESULT, 'SetDefaultEndpoint',
-                      (['in'], wintypes.LPCWSTR, 'wszDeviceId'),
-                      (['in'], wintypes.DWORD, 'role')),
-            COMMETHOD([], HRESULT, 'SetEndpointVisibility',
-                      (['in'], wintypes.LPCWSTR, 'wszDeviceId'),
-                      (['in'], wintypes.BOOL, 'bVisible')),
-        )
+# CLSID_PolicyConfigClient {870AF99C-171D-4F9E-AF0D-E63DF40C2BC9}
+_CLSID_PolicyConfigClient = GUID(_guid_from_parts("870AF99C", "-171D-4F9E-", "AF0D-", "E63DF40C2BC9"))
 
-    # CLSID_PolicyConfigClient {870AF99C-171D-4F9E-AF0D-E63DF40C2BC9}
-    CLSID_PolicyConfigClient = GUID(_guid_from_parts("870AF99C", "-171D-4F9E-", "AF0D-", "E63DF40C2BC9"))
-    _POLICY_CONFIG_FX_DEFS = (IPolicyConfigFx, CLSID_PolicyConfigClient, PROPERTYKEY, PROPVARIANT)
-
-# Initialize once at import time
-_init_policyconfig_fx_defs_once()
+# Immutable tuple exported by the getter below
+_POLICY_CONFIG_FX_DEFS = (_IPolicyConfigFx, _CLSID_PolicyConfigClient, _POLICYCFG_PROPERTYKEY, _POLICYCFG_PROPVARIANT)
 
 def _define_policyconfig_fx_interfaces():
-    # Backward-compatible helper that now just returns the cached defs
-    _init_policyconfig_fx_defs_once()
+    # Backward-compatible getter; never defines classes at runtime
     return _POLICY_CONFIG_FX_DEFS
 
 # Global cache for PropertyStore interface definitions to avoid GC-related COM crashes
@@ -1831,4 +1825,5 @@ def _verify_effect_only(device_id, flow, expected_enabled, timeout=2.5, interval
             ok_streak = 0
         _time.sleep(interval)
     return False, None, last_state
+
 
