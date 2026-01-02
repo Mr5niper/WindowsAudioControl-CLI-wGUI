@@ -875,34 +875,26 @@ def _perform_multi_writes(entry, device_id, flow, enable):
     return ok_all
 def _read_decider_state(entry, device_id, flow):
     """
-    Read the current state based on the decider write item (1-based index).
+    Read current FX state based on the configured decider write item.
     Returns True (enabled) / False (disabled) / None (unknown).
+
+    Robustness improvements:
+    - Try the recorded decider first (recorded hive, then alternate hive).
+    - If that yields unknown, scan all recorded writes (with priority for stable signals)
+      and return the first write whose current value matches either enable/disable.
+    - This addresses cases where the originally chosen decider is a UI-volatile property
+      that changes just because the Windows settings page was open.
+
+    No writes are changed here; this is read-only logic.
     """
     if not entry.get("multi_write"):
-        # legacy single-dword path handled elsewhere
         return None
-    idx = max(1, int(entry.get("decider_index", 1)))
-    if idx > len(entry.get("writes") or []):
-        idx = 1
-    w = entry["writes"][idx - 1]
-    hive_name = w["hive"].upper()
-    hive = winreg.HKEY_LOCAL_MACHINE if hive_name == "HKLM" else winreg.HKEY_CURRENT_USER
-    subk = w["subkey"]
-    name = w["name"]
-    base = _endpoint_base_path(device_id, flow, subk)
-    if not base:
+
+    writes = entry.get("writes") or []
+    if not writes:
         return None
-    try:
-        with winreg.OpenKey(hive, base, 0, winreg.KEY_READ) as key:
-            val, typ = winreg.QueryValueEx(key, name)
-    except OSError:
-        return None
-    # Compare with recorded enabled/disabled values
-    try:
-        t_en = _reg_name_to_type(w["type_enable"])
-        t_di = _reg_name_to_type(w["type_disable"])
-    except Exception:
-        return None
+
+    # Helpers
     def _eq_expected(cur_val, cur_typ, exp_text, exp_typ):
         if cur_typ != exp_typ:
             return False
@@ -916,10 +908,79 @@ def _read_decider_state(entry, device_id, flow):
         except Exception:
             return False
         return False
-    if _eq_expected(val, typ, w["enable"], t_en):
-        return True
-    if _eq_expected(val, typ, w["disable"], t_di):
-        return False
+
+    def _try_read_one(w, hive_name):
+        hive = winreg.HKEY_LOCAL_MACHINE if hive_name == "HKLM" else winreg.HKEY_CURRENT_USER
+        subk = (w.get("subkey") or "").strip()
+        name = (w.get("name") or "").strip().lower()
+        base = _endpoint_base_path(device_id, flow, subk)
+        if not base:
+            return None
+        try:
+            with winreg.OpenKey(hive, base, 0, winreg.KEY_READ) as key:
+                val, typ = winreg.QueryValueEx(key, name)
+        except OSError:
+            return None
+        # Compare with both 'enable' and 'disable' shapes
+        try:
+            t_en = _reg_name_to_type(w.get("type_enable"))
+            t_di = _reg_name_to_type(w.get("type_disable"))
+        except Exception:
+            return None
+        if _eq_expected(val, typ, w.get("enable"), t_en):
+            return True
+        if _eq_expected(val, typ, w.get("disable"), t_di):
+            return False
+        return None
+
+    # 1) Try the configured decider first
+    idx = max(1, int(entry.get("decider_index", 1)))
+    if idx > len(writes):
+        idx = 1
+    decider = writes[idx - 1]
+    rec_hive = (decider.get("hive") or "").upper()
+    alt_hive = "HKCU" if rec_hive == "HKLM" else "HKLM"
+    # Try recorded hive
+    state = _try_read_one(decider, rec_hive)
+    if state is not None:
+        return state
+    # Try alternate hive
+    state = _try_read_one(decider, alt_hive)
+    if state is not None:
+        return state
+
+    # 2) Fallback: scan all writes and pick the first stable-looking match
+    def _score_write_for_decider(w):
+        score = 0
+        # Prefer FxProperties over Properties
+        if (w.get("subkey") or "").strip() == "FxProperties":
+            score += 10
+        # Prefer DWORD
+        t_en = (w.get("type_enable") or "").upper()
+        t_di = (w.get("type_disable") or "").upper()
+        if t_en == "REG_DWORD" and t_di == "REG_DWORD":
+            score += 5
+            # Extra point if looks like boolean 0/1
+            try:
+                en_v = int(w.get("enable"))
+                di_v = int(w.get("disable"))
+                if {en_v, di_v} == {0, 1}:
+                    score += 2
+            except Exception:
+                pass
+        return score
+
+    for w in sorted(writes, key=_score_write_for_decider, reverse=True):
+        rec_hive = (w.get("hive") or "").upper()
+        alt_hive = "HKCU" if rec_hive == "HKLM" else "HKLM"
+        state = _try_read_one(w, rec_hive)
+        if state is not None:
+            return state
+        state = _try_read_one(w, alt_hive)
+        if state is not None:
+            return state
+
+    # Nothing matched; unknown
     return None
 def _apply_enhancements(device_id, flow, enable, prefer_hklm=False, allow_universal_scan=False, vendor_ini_path=None):
     """
@@ -1109,3 +1170,4 @@ def _learn_fx_and_write_ini(target, fx_name, snapA, snapB, ini_path=None, prefer
         "dword_enable": dword_enable,
         "dword_disable": dword_disable
     }
+
