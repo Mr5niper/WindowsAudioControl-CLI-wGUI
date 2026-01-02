@@ -301,19 +301,23 @@ class AudioGUI:
             return None
         return self.item_to_device.get(sel[0])
     def show_menu_for_item(self, event, iid=None):
+        import gc
         try:
             if iid is None:
                 iid = self.tree.identify_row(event.y)
             if not iid:
                 return
+    
             d = self.item_to_device.get(iid)
             if d:
                 self.tree.selection_set(iid)
             else:
                 self.tree.selection_remove(iid)
+    
             # Determine current end (not used to trim now; we rebuild only the FX submenu)
             end_idx = self.menu.index("end")
             end_idx = end_idx if end_idx is not None else -1
+    
             if not d:
                 # Disable actionable items when no device is selected
                 for i in range(end_idx + 1):
@@ -322,16 +326,26 @@ class AudioGUI:
                         self.menu.entryconfig(i, state="disabled")
                 self.menu.tk_popup(event.x_root, event.y_root)
                 return
+    
             # Enable all standard menu items
             for i in range(end_idx + 1):
                 etype = self.menu.type(i)
                 if etype in ("command", "cascade", "checkbutton", "radiobutton"):
                     self.menu.entryconfig(i, state="normal")
-            # Mute label
+    
+            # Mute label (GC-guard around COM call)
             try:
-                muted = get_endpoint_mute(d["id"])
+                gc_was_enabled = gc.isenabled()
+                if gc_was_enabled:
+                    gc.disable()
+                try:
+                    muted = get_endpoint_mute(d["id"])
+                finally:
+                    if gc_was_enabled:
+                        gc.enable()
             except Exception:
                 muted = None
+    
             if muted is True:
                 mute_label = "Unmute"
             elif muted is False:
@@ -339,14 +353,24 @@ class AudioGUI:
             else:
                 mute_label = "Unmute"
             self.menu.entryconfig(self.mute_menu_index, label=mute_label, state="normal")
-            # Listen label (Capture only)
+    
+            # Listen label (Capture only) (the COM helper already GC-guards internally, but we keep a belt-and-suspenders wrapper)
             if d["flow"] == "Capture":
                 try:
-                    current = _get_listen_to_device_status_ps(d["id"])
+                    gc_was_enabled = gc.isenabled()
+                    if gc_was_enabled:
+                        gc.disable()
+                    try:
+                        current = _get_listen_to_device_status_ps(d["id"])
+                    finally:
+                        if gc_was_enabled:
+                            gc.enable()
                 except Exception:
                     current = None
+    
                 if current is None:
                     current = _read_listen_enable_from_registry(d["id"])
+    
                 if current is True:
                     label = "Disable Listen"
                 elif current is False:
@@ -356,12 +380,14 @@ class AudioGUI:
                 self.menu.entryconfig(self.listen_menu_index, label=label, state="normal")
             else:
                 self.menu.entryconfig(self.listen_menu_index, label=self.listen_menu_default_label, state="disabled")
+    
             # Main enhancements toggle label/state
             vend_available = False
             try:
                 vend_available = bool(_find_first_vendor_entry(d["id"], d["flow"], ini_path=_vendor_ini_default_path()))
             except Exception:
                 vend_available = False
+    
             if vend_available:
                 try:
                     enh = _get_enhancements_status_any(d["id"], d["flow"])
@@ -381,11 +407,11 @@ class AudioGUI:
             else:
                 self._pending_enh = None
                 self.menu.entryconfig(self.enh_menu_index, label=self.enh_menu_default_label, state="disabled")
-            # Rebuild Enhancement Effects submenu safely
+    
+            # Rebuild Enhancement Effects submenu safely (already guarded, keep as-is)
             try:
                 self.fx_menu.delete(0, "end")
             except Exception:
-                # If the menu hasn't any items yet, ignore
                 pass
             try:
                 from .vendor_db import _list_fx_for_device, _read_vendor_entry_state
@@ -395,12 +421,12 @@ class AudioGUI:
                         fx_name = fx_info["fx_name"]
                         entry = fx_info["entry"]
                         try:
-                            current_state = _read_vendor_entry_state(entry, d["id"], d["flow"])
+                            st = _read_vendor_entry_state(entry, d["id"], d["flow"])
                         except Exception:
-                            current_state = None
-                        if current_state is True:
+                            st = None
+                        if st is True:
                             label = f"Disable {fx_name}"
-                        elif current_state is False:
+                        elif st is False:
                             label = f"Enable {fx_name}"
                         else:
                             label = f"Toggle {fx_name}"
@@ -409,7 +435,6 @@ class AudioGUI:
                                 self.on_toggle_fx_live(fx_n)
                             return cmd
                         self.fx_menu.add_command(label=label, command=make_fx_command(fx_name))
-                    # Enable the cascade
                     self.menu.entryconfig(self.fx_cascade_index, state="normal")
                 else:
                     self.fx_menu.add_command(label="No effects available", state="disabled")
@@ -422,8 +447,23 @@ class AudioGUI:
                     pass
                 self.fx_menu.add_command(label="Failed to load effects", state="disabled")
                 self.menu.entryconfig(self.fx_cascade_index, state="disabled")
+    
             # Show menu
             self.menu.tk_popup(event.x_root, event.y_root)
+    
+        except Exception as e:
+            # Last-resort guard so a right-click can’t take down the process
+            try:
+                from .logging_setup import _log_exc, _log
+                _log(f"Context menu error for selection: {e!r}")
+                _log_exc("RIGHT-CLICK CONTEXT MENU EXCEPTION")
+            except Exception:
+                pass
+            try:
+                messagebox.showerror("Error", f"Failed to build menu:\n{e}")
+            except Exception:
+                pass
+            self.set_status("Failed to build menu")
         finally:
             try:
                 self.menu.grab_release()
@@ -1353,3 +1393,4 @@ def launch_gui():
         pass
         
     return 0
+
