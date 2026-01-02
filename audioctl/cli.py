@@ -301,14 +301,16 @@ def cmd_enhancements(args):
         print(f"Set the '{fx_name}' effect to ENABLED for this device.")
         input("When ready, press Enter to capture snapshot A... ")
         captured_stderr = io.StringIO()
+        from .devices import _collect_registry_only_snapshot
         with redirect_stderr(captured_stderr):
-            snapA = _collect_sysfx_snapshot(target["id"])
+            snapA = _collect_registry_only_snapshot(target["id"])
         _reemit_non_error_stderr(captured_stderr.getvalue())
         print(f"Now set the '{fx_name}' effect to DISABLED for the same device.")
         input("When ready, press Enter to capture snapshot B... ")
         captured_stderr = io.StringIO()
+        from .devices import _collect_registry_only_snapshot
         with redirect_stderr(captured_stderr):
-            snapB = _collect_sysfx_snapshot(target["id"])
+            snapB = _collect_registry_only_snapshot(target["id"])
         _reemit_non_error_stderr(captured_stderr.getvalue())
         ok, info = _learn_fx_and_write_ini(
             target, fx_name, snapA, snapB,
