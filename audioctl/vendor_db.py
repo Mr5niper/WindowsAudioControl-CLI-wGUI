@@ -1241,50 +1241,68 @@ def _learn_fx_and_write_ini(target, fx_name, snapA, snapB, ini_path=None, prefer
     }
 
 def _list_fx_for_device(device_id, flow, ini_path=None):
-    """List all available FX for a device (learned INI first, then code defaults). Returns [{'fx_name','entry'}]."""
+    """
+    List all available FX for a device (learned INI first, then code defaults),
+    returned alphabetically by fx_name (case-insensitive). If multiple entries
+    share the same name, learned (ini) entries are ordered before code defaults.
+    Returns [{'fx_name','entry'}].
+    """
     from .devices import list_devices
+
     db = _load_vendor_db_split(ini_path)
     devices = list_devices(include_all=False)
     device = next((d for d in devices if d["id"] == device_id), None)
     if not device:
         return []
+
     device_name = device["name"]
     flow_name = "Render" if str(flow).lower().startswith("r") else "Capture"
-    available_fx = []
-    seen = set()  # fx_name lowercase; learned wins
 
-    # 1) Learned FX
+    available_fx = []
+    seen = set()  # fx_name lowercase; learned wins on duplicates
+
+    # 1) Learned FX (INI)
     for entry in db["fx"]:
+        # Respect flow filter (default to current flow if no flows listed)
         if flow_name not in (entry.get("flows") or [flow_name]):
             continue
         pattern = entry.get("device_name_pattern", "")
         if pattern and pattern.lower() in device_name.lower():
             fx_name = (entry.get("fx_name") or "").strip()
-            if fx_name and fx_name.lower() not in seen:
-                seen.add(fx_name.lower())
-                e = dict(entry)
-                e["source"] = "ini"
-                available_fx.append({
-                    "fx_name": fx_name,
-                    "entry": e
-                })
+            if not fx_name:
+                continue
+            key = fx_name.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            e = dict(entry)
+            e["source"] = "ini"
+            available_fx.append({"fx_name": fx_name, "entry": e})
 
-    # 2) Code FX (only add if not already provided by learned)
+    # 2) Code FX (only if not already provided by learned)
     for entry in _CODE_FX_ENTRIES:
         if flow_name not in (entry.get("flows") or []):
             continue
         pattern = entry.get("device_name_pattern", "")
         if pattern and pattern.lower() in device_name.lower():
             fx_name = (entry.get("fx_name") or "").strip()
-            if fx_name and fx_name.lower() not in seen:
-                seen.add(fx_name.lower())
-                e = dict(entry)
-                e["source"] = "code"
-                available_fx.append({
-                    "fx_name": fx_name,
-                    "entry": e
-                })
+            if not fx_name:
+                continue
+            key = fx_name.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            e = dict(entry)
+            e["source"] = "code"
+            available_fx.append({"fx_name": fx_name, "entry": e})
 
+    # Sort alphabetically by name (case-insensitive). If equal, learned (ini) first.
+    available_fx.sort(
+        key=lambda x: (
+            (x.get("fx_name") or "").lower(),
+            0 if (x.get("entry", {}).get("source") == "ini") else 1
+        )
+    )
     return available_fx
 
 def _find_fx_for_device(device_id, flow, fx_name, ini_path=None):
@@ -1372,4 +1390,5 @@ def _apply_fx(device_id, flow, fx_name, enable, ini_path=None):
     src = entry.get("source", "ini")
     verified_by = f"vendor-fx:{'code:' if src=='code' else ''}{entry.get('fx_name','')}"
     return ok, verified_by if ok else None, state
+
 
