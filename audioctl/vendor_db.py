@@ -1,5 +1,4 @@
 # audioctl/vendor_db.py
-# audioctl/vendor_db.py
 import os
 import re
 import configparser
@@ -89,7 +88,7 @@ def _build_fx_multiwrite_from_snapshots(target, snapA, snapB):
             continue
         # Only consider our two subkeys
         sub = str(a.get("subkey") or "")
-        if sub not in ("FxProperties", "Properties"):
+        if not (sub.startswith("FxProperties") or sub.startswith("Properties")):
             continue
         # Compare exact raw payloads
         type_a = a.get("type"); type_b = b.get("type")
@@ -773,7 +772,7 @@ def _build_fx_multiwrite_from_stable_maps(target, stableA, stableB):
     # Prefer stable indicators first => decider_index=1 picks the best
     def _score(w):
         score = 0
-        if w["subkey"] == "FxProperties":
+        if str(w.get("subkey") or "").startswith("FxProperties"):
             score += 3
         te = (w["type_enable"] or "").upper()
         td = (w["type_disable"] or "").upper()
@@ -1118,7 +1117,7 @@ def _read_decider_state(entry, device_id, flow):
     def _score_write_for_decider(w):
         score = 0
         # Prefer FxProperties over Properties
-        if (w.get("subkey") or "").strip() == "FxProperties":
+        if str((w.get("subkey") or "").strip()).startswith("FxProperties"):
             score += 10
         # Prefer DWORD
         t_en = (w.get("type_enable") or "").upper()
@@ -1373,3 +1372,4 @@ def _apply_fx(device_id, flow, fx_name, enable, ini_path=None):
     src = entry.get("source", "ini")
     verified_by = f"vendor-fx:{'code:' if src=='code' else ''}{entry.get('fx_name','')}"
     return ok, verified_by if ok else None, state
+
