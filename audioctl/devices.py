@@ -902,71 +902,109 @@ def _dump_mmdevices_all_values(device_id):
     r"""
     Dump ALL values under BOTH hives for this endpoint.
     Augmented: include full raw data in 'dataRaw' so learning can replay binary values exactly.
+    Recurses under FxProperties and Properties (e.g., FxProperties\{plugin}\User).
     """
     guid = _extract_endpoint_guid_from_device_id(device_id)
     if not guid:
         return {"error": "bad endpoint id, cannot extract guid"}
+
     items = []
     roots = [
         (winreg.HKEY_CURRENT_USER,  "HKCU"),
         (winreg.HKEY_LOCAL_MACHINE, "HKLM"),
     ]
+
+    def _enum_key_recursive(hive, hive_name, root_path, rel_subkey, flow):
+        """
+        Enumerate values at root_path and recurse into subkeys.
+        rel_subkey is the relative path under the endpoint GUID, e.g.:
+          - 'FxProperties'
+          - 'FxProperties\\{plugin-guid}\\User'
+        """
+        # Enumerate values in current key
+        try:
+            key = winreg.OpenKey(hive, root_path, 0, winreg.KEY_READ)
+        except OSError:
+            return
+        try:
+            i = 0
+            while True:
+                try:
+                    name, val, typ = winreg.EnumValue(key, i)
+                    i += 1
+                except OSError:
+                    break
+                rec = {
+                    "hive": hive_name,
+                    "flow": flow,
+                    "subkey": rel_subkey,    # relative path under endpoint GUID
+                    "name": name,
+                    "type": typ,
+                }
+                # dataPreview (compat)
+                try:
+                    if typ == winreg.REG_DWORD:
+                        rec["dataPreview"] = int(val)
+                    elif typ == winreg.REG_SZ:
+                        rec["dataPreview"] = str(val)
+                    elif typ == winreg.REG_BINARY:
+                        b = bytes(val)
+                        rec["dataPreview"] = "hex:" + b[:16].hex() + (f"...({len(b)})" if len(b) > 16 else "")
+                    else:
+                        rec["dataPreview"] = f"<type {typ}>"
+                except Exception:
+                    rec["dataPreview"] = "<unreadable>"
+                # dataRaw (exact payload)
+                try:
+                    if typ == winreg.REG_DWORD:
+                        rec["dataRaw"] = int(val)
+                    elif typ == winreg.REG_SZ:
+                        rec["dataRaw"] = str(val)
+                    elif typ == winreg.REG_BINARY:
+                        rec["dataRaw"] = bytes(val).hex()
+                    else:
+                        rec["dataRaw"] = None
+                except Exception:
+                    rec["dataRaw"] = None
+
+                items.append(rec)
+        finally:
+            try:
+                winreg.CloseKey(key)
+            except Exception:
+                pass
+
+        # Recurse into subkeys
+        try:
+            key = winreg.OpenKey(hive, root_path, 0, winreg.KEY_READ)
+        except OSError:
+            return
+        try:
+            i = 0
+            while True:
+                try:
+                    subname = winreg.EnumKey(key, i)
+                    i += 1
+                except OSError:
+                    break
+                next_rel = rel_subkey + "\\" + subname if rel_subkey else subname
+                next_path = root_path + "\\" + subname
+                _enum_key_recursive(hive, hive_name, next_path, next_rel, flow)
+        finally:
+            try:
+                winreg.CloseKey(key)
+            except Exception:
+                pass
+
     for hive, hive_name in roots:
         for flow in ("Render", "Capture"):
-            for sub in ("FxProperties", "Properties"):
-                key_path = rf"SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\{flow}\{guid}\{sub}"
-                try:
-                    key = winreg.OpenKey(hive, key_path, 0, winreg.KEY_READ)
-                except OSError:
-                    continue
-                try:
-                    i = 0
-                    while True:
-                        try:
-                            name, val, typ = winreg.EnumValue(key, i)
-                            i += 1
-                        except OSError:
-                            break
-                        rec = {
-                            "hive": hive_name,
-                            "flow": flow,
-                            "subkey": sub,
-                            "name": name,
-                            "type": typ,
-                        }
-                        # dataPreview (unchanged for compatibility)
-                        try:
-                            if typ == winreg.REG_DWORD:
-                                rec["dataPreview"] = int(val)
-                            elif typ == winreg.REG_SZ:
-                                rec["dataPreview"] = str(val)
-                            elif typ == winreg.REG_BINARY:
-                                b = bytes(val)
-                                rec["dataPreview"] = "hex:" + b[:16].hex() + (f"...({len(b)})" if len(b) > 16 else "")
-                            else:
-                                rec["dataPreview"] = f"<type {typ}>"
-                        except Exception:
-                            rec["dataPreview"] = "<unreadable>"
-                        # dataRaw (exact replay payload)
-                        try:
-                            if typ == winreg.REG_DWORD:
-                                rec["dataRaw"] = int(val)
-                            elif typ == winreg.REG_SZ:
-                                rec["dataRaw"] = str(val)
-                            elif typ == winreg.REG_BINARY:
-                                rec["dataRaw"] = bytes(val).hex()  # hex string, no 'hex:' prefix
-                            else:
-                                rec["dataRaw"] = None
-                        except Exception:
-                            rec["dataRaw"] = None
-                        items.append(rec)
-                finally:
-                    try:
-                        winreg.CloseKey(key)
-                    except Exception:
-                        pass
-    return items
+            # Start recursion from the two well-known roots
+            for first in ("FxProperties", "Properties"):
+                base = rf"SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\{flow}\{guid}\{first}"
+                _enum_key_recursive(hive, hive_name, base, first, flow)
 
+    return items
+    
 def _mmdev_key_of(rec):
     return f"{rec.get('hive','?')}|{rec.get('flow','?')}|{rec.get('subkey','?')}|{rec.get('name','?')}"
 
@@ -1793,3 +1831,4 @@ def _verify_effect_only(device_id, flow, expected_enabled, timeout=2.5, interval
             ok_streak = 0
         _time.sleep(interval)
     return False, None, last_state
+
