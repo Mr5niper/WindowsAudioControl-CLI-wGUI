@@ -5,10 +5,10 @@ import time
 import tkinter as tk
 from tkinter import ttk, messagebox
 from contextlib import redirect_stderr
-import comtypes
 import re
 from .logging_setup import resource_path, _log, _log_exc, _log_path
 from .compat import is_admin
+import comtypes
 from .devices import (
     list_devices, _sort_and_tag_gui_indices,
     get_endpoint_mute, set_endpoint_mute,
@@ -33,7 +33,7 @@ from .vendor_db import (
 class AudioGUI:
     def __init__(self, root):
         self.root = root
-        self.root.title("Audio Control v1.4.4.1 12-31-2025")
+        self.root.title("Audio Control v1.4.4.2 01-01-2026")
         # Style and theme
         style = ttk.Style(self.root)
         try:
@@ -1353,5 +1353,3 @@ def launch_gui():
         pass
         
     return 0
-
-
