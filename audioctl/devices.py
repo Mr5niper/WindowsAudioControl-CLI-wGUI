@@ -21,6 +21,91 @@ from .logging_setup import _log, _log_exc, _dbg
 # Removed: from .vendor_db import ...
 import comtypes.automation as automation
 import copy
+# --- Cached PolicyConfigFx interface definitions (define once at import time) ---
+_POLICY_CONFIG_FX_DEFS = None
+def _init_policyconfig_fx_defs_once():
+    global _POLICY_CONFIG_FX_DEFS
+    if _POLICY_CONFIG_FX_DEFS is not None:
+        return
+    class PROPERTYKEY(ctypes.Structure):
+        _fields_ = (("fmtid", GUID), ("pid", wintypes.DWORD))
+    # Prefer comtypes.automation PROPVARIANT, with a small fallback
+    try:
+        PROPVARIANT = getattr(automation, "PROPVARIANT", getattr(automation, "tagPROPVARIANT"))
+    except Exception:
+        class _PVU(ctypes.Union):
+            _fields_ = [
+                ("boolVal", ctypes.c_short),
+                ("uiVal", ctypes.c_ushort),
+                ("ulVal", ctypes.c_ulong),
+                ("pwszVal", ctypes.c_wchar_p),
+            ]
+        class PROPVARIANT(ctypes.Structure):
+            _anonymous_ = ("data",)
+            _fields_ = [
+                ("vt", ctypes.c_ushort),
+                ("wReserved1", ctypes.c_ushort),
+                ("wReserved2", ctypes.c_ushort),
+                ("wReserved3", ctypes.c_ushort),
+                ("data", _PVU),
+            ]
+    # IPolicyConfigFx IID {F8679F50-850A-41CF-9C72-430F290290C8}
+    _IID_PolicyConfig = GUID(_guid_from_parts("F8679F50", "-850A-41CF-", "9C72-", "430F290290C8"))
+    class IPolicyConfigFx(IUnknown):
+        _iid_ = _IID_PolicyConfig
+        _methods_ = (
+            COMMETHOD([], HRESULT, 'GetMixFormat',
+                      (['in'], wintypes.LPCWSTR, 'wszDeviceId'),
+                      (['out'], POINTER(ctypes.c_void_p), 'ppFormat')),
+            COMMETHOD([], HRESULT, 'GetDeviceFormat',
+                      (['in'], wintypes.LPCWSTR, 'wszDeviceId'),
+                      (['in'], wintypes.BOOL, 'bDefault'),
+                      (['out'], POINTER(ctypes.c_void_p), 'ppFormat')),
+            COMMETHOD([], HRESULT, 'SetDeviceFormat',
+                      (['in'], wintypes.LPCWSTR, 'wszDeviceId'),
+                      (['in'], ctypes.c_void_p, 'pEndpointFormat'),
+                      (['in'], ctypes.c_void_p, 'mixFormat')),
+            COMMETHOD([], HRESULT, 'GetProcessingPeriod',
+                      (['in'], wintypes.LPCWSTR, 'wszDeviceId'),
+                      (['in'], wintypes.BOOL, 'bDefault'),
+                      (['out'], POINTER(ctypes.c_longlong), 'pmftDefaultPeriod'),
+                      (['out'], POINTER(ctypes.c_longlong), 'pmftMinimumPeriod')),
+            COMMETHOD([], HRESULT, 'SetProcessingPeriod',
+                      (['in'], wintypes.LPCWSTR, 'wszDeviceId'),
+                      (['in'], POINTER(ctypes.c_longlong), 'pmftPeriod')),
+            COMMETHOD([], HRESULT, 'GetShareMode',
+                      (['in'], wintypes.LPCWSTR, 'wszDeviceId'),
+                      (['out'], POINTER(ctypes.c_void_p), 'pMode')),
+            COMMETHOD([], HRESULT, 'SetShareMode',
+                      (['in'], wintypes.LPCWSTR, 'wszDeviceId'),
+                      (['in'], ctypes.c_void_p, 'mode')),
+            # NOTE: bFxStore variants we need:
+            COMMETHOD([], HRESULT, 'GetPropertyValue',
+                      (['in'], wintypes.LPCWSTR, 'pszDeviceName'),
+                      (['in'], wintypes.BOOL, 'bFxStore'),
+                      (['in'], POINTER(PROPERTYKEY), 'pKey'),
+                      (['out'], POINTER(PROPVARIANT), 'pv')),
+            COMMETHOD([], HRESULT, 'SetPropertyValue',
+                      (['in'], wintypes.LPCWSTR, 'pszDeviceName'),
+                      (['in'], wintypes.BOOL, 'bFxStore'),
+                      (['in'], POINTER(PROPERTYKEY), 'pKey'),
+                      (['in'], POINTER(PROPVARIANT), 'pv')),
+            COMMETHOD([], HRESULT, 'SetDefaultEndpoint',
+                      (['in'], wintypes.LPCWSTR, 'wszDeviceId'),
+                      (['in'], wintypes.DWORD, 'role')),
+            COMMETHOD([], HRESULT, 'SetEndpointVisibility',
+                      (['in'], wintypes.LPCWSTR, 'wszDeviceId'),
+                      (['in'], wintypes.BOOL, 'bVisible')),
+        )
+    # CLSID_PolicyConfigClient {870AF99C-171D-4F9E-AF0D-E63DF40C2BC9}
+    CLSID_PolicyConfigClient = GUID(_guid_from_parts("870AF99C", "-171D-4F9E-", "AF0D-", "E63DF40C2BC9"))
+    _POLICY_CONFIG_FX_DEFS = (IPolicyConfigFx, CLSID_PolicyConfigClient, PROPERTYKEY, PROPVARIANT)
+# Initialize once at import time
+_init_policyconfig_fx_defs_once()
+def _define_policyconfig_fx_interfaces():
+    # Backward-compatible helper that now just returns the cached defs
+    _init_policyconfig_fx_defs_once()
+    return _POLICY_CONFIG_FX_DEFS
 # Global cache for PropertyStore interface definitions to avoid GC-related COM crashes
 _PROPERTY_STORE_INTERFACES_CACHE = None
 def _short_settle(sec=0.15):
@@ -300,60 +385,6 @@ def _verify_listen_via_registry(device_id: str, expected_enabled: bool, timeout=
         time.sleep(interval)
     return False, last_state
 # --- Enhancements Helpers (PropertyStore, Registry, COM helpers) ---
-def _define_policyconfig_fx_interfaces():
-    """
-    Define a local IPolicyConfig interface with GetPropertyValue/SetPropertyValue
-    that take the bFxStore flag, using runtime-assembled GUID strings.
-    """
-    class PROPERTYKEY(ctypes.Structure):
-        _fields_ = (("fmtid", GUID), ("pid", wintypes.DWORD))
-    # Prefer comtypes' PROPVARIANT; fallback to a minimal struct if missing
-    try:
-        PROPVARIANT = getattr(automation, "PROPVARIANT", getattr(automation, "tagPROPVARIANT"))
-    except Exception:
-        class _PVU(ctypes.Union):
-            _fields_ = [
-                ("boolVal", ctypes.c_short),
-                ("uiVal", ctypes.c_ushort),
-                ("ulVal", ctypes.c_ulong),
-            ]
-        class PROPVARIANT(ctypes.Structure):
-            _anonymous_ = ("data",)
-            _fields_ = [
-                ("vt", ctypes.c_ushort),
-                ("wReserved1", ctypes.c_ushort),
-                ("wReserved2", ctypes.c_ushort),
-                ("wReserved3", ctypes.c_ushort),
-                ("data", _PVU),
-            ]
-    # IPolicyConfig IID {F8679F50-850A-41CF-9C72-430F290290C8}
-    _IID_PolicyConfig = GUID(_guid_from_parts("F8679F50", "-850A-41CF-", "9C72-", "430F290290C8"))
-    class IPolicyConfigFx(IUnknown):
-        _iid_ = _IID_PolicyConfig
-        _methods_ = (
-            COMMETHOD([], HRESULT, 'GetMixFormat', (['in'], wintypes.LPCWSTR, 'wszDeviceId'), (['out'], POINTER(ctypes.c_void_p), 'ppFormat')),
-            COMMETHOD([], HRESULT, 'GetDeviceFormat', (['in'], wintypes.LPCWSTR, 'wszDeviceId'), (['in'], wintypes.BOOL, 'bDefault'), (['out'], ctypes.POINTER(ctypes.c_void_p), 'ppFormat')),
-            COMMETHOD([], HRESULT, 'SetDeviceFormat', (['in'], wintypes.LPCWSTR, 'wszDeviceId'), (['in'], ctypes.c_void_p, 'pEndpointFormat'), (['in'], ctypes.c_void_p, 'mixFormat')),
-            COMMETHOD([], HRESULT, 'GetProcessingPeriod', (['in'], wintypes.LPCWSTR, 'wszDeviceId'), (['in'], wintypes.BOOL, 'bDefault'), (['out'], ctypes.POINTER(ctypes.c_longlong), 'pmftDefaultPeriod'), (['out'], ctypes.POINTER(ctypes.c_longlong), 'pmftMinimumPeriod')),
-            COMMETHOD([], HRESULT, 'SetProcessingPeriod', (['in'], wintypes.LPCWSTR, 'wszDeviceId'), (['in'], ctypes.POINTER(ctypes.c_longlong), 'pmftPeriod')),
-            COMMETHOD([], HRESULT, 'GetShareMode', (['in'], wintypes.LPCWSTR, 'wszDeviceId'), (['out'], ctypes.POINTER(ctypes.c_void_p), 'pMode')),
-            COMMETHOD([], HRESULT, 'SetShareMode', (['in'], wintypes.LPCWSTR, 'wszDeviceId'), (['in'], ctypes.c_void_p, 'mode')),
-            COMMETHOD([], HRESULT, 'GetPropertyValue',
-                      (['in'], wintypes.LPCWSTR, 'pszDeviceName'),
-                      (['in'], wintypes.BOOL, 'bFxStore'),
-                      (['in'], POINTER(PROPERTYKEY), 'pKey'),
-                      (['out'], POINTER(PROPVARIANT), 'pv')),
-            COMMETHOD([], HRESULT, 'SetPropertyValue',
-                      (['in'], wintypes.LPCWSTR, 'pszDeviceName'),
-                      (['in'], wintypes.BOOL, 'bFxStore'),
-                      (['in'], POINTER(PROPERTYKEY), 'pKey'),
-                      (['in'], POINTER(PROPVARIANT), 'pv')),
-            COMMETHOD([], HRESULT, 'SetDefaultEndpoint', (['in'], wintypes.LPCWSTR, 'wszDeviceId'), (['in'], wintypes.DWORD, 'role')),
-            COMMETHOD([], HRESULT, 'SetEndpointVisibility', (['in'], wintypes.LPCWSTR, 'wszDeviceId'), (['in'], wintypes.BOOL, 'bVisible')),
-        )
-    # CLSID_PolicyConfigClient {870AF99C-171D-4F9E-AF0D-E63DF40C2BC9}
-    CLSID_PolicyConfigClient = GUID(_guid_from_parts("870AF99C", "-171D-4F9E-", "AF0D-", "E63DF40C2BC9"))
-    return IPolicyConfigFx, CLSID_PolicyConfigClient, PROPERTYKEY, PROPVARIANT
 def _get_policy_config_fx():
     IPolicyConfigFx, CLSID_PolicyConfigClient, PROPERTYKEY, PROPVARIANT = _define_policyconfig_fx_interfaces()
     return CoCreateInstance(CLSID_PolicyConfigClient, interface=IPolicyConfigFx, clsctx=CLSCTX_ALL)
@@ -923,35 +954,47 @@ def _diff_mmdevices_lists(before_list, after_list):
 def _get_enhancements_status_propstore(device_id):
     """
     Read Disable_SysFx directly from the endpoint's IPropertyStore.
+    GC-guarded to avoid Release races while using raw vtable pointers.
     """
-    import sys
+    import sys, gc
     try:
         if not sys.platform.startswith("win"):
             return None
-        
         # Get cached interface definitions
         interfaces = _get_property_store_interfaces()
         PROPVARIANT = interfaces["PROPVARIANT"]
         PROPERTYKEY = interfaces["PROPERTYKEY"]
         PIPS = interfaces["PIPS"]
         HRESULT_T = interfaces["HRESULT_T"]
-        
-        enumerator = CoCreateInstance(CLSID_MMDeviceEnumerator, interface=IMMDeviceEnumerator, clsctx=CLSCTX_ALL)
-        dev = enumerator.GetDevice(device_id)
-        ps_unknown = dev.OpenPropertyStore(STGM_READ)
-        ps_ptr_val = ctypes.cast(ps_unknown, ctypes.c_void_p).value
-        if not ps_ptr_val:
-            return None
-        ps_iface = ctypes.cast(ctypes.c_void_p(ps_ptr_val), PIPS)
-        
+        # Prepare structures and result holder outside the GC-guarded block
         pkey = PROPERTYKEY(GUID("{E4870E26-3CC5-4CD2-BA46-CA0A9A70ED04}"), wintypes.DWORD(2))
         pv = PROPVARIANT()
-        hr = ps_iface.contents.lpVtbl.contents.GetValue(ps_iface, byref(pkey), byref(pv))
-        if hr != 0:
-            return None
-            
-        raw = _parse_boolish_from_propvariant(pv)  # 0 = enh ON, 1 = enh OFF
-        
+        result = None
+        gc_was_enabled = gc.isenabled()
+        if gc_was_enabled:
+            gc.disable()
+        try:
+            enumerator = CoCreateInstance(CLSID_MMDeviceEnumerator, interface=IMMDeviceEnumerator, clsctx=CLSCTX_ALL)
+            dev = enumerator.GetDevice(device_id)
+            ps_unknown = dev.OpenPropertyStore(STGM_READ)
+            ps_ptr_val = ctypes.cast(ps_unknown, ctypes.c_void_p).value
+            if not ps_ptr_val:
+                result = None
+            else:
+                ps_iface = ctypes.cast(ctypes.c_void_p(ps_ptr_val), PIPS)
+                hr = ps_iface.contents.lpVtbl.contents.GetValue(ps_iface, byref(pkey), byref(pv))
+                if hr == 0:
+                    raw = _parse_boolish_from_propvariant(pv)  # 0 = enh ON, 1 = OFF
+                    if raw is None:
+                        result = None
+                    else:
+                        result = (False if raw == 1 else True)
+                else:
+                    result = None
+        finally:
+            if gc_was_enabled:
+                gc.enable()
+        # Clear PROPVARIANT after GC is re-enabled
         try:
             ole32 = ctypes.OleDLL("ole32.dll")
             PropVariantClear = getattr(ole32, "PropVariantClear", None)
@@ -961,61 +1004,77 @@ def _get_enhancements_status_propstore(device_id):
                 PropVariantClear(byref(pv))
         except Exception:
             pass
-        
-        if raw is None:
-            return None
-        return False if raw == 1 else True
+        return result
     except Exception:
         return None
 def _set_enhancements_propstore(device_id, enable):
     """
     Write Disable_SysFx directly via IPropertyStore::SetValue + Commit.
+    GC-guarded to avoid Release races while using raw vtable pointers.
     """
-    import sys
+    import sys, gc
     try:
         if not sys.platform.startswith("win"):
             return False
-        
         # Get cached interface definitions
         interfaces = _get_property_store_interfaces()
         PROPVARIANT = interfaces["PROPVARIANT"]
         PROPERTYKEY = interfaces["PROPERTYKEY"]
         PIPS = interfaces["PIPS"]
         HRESULT_T = interfaces["HRESULT_T"]
-        
-        enumerator = CoCreateInstance(CLSID_MMDeviceEnumerator, interface=IMMDeviceEnumerator, clsctx=CLSCTX_ALL)
-        dev = enumerator.GetDevice(device_id)
-        ps_unknown = dev.OpenPropertyStore(STGM_WRITE)
-        ps_ptr_val = ctypes.cast(ps_unknown, ctypes.c_void_p).value
-        if not ps_ptr_val:
-            return False
-        ps_iface = ctypes.cast(ctypes.c_void_p(ps_ptr_val), PIPS)
-        
         pkey = PROPERTYKEY(GUID("{E4870E26-3CC5-4CD2-BA46-CA0A9A70ED04}"), wintypes.DWORD(2))
         desired_disable = 0 if enable else 1
         pv = PROPVARIANT()
-        
+        ok = False
+        gc_was_enabled = gc.isenabled()
+        if gc_was_enabled:
+            gc.disable()
         try:
-            ps_iface.contents.lpVtbl.contents.GetValue(ps_iface, byref(pkey), byref(pv))
-            if not _set_boolish_in_propvariant(pv, desired_disable):
-                pv.vt = 19  # VT_UI4
+            enumerator = CoCreateInstance(CLSID_MMDeviceEnumerator, interface=IMMDeviceEnumerator, clsctx=CLSCTX_ALL)
+            dev = enumerator.GetDevice(device_id)
+            ps_unknown = dev.OpenPropertyStore(STGM_WRITE)
+            ps_ptr_val = ctypes.cast(ps_unknown, ctypes.c_void_p).value
+            if not ps_ptr_val:
+                ok = False
+            else:
+                ps_iface = ctypes.cast(ctypes.c_void_p(ps_ptr_val), PIPS)
+                # Try to read the existing pv to preserve VT where possible
                 try:
-                    pv.ulVal = desired_disable
+                    ps_iface.contents.lpVtbl.contents.GetValue(ps_iface, byref(pkey), byref(pv))
+                    if not _set_boolish_in_propvariant(pv, desired_disable):
+                        pv.vt = 19  # VT_UI4
+                        try:
+                            pv.ulVal = desired_disable
+                        except Exception:
+                            pass
                 except Exception:
-                    pass
+                    # Build a fresh PV if GetValue failed
+                    pv = PROPVARIANT()
+                    pv.vt = 19  # VT_UI4
+                    try:
+                        pv.ulVal = desired_disable
+                    except Exception:
+                        pass
+                hr = ps_iface.contents.lpVtbl.contents.SetValue(ps_iface, byref(pkey), byref(pv))
+                if hr == 0:
+                    hr = ps_iface.contents.lpVtbl.contents.Commit(ps_iface)
+                    ok = (hr == 0)
+                else:
+                    ok = False
+        finally:
+            if gc_was_enabled:
+                gc.enable()
+        # Clear PROPVARIANT after GC is re-enabled
+        try:
+            ole32 = ctypes.OleDLL("ole32.dll")
+            PropVariantClear = getattr(ole32, "PropVariantClear", None)
+            if PropVariantClear:
+                PropVariantClear.restype = HRESULT_T
+                PropVariantClear.argtypes = (ctypes.POINTER(PROPVARIANT),)
+                PropVariantClear(byref(pv))
         except Exception:
-            pv = PROPVARIANT()
-            pv.vt = 19  # VT_UI4
-            try:
-                pv.ulVal = desired_disable
-            except Exception:
-                pass
-        hr = ps_iface.contents.lpVtbl.contents.SetValue(ps_iface, byref(pkey), byref(pv))
-        if hr != 0:
-            return False
-            
-        hr = ps_iface.contents.lpVtbl.contents.Commit(ps_iface)
-        return hr == 0
+            pass
+        return ok
     except Exception:
         return False
 def _wait_for_propstore_sysfx(device_id, expected_enabled, timeout=1.5, interval=0.12):
@@ -1043,22 +1102,30 @@ def _collect_sysfx_snapshot(device_id):
         "propStore": {},
         "registry": [],
     }
-    # COM (both stores)
+    # COM (both stores) - wrap in a GC guard to avoid Release races while using COM
     try:
-        IPolicyConfigFx, CLSID_PolicyConfigClient, PROPERTYKEY, PROPVARIANT = _define_policyconfig_fx_interfaces()
-        pkey = _pkey_disable_sysfx()
-        pc = _get_policy_config_fx()
-        for bfx, label in ((True, "fxStore"), (False, "normalStore")):
-            pv = PROPVARIANT()
-            rec = {}
-            try:
-                pc.GetPropertyValue(device_id, bfx, byref(pkey), byref(pv))
-                raw = _parse_boolish_from_propvariant(pv)  # Disable_SysFx: 0=enh on, 1=off
-                rec["rawDisable"] = raw
-                rec["enhEnabled"] = (False if raw == 1 else True) if raw is not None else None
-            except Exception as e:
-                rec["error"] = str(e)
-            snap["com"][label] = rec
+        import gc
+        gc_was_enabled = gc.isenabled()
+        if gc_was_enabled:
+            gc.disable()
+        try:
+            IPolicyConfigFx, CLSID_PolicyConfigClient, PROPERTYKEY, PROPVARIANT = _define_policyconfig_fx_interfaces()
+            pkey = _pkey_disable_sysfx()
+            pc = _get_policy_config_fx()
+            for bfx, label in ((True, "fxStore"), (False, "normalStore")):
+                pv = PROPVARIANT()
+                rec = {}
+                try:
+                    pc.GetPropertyValue(device_id, bfx, byref(pkey), byref(pv))
+                    raw = _parse_boolish_from_propvariant(pv)  # Disable_SysFx: 0=enh on, 1=off
+                    rec["rawDisable"] = raw
+                    rec["enhEnabled"] = (False if raw == 1 else True) if raw is not None else None
+                except Exception as e:
+                    rec["error"] = str(e)
+                snap["com"][label] = rec
+        finally:
+            if gc_was_enabled:
+                gc.enable()
     except Exception as e:
         snap["com"] = {"error": str(e)}
         
