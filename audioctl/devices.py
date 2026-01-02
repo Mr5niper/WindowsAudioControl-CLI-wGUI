@@ -8,15 +8,16 @@ import ctypes
 import winreg
 from contextlib import redirect_stderr
 from ctypes import POINTER, byref, wintypes
-from comtypes import CLSCTX_ALL, CoCreateInstance, GUID, IUnknown, COMMETHOD, HRESULT, CoInitialize, CoUninitialize
-from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume, IMMDeviceEnumerator
-from pycaw.constants import CLSID_MMDeviceEnumerator
+# Import compat BEFORE comtypes/pycaw
 from .compat import (
     E_RENDER, E_CAPTURE,
     E_CONSOLE, E_MULTIMEDIA, E_COMMUNICATIONS,
     ROLES, DEVICE_STATE_ACTIVE, DEVICE_STATE_ALL, DEVICE_STATES,
     STGM_READ, STGM_WRITE, is_admin, _guid_from_parts,
 )
+from comtypes import CLSCTX_ALL, CoCreateInstance, GUID, IUnknown, COMMETHOD, HRESULT
+from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume, IMMDeviceEnumerator
+from pycaw.constants import CLSID_MMDeviceEnumerator
 from .logging_setup import _log, _log_exc, _dbg
 # Removed: from .vendor_db import ...
 import comtypes.automation as automation
@@ -145,8 +146,7 @@ def set_listen_to_device_ps(capture_device_id, enable, render_device_id=None):
     and registry for playback target (which requires admin for HKLM write).
     Assumes COM is already initialized on this thread (GUI or CLI does that).
     """
-    import sys
-    
+    import sys, gc
     # Get cached interface definitions
     interfaces = _get_property_store_interfaces()
     PROPVARIANT = interfaces["PROPVARIANT"]
@@ -157,10 +157,8 @@ def set_listen_to_device_ps(capture_device_id, enable, render_device_id=None):
     HRESULT_T = interfaces["HRESULT_T"]
     VARIANT_TRUE = interfaces["VARIANT_TRUE"]
     VARIANT_FALSE = interfaces["VARIANT_FALSE"]
-    
     def _hrx(hr): return f"0x{ctypes.c_uint(hr).value:08X}"
     def _raw_ptr(p): return ctypes.cast(p, ctypes.c_void_p).value
-    
     propsys = ctypes.OleDLL("propsys.dll")
     ole32 = ctypes.OleDLL("ole32.dll")
     have_helpers = True
@@ -173,7 +171,6 @@ def set_listen_to_device_ps(capture_device_id, enable, render_device_id=None):
     PropVariantClear = ole32.PropVariantClear
     PropVariantClear.restype = HRESULT_T
     PropVariantClear.argtypes = (POINTER(PROPVARIANT),)
-    
     def _pv_from_bool_local(value: bool):
         pv = PROPVARIANT()
         if have_helpers:
@@ -187,29 +184,31 @@ def set_listen_to_device_ps(capture_device_id, enable, render_device_id=None):
             except AttributeError:
                 pass
         return pv
-    
     PKEY_LISTEN_ENABLE = PROPERTYKEY(GUID("{24dbb0fc-9311-4b3d-9cf0-18ff155639d4}"), 1)
-    
     pv_enable = None
     try:
-        # Set enable/disable via IPropertyStore (works)
-        enumerator = CoCreateInstance(CLSID_MMDeviceEnumerator, interface=IMMDeviceEnumerator, clsctx=CLSCTX_ALL)
-        dev = enumerator.GetDevice(capture_device_id)
-        ps_unknown = dev.OpenPropertyStore(STGM_WRITE)
-        ps_ptr_val = _raw_ptr(ps_unknown)
-        if not ps_ptr_val:
-            raise OSError("OpenPropertyStore returned null pointer for IPropertyStore.")
-        ps_iface = ctypes.cast(ctypes.c_void_p(ps_ptr_val), PIPS)
-        
         pv_enable = _pv_from_bool_local(bool(enable))
-        hr = ps_iface.contents.lpVtbl.contents.SetValue(ps_iface, byref(PKEY_LISTEN_ENABLE), byref(pv_enable))
-        if hr != 0:
-            raise OSError(f"IPropertyStore::SetValue(enable) failed: {_hrx(hr)}")
-        
-        hr = ps_iface.contents.lpVtbl.contents.Commit(ps_iface)
-        if hr != 0:
-            raise OSError(f"IPropertyStore::Commit failed: {_hrx(hr)}")
-        
+        # GC guard around raw vtable calls
+        gc_was_enabled = gc.isenabled()
+        if gc_was_enabled:
+            gc.disable()
+        try:
+            enumerator = CoCreateInstance(CLSID_MMDeviceEnumerator, interface=IMMDeviceEnumerator, clsctx=CLSCTX_ALL)
+            dev = enumerator.GetDevice(capture_device_id)
+            ps_unknown = dev.OpenPropertyStore(STGM_WRITE)
+            ps_ptr_val = _raw_ptr(ps_unknown)
+            if not ps_ptr_val:
+                raise OSError("OpenPropertyStore returned null pointer for IPropertyStore.")
+            ps_iface = ctypes.cast(ctypes.c_void_p(ps_ptr_val), PIPS)
+            hr = ps_iface.contents.lpVtbl.contents.SetValue(ps_iface, byref(PKEY_LISTEN_ENABLE), byref(pv_enable))
+            if hr != 0:
+                raise OSError(f"IPropertyStore::SetValue(enable) failed: {_hrx(hr)}")
+            hr = ps_iface.contents.lpVtbl.contents.Commit(ps_iface)
+            if hr != 0:
+                raise OSError(f"IPropertyStore::Commit failed: {_hrx(hr)}")
+        finally:
+            if gc_was_enabled:
+                gc.enable()
         # Set playback target via registry (only way that works)
         if render_device_id is not None:
             guid = _extract_endpoint_guid_from_device_id(capture_device_id)
@@ -217,7 +216,6 @@ def set_listen_to_device_ps(capture_device_id, enable, render_device_id=None):
                 key_path = rf"SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Capture\{guid}\Properties"
                 value_name = "{24dbb0fc-9311-4b3d-9cf0-18ff155639d4},0"
                 target_value = render_device_id if render_device_id else ""
-                
                 try:
                     key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, key_path, 0, winreg.KEY_SET_VALUE)
                     try:
@@ -226,7 +224,6 @@ def set_listen_to_device_ps(capture_device_id, enable, render_device_id=None):
                         winreg.CloseKey(key)
                 except OSError as e:
                     print(f"WARNING: Failed to set playback target (requires Admin): {e}", file=sys.stderr)
-        
         return True
     except Exception as e:
         print(f"ERROR: set_listen_to_device_ps failed for '{capture_device_id}': {e}", file=sys.stderr)
@@ -243,8 +240,7 @@ def _get_listen_to_device_status_ps(device_id):
     Assumes COM is already initialized on this thread.
     Returns True/False/None.
     """
-    import sys
-    
+    import sys, gc
     # Get cached interface definitions
     interfaces = _get_property_store_interfaces()
     PROPVARIANT = interfaces["PROPVARIANT"]
@@ -253,7 +249,6 @@ def _get_listen_to_device_status_ps(device_id):
     VT_BOOL = interfaces["VT_BOOL"]
     HRESULT_T = interfaces["HRESULT_T"]
     VARIANT_FALSE = interfaces["VARIANT_FALSE"]
-    
     ole32 = ctypes.OleDLL("ole32.dll")
     PropVariantClear = ole32.PropVariantClear
     PropVariantClear.restype = HRESULT_T
@@ -261,24 +256,35 @@ def _get_listen_to_device_status_ps(device_id):
     PKEY_LISTEN_ENABLE = PROPERTYKEY(GUID("{24dbb0fc-9311-4b3d-9cf0-18ff155639d4}"), 1)
     pv = PROPVARIANT()
     try:
-        enumerator = CoCreateInstance(CLSID_MMDeviceEnumerator, interface=IMMDeviceEnumerator, clsctx=CLSCTX_ALL)
-        dev = enumerator.GetDevice(device_id)
-        ps_unknown = dev.OpenPropertyStore(STGM_READ)
-        ps_ptr_val = ctypes.cast(ps_unknown, ctypes.c_void_p).value
-        if not ps_ptr_val:
-            return None
-        ps_iface = ctypes.cast(ctypes.c_void_p(ps_ptr_val), PIPS)
-        
-        hr = ps_iface.contents.lpVtbl.contents.GetValue(ps_iface, byref(PKEY_LISTEN_ENABLE), byref(pv))
-        if hr != 0:
-            return False
-        
-        if getattr(pv, "vt", 0) == VT_BOOL:
-            try:
-                return pv.boolVal != VARIANT_FALSE
-            except Exception:
-                return None
-        return False
+        result = None
+        # GC guard around raw vtable calls
+        gc_was_enabled = gc.isenabled()
+        if gc_was_enabled:
+            gc.disable()
+        try:
+            enumerator = CoCreateInstance(CLSID_MMDeviceEnumerator, interface=IMMDeviceEnumerator, clsctx=CLSCTX_ALL)
+            dev = enumerator.GetDevice(device_id)
+            ps_unknown = dev.OpenPropertyStore(STGM_READ)
+            ps_ptr_val = ctypes.cast(ps_unknown, ctypes.c_void_p).value
+            if not ps_ptr_val:
+                result = None
+            else:
+                ps_iface = ctypes.cast(ctypes.c_void_p(ps_ptr_val), PIPS)
+                hr = ps_iface.contents.lpVtbl.contents.GetValue(ps_iface, byref(PKEY_LISTEN_ENABLE), byref(pv))
+                if hr != 0:
+                    result = False
+                else:
+                    if getattr(pv, "vt", 0) == VT_BOOL:
+                        try:
+                            result = (pv.boolVal != VARIANT_FALSE)
+                        except Exception:
+                            result = None
+                    else:
+                        result = False
+        finally:
+            if gc_was_enabled:
+                gc.enable()
+        return result
     except Exception as e:
         print(f"WARNING: Failed to read listen status via COM for '{device_id}': {e}", file=sys.stderr)
         return None
@@ -827,6 +833,7 @@ def _verify_enhancements_via_registry(device_id, expected_enabled, timeout=2.0, 
 def _dump_mmdevices_all_values(device_id):
     r"""
     Dump ALL values under BOTH hives for this endpoint.
+    Augmented: include full raw data in 'dataRaw' so learning can replay binary values exactly.
     """
     guid = _extract_endpoint_guid_from_device_id(device_id)
     if not guid:
@@ -859,6 +866,7 @@ def _dump_mmdevices_all_values(device_id):
                             "name": name,
                             "type": typ,
                         }
+                        # dataPreview (unchanged for compatibility)
                         try:
                             if typ == winreg.REG_DWORD:
                                 rec["dataPreview"] = int(val)
@@ -871,6 +879,18 @@ def _dump_mmdevices_all_values(device_id):
                                 rec["dataPreview"] = f"<type {typ}>"
                         except Exception:
                             rec["dataPreview"] = "<unreadable>"
+                        # dataRaw (new: exact replay payload)
+                        try:
+                            if typ == winreg.REG_DWORD:
+                                rec["dataRaw"] = int(val)
+                            elif typ == winreg.REG_SZ:
+                                rec["dataRaw"] = str(val)
+                            elif typ == winreg.REG_BINARY:
+                                rec["dataRaw"] = bytes(val).hex()  # store as hex string (no 'hex:' prefix)
+                            else:
+                                rec["dataRaw"] = None
+                        except Exception:
+                            rec["dataRaw"] = None
                         items.append(rec)
                 finally:
                     try:
