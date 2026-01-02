@@ -22,14 +22,18 @@ from .logging_setup import _log, _log_exc, _dbg
 # Removed: from .vendor_db import ...
 import comtypes.automation as automation
 import copy
+
 # --- Cached PolicyConfigFx interface definitions (define once at import time) ---
 _POLICY_CONFIG_FX_DEFS = None
+
 def _init_policyconfig_fx_defs_once():
     global _POLICY_CONFIG_FX_DEFS
     if _POLICY_CONFIG_FX_DEFS is not None:
         return
+
     class PROPERTYKEY(ctypes.Structure):
         _fields_ = (("fmtid", GUID), ("pid", wintypes.DWORD))
+
     # Prefer comtypes.automation PROPVARIANT, with a small fallback
     try:
         PROPVARIANT = getattr(automation, "PROPVARIANT", getattr(automation, "tagPROPVARIANT"))
@@ -50,8 +54,10 @@ def _init_policyconfig_fx_defs_once():
                 ("wReserved3", ctypes.c_ushort),
                 ("data", _PVU),
             ]
+
     # IPolicyConfigFx IID {F8679F50-850A-41CF-9C72-430F290290C8}
     _IID_PolicyConfig = GUID(_guid_from_parts("F8679F50", "-850A-41CF-", "9C72-", "430F290290C8"))
+
     class IPolicyConfigFx(IUnknown):
         _iid_ = _IID_PolicyConfig
         _methods_ = (
@@ -98,22 +104,28 @@ def _init_policyconfig_fx_defs_once():
                       (['in'], wintypes.LPCWSTR, 'wszDeviceId'),
                       (['in'], wintypes.BOOL, 'bVisible')),
         )
+
     # CLSID_PolicyConfigClient {870AF99C-171D-4F9E-AF0D-E63DF40C2BC9}
     CLSID_PolicyConfigClient = GUID(_guid_from_parts("870AF99C", "-171D-4F9E-", "AF0D-", "E63DF40C2BC9"))
     _POLICY_CONFIG_FX_DEFS = (IPolicyConfigFx, CLSID_PolicyConfigClient, PROPERTYKEY, PROPVARIANT)
+
 # Initialize once at import time
 _init_policyconfig_fx_defs_once()
+
 def _define_policyconfig_fx_interfaces():
     # Backward-compatible helper that now just returns the cached defs
     _init_policyconfig_fx_defs_once()
     return _POLICY_CONFIG_FX_DEFS
+
 # Global cache for PropertyStore interface definitions to avoid GC-related COM crashes
 _PROPERTY_STORE_INTERFACES_CACHE = None
+
 def _short_settle(sec=0.15):
     try:
         time.sleep(float(sec))
     except Exception:
         pass
+
 def _reemit_non_error_stderr(buf_text: str):
     """
     Re-emit only non-error lines (e.g., INFO) from captured stderr.
@@ -126,6 +138,7 @@ def _reemit_non_error_stderr(buf_text: str):
                 sys.stderr.write(line)
     except Exception:
         pass
+
 def _extract_endpoint_guid_from_device_id(device_id: str):
     """
     Extract the endpoint GUID (with braces) from a device id like:
@@ -140,6 +153,7 @@ def _extract_endpoint_guid_from_device_id(device_id: str):
         return "{" + m.group(1) + "}"
     except Exception:
         return None
+
 def set_listen_to_device_ps(capture_device_id, enable, render_device_id=None):
     """
     Enable/disable 'Listen to this device' using IPropertyStore for enable flag
@@ -147,6 +161,7 @@ def set_listen_to_device_ps(capture_device_id, enable, render_device_id=None):
     Assumes COM is already initialized on this thread (GUI or CLI does that).
     """
     import sys, gc
+
     # Get cached interface definitions
     interfaces = _get_property_store_interfaces()
     PROPVARIANT = interfaces["PROPVARIANT"]
@@ -157,10 +172,13 @@ def set_listen_to_device_ps(capture_device_id, enable, render_device_id=None):
     HRESULT_T = interfaces["HRESULT_T"]
     VARIANT_TRUE = interfaces["VARIANT_TRUE"]
     VARIANT_FALSE = interfaces["VARIANT_FALSE"]
+
     def _hrx(hr): return f"0x{ctypes.c_uint(hr).value:08X}"
     def _raw_ptr(p): return ctypes.cast(p, ctypes.c_void_p).value
+
     propsys = ctypes.OleDLL("propsys.dll")
     ole32 = ctypes.OleDLL("ole32.dll")
+
     have_helpers = True
     try:
         InitPropVariantFromBoolean = propsys.InitPropVariantFromBoolean
@@ -168,9 +186,11 @@ def set_listen_to_device_ps(capture_device_id, enable, render_device_id=None):
         InitPropVariantFromBoolean.argtypes = (wintypes.BOOL, POINTER(PROPVARIANT))
     except (AttributeError, OSError):
         have_helpers = False
+
     PropVariantClear = ole32.PropVariantClear
     PropVariantClear.restype = HRESULT_T
     PropVariantClear.argtypes = (POINTER(PROPVARIANT),)
+
     def _pv_from_bool_local(value: bool):
         pv = PROPVARIANT()
         if have_helpers:
@@ -184,10 +204,13 @@ def set_listen_to_device_ps(capture_device_id, enable, render_device_id=None):
             except AttributeError:
                 pass
         return pv
+
     PKEY_LISTEN_ENABLE = PROPERTYKEY(GUID("{24dbb0fc-9311-4b3d-9cf0-18ff155639d4}"), 1)
+
     pv_enable = None
     try:
         pv_enable = _pv_from_bool_local(bool(enable))
+
         # GC guard around raw vtable calls
         gc_was_enabled = gc.isenabled()
         if gc_was_enabled:
@@ -200,15 +223,18 @@ def set_listen_to_device_ps(capture_device_id, enable, render_device_id=None):
             if not ps_ptr_val:
                 raise OSError("OpenPropertyStore returned null pointer for IPropertyStore.")
             ps_iface = ctypes.cast(ctypes.c_void_p(ps_ptr_val), PIPS)
+
             hr = ps_iface.contents.lpVtbl.contents.SetValue(ps_iface, byref(PKEY_LISTEN_ENABLE), byref(pv_enable))
             if hr != 0:
                 raise OSError(f"IPropertyStore::SetValue(enable) failed: {_hrx(hr)}")
+
             hr = ps_iface.contents.lpVtbl.contents.Commit(ps_iface)
             if hr != 0:
                 raise OSError(f"IPropertyStore::Commit failed: {_hrx(hr)}")
         finally:
             if gc_was_enabled:
                 gc.enable()
+
         # Set playback target via registry (only way that works)
         if render_device_id is not None:
             guid = _extract_endpoint_guid_from_device_id(capture_device_id)
@@ -224,6 +250,7 @@ def set_listen_to_device_ps(capture_device_id, enable, render_device_id=None):
                         winreg.CloseKey(key)
                 except OSError as e:
                     print(f"WARNING: Failed to set playback target (requires Admin): {e}", file=sys.stderr)
+
         return True
     except Exception as e:
         print(f"ERROR: set_listen_to_device_ps failed for '{capture_device_id}': {e}", file=sys.stderr)
@@ -234,6 +261,7 @@ def set_listen_to_device_ps(capture_device_id, enable, render_device_id=None):
                 PropVariantClear(byref(pv_enable))
         except Exception:
             pass
+
 def _get_listen_to_device_status_ps(device_id):
     """
     Reads the 'Listen to this device' enable flag using IPropertyStore::GetValue via raw vtable (ctypes).
@@ -241,6 +269,7 @@ def _get_listen_to_device_status_ps(device_id):
     Returns True/False/None.
     """
     import sys, gc
+
     # Get cached interface definitions
     interfaces = _get_property_store_interfaces()
     PROPVARIANT = interfaces["PROPVARIANT"]
@@ -249,14 +278,18 @@ def _get_listen_to_device_status_ps(device_id):
     VT_BOOL = interfaces["VT_BOOL"]
     HRESULT_T = interfaces["HRESULT_T"]
     VARIANT_FALSE = interfaces["VARIANT_FALSE"]
+
     ole32 = ctypes.OleDLL("ole32.dll")
     PropVariantClear = ole32.PropVariantClear
     PropVariantClear.restype = HRESULT_T
     PropVariantClear.argtypes = (POINTER(PROPVARIANT),)
+
     PKEY_LISTEN_ENABLE = PROPERTYKEY(GUID("{24dbb0fc-9311-4b3d-9cf0-18ff155639d4}"), 1)
+
     pv = PROPVARIANT()
     try:
         result = None
+
         # GC guard around raw vtable calls
         gc_was_enabled = gc.isenabled()
         if gc_was_enabled:
@@ -284,6 +317,7 @@ def _get_listen_to_device_status_ps(device_id):
         finally:
             if gc_was_enabled:
                 gc.enable()
+
         return result
     except Exception as e:
         print(f"WARNING: Failed to read listen status via COM for '{device_id}': {e}", file=sys.stderr)
@@ -293,6 +327,7 @@ def _get_listen_to_device_status_ps(device_id):
             PropVariantClear(byref(pv))
         except Exception:
             pass
+
 def _read_listen_enable_from_registry(device_id: str):
     r"""
     Robustly read the 'Listen to this device' enable state from MMDevices.
@@ -301,11 +336,14 @@ def _read_listen_enable_from_registry(device_id: str):
         import sys
     except Exception:
         return None
+
     guid = _extract_endpoint_guid_from_device_id(device_id)
     if not guid:
         return None
+
     base = r"SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Capture" + "\\" + guid
     guid_base = "{24dbb0fc-9311-4b3d-9cf0-18ff155639d4}".lower()
+
     def _parse_bool_from_reg(val, typ):
         if typ == winreg.REG_DWORD:
             try:
@@ -332,8 +370,10 @@ def _read_listen_enable_from_registry(device_id: str):
             except Exception:
                 return None
         return None
+
     preferred = None
     fallback_any = None
+
     for sub in ("FxProperties", "Properties"):
         try:
             key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, base + "\\" + sub, 0, winreg.KEY_READ)
@@ -371,11 +411,13 @@ def _read_listen_enable_from_registry(device_id: str):
                 winreg.CloseKey(key)
             except Exception:
                 pass
+
     if preferred is not None:
         return preferred
     if fallback_any is not None:
         return fallback_any
     return None
+
 def _verify_listen_via_registry(device_id: str, expected_enabled: bool, timeout=2.0, interval=0.15):
     """
     Poll the registry for up to 'timeout' seconds until the 'Listen' checkbox matches 'expected_enabled'.
@@ -390,10 +432,13 @@ def _verify_listen_via_registry(device_id: str, expected_enabled: bool, timeout=
             return True, state
         time.sleep(interval)
     return False, last_state
+
 # --- Enhancements Helpers (PropertyStore, Registry, COM helpers) ---
+
 def _get_policy_config_fx():
     IPolicyConfigFx, CLSID_PolicyConfigClient, PROPERTYKEY, PROPVARIANT = _define_policyconfig_fx_interfaces()
     return CoCreateInstance(CLSID_PolicyConfigClient, interface=IPolicyConfigFx, clsctx=CLSCTX_ALL)
+
 def _get_policy_config_fx_singleton():
     """
     Create a fresh PolicyConfig object each time - no singleton caching.
@@ -421,8 +466,10 @@ def _get_policy_config_fx_singleton():
     except Exception as e:
         _dbg(f"Failed to create PolicyConfigFx: {e}")
         return None
+
 # Define PolicyConfig interfaces once at module load to avoid GC issues during dynamic class creation
 _POLICY_CONFIG_INTERFACES_CACHE = None
+
 def _get_policy_config_interfaces():
     """
     Get or create PolicyConfig interface definitions once and cache them.
@@ -465,12 +512,14 @@ def _get_policy_config_interfaces():
     
     _POLICY_CONFIG_INTERFACES_CACHE = (IPolicyConfig, IPolicyConfigVista, CLSID_PolicyConfigClient)
     return _POLICY_CONFIG_INTERFACES_CACHE
+
 def _release_singletons_quiet():
     """
     No-op now since we don't keep singletons.
     Kept for backward compatibility in case it's called from cleanup code.
     """
     pass
+
 def _get_property_store_interfaces():
     """
     Get or create IPropertyStore interface definitions once and cache them.
@@ -565,11 +614,13 @@ def _get_property_store_interfaces():
     }
     
     return _PROPERTY_STORE_INTERFACES_CACHE
+
 def _pkey_disable_sysfx():
     # PKEY_AudioEndpoint_Disable_SysFx {E4870E26-3CC5-4CD2-BA46-CA0A9A70ED04}, pid 2
     IPolicyConfigFx, CLSID_PolicyConfigClient, PROPERTYKEY, PROPVARIANT = _define_policyconfig_fx_interfaces()
     g = _guid_from_parts("E4870E26", "-3CC5-4CD2-", "BA46-", "CA0A9A70ED04")
     return PROPERTYKEY(GUID(g), wintypes.DWORD(2))
+
 def _parse_boolish_from_propvariant(pv):
     VT_BOOL = getattr(automation, "VT_BOOL", 11)
     VT_UI2 = 18
@@ -595,6 +646,7 @@ def _parse_boolish_from_propvariant(pv):
     except Exception:
         return None
     return None
+
 def _set_boolish_in_propvariant(pv, zero_or_one):
     VT_BOOL = getattr(automation, "VT_BOOL", 11)
     VT_UI2 = 18
@@ -628,6 +680,7 @@ def _set_boolish_in_propvariant(pv, zero_or_one):
     except Exception:
         pass
     return False
+
 def _get_enhancements_status_com(device_id):
     """
     Returns True if enhancements are enabled, False if disabled, or None if unknown.
@@ -652,6 +705,7 @@ def _get_enhancements_status_com(device_id):
         return None
     except Exception:
         return None
+
 def _set_enhancements_com(device_id, enable):
     """
     Set Disable_SysFx to desired value in both stores (FX and normal).
@@ -687,6 +741,7 @@ def _set_enhancements_com(device_id, enable):
         return ok_any
     except Exception:
         return False
+
 def _read_enhancements_from_registry(device_id):
     r"""
     Read enhancements state (enabled/disabled) via registry.
@@ -698,7 +753,9 @@ def _read_enhancements_from_registry(device_id):
     guid = _extract_endpoint_guid_from_device_id(device_id)
     if not guid:
         return None
+
     fmtid = "{e4870e26-3cc5-4cd2-ba46-ca0a9a70ed04}".lower()
+
     def _parse_bool_from_reg(val, typ):
         # REG_DWORD: 0/1
         if typ == winreg.REG_DWORD:
@@ -727,13 +784,16 @@ def _read_enhancements_from_registry(device_id):
             except Exception:
                 return None
         return None
+
     hive_list = [
         (winreg.HKEY_CURRENT_USER,  "HKCU"),
         (winreg.HKEY_LOCAL_MACHINE, "HKLM"),
     ]
+
     preferred = None
     fallback_any = None
     found_preferred = False
+
     for hive, _hn in hive_list:
         for flow in ("Render", "Capture"):
             for sub in ("FxProperties", "Properties"):
@@ -773,12 +833,14 @@ def _read_enhancements_from_registry(device_id):
                 break
         if found_preferred:
             break
+
     # Registry stores Disable_SysFx: True means DISABLED; we return 'enabled' boolean.
     if preferred is not None:
         return False if preferred else True
     if fallback_any is not None:
         return False if fallback_any else True
     return None
+
 def _set_enhancements_registry(device_id, enable, prefer_hklm=False):
     """
     Fallback: write Disable_SysFx to registry (DWORD 0/1). Returns True if any write succeeded.
@@ -786,9 +848,11 @@ def _set_enhancements_registry(device_id, enable, prefer_hklm=False):
     guid = _extract_endpoint_guid_from_device_id(device_id)
     if not guid:
         return False
+
     # Value name: Disable_SysFx pid 2
     name = "{e4870e26-3cc5-4cd2-ba46-ca0a9a70ed04},2"
     desired_disable = 0 if enable else 1
+
     # Decide hive order
     hive_order = [
         (winreg.HKEY_CURRENT_USER,  "HKCU"),
@@ -799,6 +863,7 @@ def _set_enhancements_registry(device_id, enable, prefer_hklm=False):
             (winreg.HKEY_LOCAL_MACHINE, "HKLM"),
             (winreg.HKEY_CURRENT_USER,  "HKCU"),
         ]
+
     ok_any = False
     for hive, _hn in hive_order:
         for flow in ("Render", "Capture"):
@@ -816,7 +881,9 @@ def _set_enhancements_registry(device_id, enable, prefer_hklm=False):
                 finally:
                     try: winreg.CloseKey(key)
                     except Exception: pass
+
     return ok_any
+
 def _verify_enhancements_via_registry(device_id, expected_enabled, timeout=2.0, interval=0.15):
     deadline = time.time() + timeout
     last_state = None
@@ -830,6 +897,7 @@ def _verify_enhancements_via_registry(device_id, expected_enabled, timeout=2.0, 
             return True, state
         time.sleep(interval)
     return False, last_state
+
 def _dump_mmdevices_all_values(device_id):
     r"""
     Dump ALL values under BOTH hives for this endpoint.
@@ -879,14 +947,14 @@ def _dump_mmdevices_all_values(device_id):
                                 rec["dataPreview"] = f"<type {typ}>"
                         except Exception:
                             rec["dataPreview"] = "<unreadable>"
-                        # dataRaw (new: exact replay payload)
+                        # dataRaw (exact replay payload)
                         try:
                             if typ == winreg.REG_DWORD:
                                 rec["dataRaw"] = int(val)
                             elif typ == winreg.REG_SZ:
                                 rec["dataRaw"] = str(val)
                             elif typ == winreg.REG_BINARY:
-                                rec["dataRaw"] = bytes(val).hex()  # store as hex string (no 'hex:' prefix)
+                                rec["dataRaw"] = bytes(val).hex()  # hex string, no 'hex:' prefix
                             else:
                                 rec["dataRaw"] = None
                         except Exception:
@@ -898,27 +966,33 @@ def _dump_mmdevices_all_values(device_id):
                     except Exception:
                         pass
     return items
+
 def _mmdev_key_of(rec):
     return f"{rec.get('hive','?')}|{rec.get('flow','?')}|{rec.get('subkey','?')}|{rec.get('name','?')}"
+
 def _normalize_preview(v):
     try:
         return (v if isinstance(v, (int, float)) else str(v)).strip() if isinstance(v, str) else v
     except Exception:
         return v
+
 def _diff_mmdevices_lists(before_list, after_list):
     """
     Diff two mmdevices lists.
     """
     idxA = {_mmdev_key_of(e): e for e in (before_list or [])}
     idxB = {_mmdev_key_of(e): e for e in (after_list or [])}
+
     all_keys = set(idxA.keys()) | set(idxB.keys())
+
     added = []
     removed = []
     changed = []
     flips = []
     hits = []
+
     guid_disable = "{e4870e26-3cc5-4cd2-ba46-ca0a9a70ed04}"
-    
+
     for k in sorted(all_keys):
         a = idxA.get(k)
         b = idxB.get(k)
@@ -928,6 +1002,7 @@ def _diff_mmdevices_lists(before_list, after_list):
             if str(b.get("name", "")).lower().startswith(guid_disable):
                 hits.append(b)
             continue
+
         if b is None:
             removed.append(a)
             if str(a.get("name", "")).lower().startswith(guid_disable):
@@ -971,6 +1046,7 @@ def _diff_mmdevices_lists(before_list, after_list):
         "dword_flips": flips,
         "disable_sysfx_hits": hits,
     }
+
 def _get_enhancements_status_propstore(device_id):
     """
     Read Disable_SysFx directly from the endpoint's IPropertyStore.
@@ -980,16 +1056,19 @@ def _get_enhancements_status_propstore(device_id):
     try:
         if not sys.platform.startswith("win"):
             return None
+
         # Get cached interface definitions
         interfaces = _get_property_store_interfaces()
         PROPVARIANT = interfaces["PROPVARIANT"]
         PROPERTYKEY = interfaces["PROPERTYKEY"]
         PIPS = interfaces["PIPS"]
         HRESULT_T = interfaces["HRESULT_T"]
+
         # Prepare structures and result holder outside the GC-guarded block
         pkey = PROPERTYKEY(GUID("{E4870E26-3CC5-4CD2-BA46-CA0A9A70ED04}"), wintypes.DWORD(2))
         pv = PROPVARIANT()
         result = None
+
         gc_was_enabled = gc.isenabled()
         if gc_was_enabled:
             gc.disable()
@@ -1014,6 +1093,7 @@ def _get_enhancements_status_propstore(device_id):
         finally:
             if gc_was_enabled:
                 gc.enable()
+
         # Clear PROPVARIANT after GC is re-enabled
         try:
             ole32 = ctypes.OleDLL("ole32.dll")
@@ -1024,9 +1104,11 @@ def _get_enhancements_status_propstore(device_id):
                 PropVariantClear(byref(pv))
         except Exception:
             pass
+
         return result
     except Exception:
         return None
+
 def _set_enhancements_propstore(device_id, enable):
     """
     Write Disable_SysFx directly via IPropertyStore::SetValue + Commit.
@@ -1036,16 +1118,19 @@ def _set_enhancements_propstore(device_id, enable):
     try:
         if not sys.platform.startswith("win"):
             return False
+
         # Get cached interface definitions
         interfaces = _get_property_store_interfaces()
         PROPVARIANT = interfaces["PROPVARIANT"]
         PROPERTYKEY = interfaces["PROPERTYKEY"]
         PIPS = interfaces["PIPS"]
         HRESULT_T = interfaces["HRESULT_T"]
+
         pkey = PROPERTYKEY(GUID("{E4870E26-3CC5-4CD2-BA46-CA0A9A70ED04}"), wintypes.DWORD(2))
         desired_disable = 0 if enable else 1
         pv = PROPVARIANT()
         ok = False
+
         gc_was_enabled = gc.isenabled()
         if gc_was_enabled:
             gc.disable()
@@ -1058,6 +1143,7 @@ def _set_enhancements_propstore(device_id, enable):
                 ok = False
             else:
                 ps_iface = ctypes.cast(ctypes.c_void_p(ps_ptr_val), PIPS)
+
                 # Try to read the existing pv to preserve VT where possible
                 try:
                     ps_iface.contents.lpVtbl.contents.GetValue(ps_iface, byref(pkey), byref(pv))
@@ -1075,6 +1161,7 @@ def _set_enhancements_propstore(device_id, enable):
                         pv.ulVal = desired_disable
                     except Exception:
                         pass
+
                 hr = ps_iface.contents.lpVtbl.contents.SetValue(ps_iface, byref(pkey), byref(pv))
                 if hr == 0:
                     hr = ps_iface.contents.lpVtbl.contents.Commit(ps_iface)
@@ -1084,6 +1171,7 @@ def _set_enhancements_propstore(device_id, enable):
         finally:
             if gc_was_enabled:
                 gc.enable()
+
         # Clear PROPVARIANT after GC is re-enabled
         try:
             ole32 = ctypes.OleDLL("ole32.dll")
@@ -1094,9 +1182,11 @@ def _set_enhancements_propstore(device_id, enable):
                 PropVariantClear(byref(pv))
         except Exception:
             pass
+
         return ok
     except Exception:
         return False
+
 def _wait_for_propstore_sysfx(device_id, expected_enabled, timeout=1.5, interval=0.12):
     """
     Poll the endpoint's IPropertyStore for Disable_SysFx until it matches expected_enabled
@@ -1111,17 +1201,20 @@ def _wait_for_propstore_sysfx(device_id, expected_enabled, timeout=1.5, interval
             return True, state
         time.sleep(interval)
     return False, last
+
 def _collect_sysfx_snapshot(device_id):
     """
     Collects a full snapshot for discovering how 'Audio Enhancements' toggles on this device.
     """
     import datetime
+
     snap = {
         "time": datetime.datetime.now().isoformat(timespec="seconds"),
         "com": {},
         "propStore": {},
         "registry": [],
     }
+
     # COM (both stores) - wrap in a GC guard to avoid Release races while using COM
     try:
         import gc
@@ -1163,6 +1256,7 @@ def _collect_sysfx_snapshot(device_id):
         snap["registry"] = [{"error": str(e)}]
         
     return snap
+
 def _generate_enh_discovery_report(target, snapA, snapB, diffs):
     """
     Build a human-readable text report string from snapshots and diff.
@@ -1175,8 +1269,10 @@ def _generate_enh_discovery_report(target, snapA, snapB, diffs):
     lines.append(f"Device:    {target.get('name')} [{target.get('id')}]")
     lines.append(f"Flow:      {target.get('flow')}")
     lines.append("")
+
     def _fmt_bool(x):
         return "True" if x is True else ("False" if x is False else "None")
+
     # COM summary
     lines.append("COM (PolicyConfig) - Disable_SysFx (0=Enh ON, 1=OFF)")
     for label in ("fxStore", "normalStore"):
@@ -1184,17 +1280,20 @@ def _generate_enh_discovery_report(target, snapA, snapB, diffs):
         B = snapB.get("com", {}).get(label, {})
         lines.append(f"  {label:12} A: rawDisable={A.get('rawDisable')} -> enhEnabled={_fmt_bool(A.get('enhEnabled'))} "
                      f"| B: rawDisable={B.get('rawDisable')} -> enhEnabled={_fmt_bool(B.get('enhEnabled'))}")
+
     # PropStore summary
     Aps = snapA.get("propStore", {}).get("enhEnabled")
     Bps = snapB.get("propStore", {}).get("enhEnabled")
     lines.append(f"PropertyStore live: A.enhEnabled={_fmt_bool(Aps)}  |  B.enhEnabled={_fmt_bool(Bps)}")
     lines.append("")
+
     lines.append("Registry (MMDevices) diff summary")
     lines.append(f"  Added:   {len(diffs.get('added', []))}")
     lines.append(f"  Removed: {len(diffs.get('removed', []))}")
     lines.append(f"  Changed: {len(diffs.get('changed', []))}")
     lines.append(f"  DWORD flips (0<->1): {len(diffs.get('dword_flips', []))}")
     lines.append("")
+
     # Highlight Disable_SysFx entries if present
     ds_hits = [e for e in diffs.get("changed", []) if str(e.get('name','')).lower().startswith("{e4870e26-3cc5-4cd2-ba46-ca0a9a70ed04}")]
     if ds_hits:
@@ -1203,6 +1302,7 @@ def _generate_enh_discovery_report(target, snapA, snapB, diffs):
             lines.append(f"  {e.get('hive')}\\{e.get('flow')}\\{e.get('subkey')}\\{e.get('name')} "
                          f"{e.get('dataPreview')} -> {e.get('dataPreviewAfter')} (type {e.get('type')} -> {e.get('typeAfter')})")
         lines.append("")
+
     # Show boolean-like flips (strong candidates)
     flips = diffs.get("dword_flips", [])
     if flips:
@@ -1213,6 +1313,7 @@ def _generate_enh_discovery_report(target, snapA, snapB, diffs):
     else:
         lines.append("No DWORD 0/1 flips detected. Vendor may use non-DWORD or a different location.")
         lines.append("")
+
     # Next steps suggestion
     lines.append("Notes:")
     lines.append("- If COM/PropertyStore show A!=B, Windows honored Disable_SysFx and the existing setter is correct.")
@@ -1220,6 +1321,7 @@ def _generate_enh_discovery_report(target, snapA, snapB, diffs):
     lines.append("- If only REG_BINARY blobs changed, we may need to write that vendor-specific property.")
     lines.append("")
     return "\n".join(lines)
+
 def _get_policy_config():
     """
     Obtain a PolicyConfig COM interface that supports SetDefaultEndpoint.
@@ -1242,6 +1344,7 @@ def _get_policy_config():
             return CoCreateInstance(CLSID_PolicyConfigClient, interface=IPolicyConfigVista, clsctx=CLSCTX_ALL)
     except Exception as e:
         raise AttributeError("Audio policy config interface not available in this environment") from e
+
 def set_default_endpoint(device_id, role):
     """
     role in ROLES keys or 'all'. Requires the device to be active.
@@ -1258,6 +1361,7 @@ def set_default_endpoint(device_id, role):
             return True, None
         except Exception as e:
             return False, e
+
     if role == "all":
         results = {}
         ok_all = True
@@ -1275,6 +1379,7 @@ def set_default_endpoint(device_id, role):
     else:
         policy.SetDefaultEndpoint(device_id, ROLES[role])
     _dbg("SetDefaultEndpoint done")
+
 def _is_device_active(device_id):
     for flow in (E_RENDER, E_CAPTURE):
         try:
@@ -1285,10 +1390,12 @@ def _is_device_active(device_id):
         except Exception:
             pass
     return False
+
 def enum_endpoints(flow, state_mask):
     enumerator = CoCreateInstance(CLSID_MMDeviceEnumerator, IMMDeviceEnumerator, CLSCTX_ALL)
     collection = enumerator.EnumAudioEndpoints(flow, state_mask)
     return enumerator, collection
+
 def get_default_ids(enumerator):
     defaults = {"Render": {}, "Capture": {}}
     for flow_name, flow in [("Render", E_RENDER), ("Capture", E_CAPTURE)]:
@@ -1303,6 +1410,7 @@ def get_default_ids(enumerator):
             except Exception:
                 defaults[flow_name][role_name] = None
     return defaults
+
 def _friendly_names_by_id():
     """
     Build {device_id: FriendlyName} using pycaw objects.
@@ -1324,6 +1432,7 @@ def _friendly_names_by_id():
     except Exception:
         pass
     return names
+
 def _safe_friendly_name_from_device(dev):
     """
     Read PKEY_Device_FriendlyName from an IMMDevice via IPropertyStore using cached interfaces.
@@ -1448,6 +1557,7 @@ def _safe_friendly_name_from_device(dev):
         return dev.GetId()
     except Exception:
         return None
+
 def list_devices(include_all=False):
     """
     Returns list of devices with fields: id, name, flow, state, isDefault flags.
@@ -1500,6 +1610,7 @@ def list_devices(include_all=False):
                 })
         _dbg(f"list_devices: total={len(out)}")
         return out
+
 def find_devices_by_selector(devices, dev_id=None, name_substr=None, flow=None, regex=False):
     """
     Returns list of devices matching selector.
@@ -1519,6 +1630,7 @@ def find_devices_by_selector(devices, dev_id=None, name_substr=None, flow=None, 
         return False
         
     return [d for d in devices if match(d)]
+
 def _sort_and_tag_gui_indices(devices):
     """
     Sort devices by name within each flow exactly like the GUI, and tag each
@@ -1536,6 +1648,7 @@ def _sort_and_tag_gui_indices(devices):
             d["guiIndex"] = i
             
     return buckets
+
 def _pretty_matches_msg(label, matches):
     """
     Print a small list of candidates in GUI order to help the user pick
@@ -1547,6 +1660,7 @@ def _pretty_matches_msg(label, matches):
             flags = [k for k, v in d["isDefault"].items() if v]
             lines.append(f"  [{flow} idx {d.get('guiIndex','?')}] {d['name']}  id={d['id']}  defaults={','.join(flags) if flags else '-'}")
     return f"Multiple {label} matches:\n" + "\n".join(lines)
+
 def _select_by_name_active_only(flow_name, name_text, index, regex):
     """
     Interpret --index using the same GUI order (sorted by name within flow).
@@ -1580,6 +1694,7 @@ def _select_by_name_active_only(flow_name, name_text, index, regex):
         return None, f"ERROR: --index {index} does not match any active {label} device in GUI order."
         
     return ordered[0], None
+
 def set_endpoint_mute(device_id, mute_state):
     for flow in (E_RENDER, E_CAPTURE):
         _, coll = enum_endpoints(flow, DEVICE_STATE_ACTIVE)
@@ -1594,6 +1709,7 @@ def set_endpoint_mute(device_id, mute_state):
                 except Exception:
                     return False
     return False
+
 def get_endpoint_mute(device_id):
     for flow in (E_RENDER, E_CAPTURE):
         _, coll = enum_endpoints(flow, DEVICE_STATE_ACTIVE)
@@ -1616,6 +1732,7 @@ def get_endpoint_mute(device_id):
                     except Exception:
                         return None
     return None
+
 def get_endpoint_volume(device_id):
     for flow in (E_RENDER, E_CAPTURE):
         _, coll = enum_endpoints(flow, DEVICE_STATE_ACTIVE)
@@ -1637,6 +1754,7 @@ def get_endpoint_volume(device_id):
                     except Exception:
                         return None
     return None
+
 def set_endpoint_volume(device_id, level_percent):
     level = max(0.0, min(1.0, float(level_percent) / 100.0))
     for flow in (E_RENDER, E_CAPTURE):
@@ -1652,6 +1770,7 @@ def set_endpoint_volume(device_id, level_percent):
                 except Exception:
                     return False
     return False
+
 def _verify_effect_only(device_id, flow, expected_enabled, timeout=2.5, interval=0.2, consecutive=2):
     """
     Windows-only verification for fallback paths: require PropertyStore Disable_SysFx match expected.
