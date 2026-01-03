@@ -256,6 +256,7 @@ def cmd_enhancements(args):
     if args.list_fx:
         fx_list = _list_fx_for_device(target["id"], target["flow"],
                                       ini_path=getattr(args, "vendor_ini", None))
+        fx_list = sorted(fx_list, key=lambda x: (x.get("fx_name") or "").lower())
         # If --json, return existing JSON format
         if getattr(args, "json", False):
             result = {
@@ -851,3 +852,4 @@ def main(argv=None):
         except Exception:
             pass
     return rc
+
