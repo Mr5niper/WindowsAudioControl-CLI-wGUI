@@ -1274,6 +1274,7 @@ def _collect_sysfx_snapshot(device_id):
                 except Exception as e:
                     rec["error"] = str(e)
                 snap["com"][label] = rec
+            del pc
         finally:
             if gc_was_enabled:
                 gc.enable()
@@ -1831,4 +1832,5 @@ def _verify_effect_only(device_id, flow, expected_enabled, timeout=2.5, interval
             ok_streak = 0
         _time.sleep(interval)
     return False, None, last_state
+
 
