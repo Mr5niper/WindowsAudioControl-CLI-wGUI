@@ -970,23 +970,24 @@ def _read_decider_state(entry, device_id, flow):
     """
     Read current FX state based on the configured decider write item.
     Returns True (enabled) / False (disabled) / None (unknown).
-    Robustness improvements:
-    - Try the recorded decider first (recorded hive, then alternate hive).
-    - If that yields unknown, scan all recorded writes (with priority for stable signals)
-      and return the first write whose current value matches either enable/disable.
-    - This addresses cases where the originally chosen decider is a UI-volatile property
-      that changes just because the Windows settings page was open.
-    No writes are changed here; this is read-only logic.
+    Uses:
+      - quorum_threshold across all writes (default 0.60)
+      - recorded decider_index
+      - fallback 'best' write heuristic
+    This version includes debug prints so we can see why state is Unknown.
     """
+    # Multi-write only
     if not entry.get("multi_write"):
+        print("DEBUG: _read_decider_state called on non-multi_write entry")
         return None
     writes = entry.get("writes") or []
     if not writes:
+        print("DEBUG: _read_decider_state: no writes for entry", entry.get("fx_name"))
         return None
-    # Quorum config
+    fx_name = entry.get("fx_name", "<unknown FX>")
     quorum_threshold = float(entry.get("quorum_threshold", 0.60))
     quorum_threshold = max(0.50, min(0.95, quorum_threshold))
-    # Helpers
+    print(f"DEBUG: _read_decider_state for FX '{fx_name}', quorum={quorum_threshold}, writes={len(writes)}")
     def _eq_expected(cur_val, cur_typ, exp_text, exp_typ):
         if cur_typ != exp_typ:
             return False
@@ -1006,30 +1007,37 @@ def _read_decider_state(entry, device_id, flow):
         name = (w.get("name") or "").strip().lower()
         base = _endpoint_base_path(device_id, flow, subk)
         if not base:
+            print(f"DEBUG: _try_read_one: no base path for subkey={subk}")
             return None
         try:
             with winreg.OpenKey(hive, base, 0, winreg.KEY_READ) as key:
                 val, typ = winreg.QueryValueEx(key, name)
-        except OSError:
+        except OSError as e:
+            print(f"DEBUG: _try_read_one: OpenKey/QueryValueEx failed hive={hive_name} base={base} name={name} err={e}")
             return None
-        # Compare with both 'enable' and 'disable' shapes
+        print(f"DEBUG: _try_read_one hive={hive_name} base={base} name={name} type={typ} len={len(val) if isinstance(val, (bytes, bytearray)) else 'n/a'}")
         try:
             t_en = _reg_name_to_type(w.get("type_enable"))
             t_di = _reg_name_to_type(w.get("type_disable"))
-        except Exception:
+        except Exception as e:
+            print(f"DEBUG: _try_read_one: reg_type_to_name error: {e}")
             return None
         if _eq_expected(val, typ, w.get("enable"), t_en):
+            print("DEBUG: _try_read_one -> matches ENABLE")
             return True
         if _eq_expected(val, typ, w.get("disable"), t_di):
+            print("DEBUG: _try_read_one -> matches DISABLE")
             return False
+        print("DEBUG: _try_read_one -> no match enable/disable")
         return None
-    # 1) Quorum voting across all writes
+    # 1) Quorum voting across all writes (recorded hive, then alternate)
     votes_true = 0
     votes_false = 0
     votes_total = 0
-    for w in writes:
+    for idx, w in enumerate(writes, 1):
         rec_hive = (w.get("hive") or "").upper()
         alt_hive = "HKCU" if rec_hive == "HKLM" else "HKLM"
+        print(f"DEBUG: quorum pass write#{idx}, rec_hive={rec_hive}, alt_hive={alt_hive}")
         s = _try_read_one(w, rec_hive)
         if s is None:
             s = _try_read_one(w, alt_hive)
@@ -1039,25 +1047,26 @@ def _read_decider_state(entry, device_id, flow):
         elif s is False:
             votes_false += 1
             votes_total += 1
+    print(f"DEBUG: quorum votes: total={votes_total} true={votes_true} false={votes_false}")
     if votes_total > 0:
         frac_true = votes_true / float(votes_total)
         frac_false = votes_false / float(votes_total)
+        print(f"DEBUG: quorum fractions: frac_true={frac_true:.2f} frac_false={frac_false:.2f}")
         if frac_true >= quorum_threshold and frac_false < quorum_threshold:
+            print("DEBUG: quorum -> ENABLED")
             return True
         if frac_false >= quorum_threshold and frac_true < quorum_threshold:
+            print("DEBUG: quorum -> DISABLED")
             return False
-    # 2) Fallback: decider_index (recorded hive, then alternate hive)
+    # 2) Decider index fallback
     def _score_write_for_decider(w):
         score = 0
-        # Prefer FxProperties over Properties
         if str((w.get("subkey") or "").strip()).startswith("FxProperties"):
             score += 10
-        # Prefer DWORD
         t_en = (w.get("type_enable") or "").upper()
         t_di = (w.get("type_disable") or "").upper()
         if t_en == "REG_DWORD" and t_di == "REG_DWORD":
             score += 5
-            # Extra point if looks like boolean 0/1
             try:
                 en_v = int(w.get("enable"))
                 di_v = int(w.get("disable"))
@@ -1066,30 +1075,35 @@ def _read_decider_state(entry, device_id, flow):
             except Exception:
                 pass
         return score
-    # Deterministic fallback candidate if decider_index invalid
     idx = max(1, int(entry.get("decider_index", 1)))
     if idx > len(writes):
         idx = 1
     decider = writes[idx - 1]
     rec_hive = (decider.get("hive") or "").upper()
     alt_hive = "HKCU" if rec_hive == "HKLM" else "HKLM"
+    print(f"DEBUG: decider fallback idx={idx}, rec_hive={rec_hive}, alt_hive={alt_hive}")
     state = _try_read_one(decider, rec_hive)
     if state is not None:
+        print(f"DEBUG: decider(rec) -> {state}")
         return state
     state = _try_read_one(decider, alt_hive)
     if state is not None:
+        print(f"DEBUG: decider(alt) -> {state}")
         return state
-    # Final fallback: scan for the best decider by scoring
+    # 3) Best-scoring write fallback
+    print("DEBUG: best-write fallback scan")
     for w in sorted(writes, key=_score_write_for_decider, reverse=True):
         rec_hive = (w.get("hive") or "").upper()
         alt_hive = "HKCU" if rec_hive == "HKLM" else "HKLM"
         state = _try_read_one(w, rec_hive)
         if state is not None:
+            print(f"DEBUG: best-write(rec) -> {state}")
             return state
         state = _try_read_one(w, alt_hive)
         if state is not None:
+            print(f"DEBUG: best-write(alt) -> {state}")
             return state
-    # Nothing matched; unknown
+    print("DEBUG: _read_decider_state -> UNKNOWN")
     return None
 def _dump_mmdevices_all_values_for_fx_learn(device_id):
     # Deprecated in favor of _dump_mmdevices_all_values from devices.py
