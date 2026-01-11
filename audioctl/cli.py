@@ -388,36 +388,131 @@ def cmd_enhancements(args):
         if not fx_name:
             print("ERROR: FX name cannot be empty", file=sys.stderr)
             return 1
-        # CLI prompts and snapshot capture; then pure logic
-        print(f"Learning FX '{fx_name}' for: {target['name']} ({target['flow']})")
-        print(f"Set the '{fx_name}' effect to ENABLED for this device.")
-        input("When ready, press Enter to capture snapshot A... ")
-        captured_stderr = io.StringIO()
-        with redirect_stderr(captured_stderr):
-            snapA = _collect_sysfx_snapshot(target["id"])
-        _reemit_non_error_stderr(captured_stderr.getvalue())
-        print(f"Now set the '{fx_name}' effect to DISABLED for the same device.")
-        input("When ready, press Enter to capture snapshot B... ")
-        captured_stderr = io.StringIO()
-        with redirect_stderr(captured_stderr):
-            snapB = _collect_sysfx_snapshot(target["id"])
-        _reemit_non_error_stderr(captured_stderr.getvalue())
-        ok, info = _learn_fx_and_write_ini(
-            target, fx_name, snapA, snapB,
-            ini_path=getattr(args, "vendor_ini", None) or _vendor_ini_default_path(),
-            prefer_hkcu=not args.prefer_hklm
-        )
-        if ok:
-            print(json.dumps({"fxLearned": {
-                "id": target["id"],
-                "name": target["name"],
-                "flow": target["flow"],
-                "fx_name": fx_name,
-                **info
-            }}))
-            return 0
-        else:
-            print(f"ERROR: FX learn failed: {info}", file=sys.stderr)
+        mode = getattr(args, "mode", "interactive")
+        stage = getattr(args, "stage", None)
+        def _fx_learn_engine(ui_print, ui_wait):
+            """
+            Core engine: use ui_print/ui_wait for prompts,
+            call _collect_sysfx_snapshot and _learn_fx_and_write_ini once.
+            """
+            ui_print(f"Learning FX '{fx_name}' for: {target['name']} ({target['flow']})")
+            ui_print(f"Set the '{fx_name}' effect to ENABLED for this device.")
+            ui_wait("A")  # abstract wait; may be input() or a protocol step
+            captured_stderr = io.StringIO()
+            with redirect_stderr(captured_stderr):
+                snapA = _collect_sysfx_snapshot(target["id"])
+            _reemit_non_error_stderr(captured_stderr.getvalue())
+            ui_print(f"Now set the '{fx_name}' effect to DISABLED for the same device.")
+            ui_wait("B")
+            captured_stderr = io.StringIO()
+            with redirect_stderr(captured_stderr):
+                snapB = _collect_sysfx_snapshot(target["id"])
+            _reemit_non_error_stderr(captured_stderr.getvalue())
+            ok, info = _learn_fx_and_write_ini(
+                target, fx_name, snapA, snapB,
+                ini_path=getattr(args, "vendor_ini", None) or _vendor_ini_default_path(),
+                prefer_hkcu=not args.prefer_hklm
+            )
+            return ok, info
+        if mode == "interactive":
+            # CLI-first behavior (unchanged semantics)
+            def ui_print(msg):
+                print(msg)
+            def ui_wait(label):
+                input("When ready, press Enter to capture snapshot " + label + "... ")
+            ok, info = _fx_learn_engine(ui_print, ui_wait)
+            if ok:
+                print(json.dumps({"fxLearned": {
+                    "id": target["id"],
+                    "name": target["name"],
+                    "flow": target["flow"],
+                    "fx_name": fx_name,
+                    **info
+                }}))
+                return 0
+            else:
+                print(f"ERROR: FX learn failed: {info}", file=sys.stderr)
+                return 1
+        # Protocol mode: used by GUI/frontends that don't own a console
+        if mode == "protocol":
+            # We interpret --stage as a single step, and emit JSON messages
+            # so the frontend can orchestrate the flow.
+            if stage is None:
+                print("ERROR: --stage is required for --learn-fx --mode protocol", file=sys.stderr)
+                return 1
+            # Stage promptA/promptB: just print instructions
+            if stage == "promptA":
+                print(json.dumps({
+                    "stage": "promptA",
+                    "message": f"Set the '{fx_name}' effect to ENABLED for this device, then call stage=doA.",
+                    "nextStage": "doA",
+                }))
+                return 0
+            if stage == "promptB":
+                print(json.dumps({
+                    "stage": "promptB",
+                    "message": f"Set the '{fx_name}' effect to DISABLED for this device, then call stage=doB.",
+                    "nextStage": "doB",
+                }))
+                return 0
+            # For doA/doB, we need to coordinate snapshots without blocking on input()
+            # We'll keep the same engine but split ui_wait behavior by stage.
+            # We store snapA in a temp file keyed by device+flow+fx_name.
+            import tempfile, hashlib
+            def _session_key():
+                base = f"{target['id']}|{target['flow']}|{fx_name}"
+                return hashlib.sha1(base.encode("utf-8", errors="replace")).hexdigest()
+            def _snap_path(label):
+                tmp = tempfile.gettempdir()
+                return os.path.join(tmp, f"audioctl_fxlearn_{_session_key()}_{label}.json")
+            if stage == "doA":
+                # Capture A only
+                captured_stderr = io.StringIO()
+                with redirect_stderr(captured_stderr):
+                    snapA = _collect_sysfx_snapshot(target["id"])
+                _reemit_non_error_stderr(captured_stderr.getvalue())
+                try:
+                    with open(_snap_path("A"), "w", encoding="utf-8", errors="replace") as f:
+                        json.dump(snapA, f)
+                except Exception as e:
+                    print(f"ERROR: failed to store snapshot A: {e}", file=sys.stderr)
+                    return 1
+                print(json.dumps({"stage": "doA", "status": "ok"}))
+                return 0
+            if stage == "doB":
+                # Load A, capture B, run learn
+                try:
+                    with open(_snap_path("A"), "r", encoding="utf-8") as f:
+                        snapA = json.load(f)
+                except Exception as e:
+                    print(f"ERROR: failed to read snapshot A: {e}", file=sys.stderr)
+                    return 1
+                captured_stderr = io.StringIO()
+                with redirect_stderr(captured_stderr):
+                    snapB = _collect_sysfx_snapshot(target["id"])
+                _reemit_non_error_stderr(captured_stderr.getvalue())
+                ok, info = _learn_fx_and_write_ini(
+                    target, fx_name, snapA, snapB,
+                    ini_path=getattr(args, "vendor_ini", None) or _vendor_ini_default_path(),
+                    prefer_hkcu=not args.prefer_hklm
+                )
+                if ok:
+                    print(json.dumps({
+                        "stage": "doB",
+                        "status": "ok",
+                        "fxLearned": {
+                            "id": target["id"],
+                            "name": target["name"],
+                            "flow": target["flow"],
+                            "fx_name": fx_name,
+                            **info
+                        }
+                    }))
+                    return 0
+                else:
+                    print(f"ERROR: FX learn failed: {info}", file=sys.stderr)
+                    return 1
+            print("ERROR: unknown --stage for protocol mode", file=sys.stderr)
             return 1
     if args.enable_fx or args.disable_fx:
         # Flexible FX name matching with substring/regex; interactive disambiguation on multiple
@@ -910,6 +1005,10 @@ def build_parser():
                       help="List all learned effects for this device")
     p_fx.add_argument("--json", action="store_true",
                       help="For --list-fx: output JSON instead of human-readable text")
+    p_fx.add_argument("--mode", choices=["interactive", "protocol"], default="interactive",
+                      help="Mode for --learn-fx: 'interactive' (default, CLI), or 'protocol' for frontends.")
+    p_fx.add_argument("--stage", choices=["promptA", "doA", "promptB", "doB"],
+                      help="For --learn-fx --mode protocol: which stage to run.")
     p_fx.set_defaults(func=cmd_enhancements)
     p_ge = sub.add_parser(
         "get-enhancements",
