@@ -385,63 +385,50 @@ class AudioGUI:
                 if etype in ("command", "cascade", "checkbutton", "radiobutton"):
                     self.menu.entryconfig(i, state="normal")
     
-            # Mute label: query current state via CLI get-volume
-            mute_label = "Mute/Unmute"
+            # Fetch full device state in one CLI call
+            state = None
             try:
-                data_mv = run_audioctl(
-                    ["get-volume", "--id", d["id"], "--flow", d["flow"]],
+                state = run_audioctl(
+                    ["get-device-state", "--id", d["id"], "--flow", d["flow"]],
                     capture_json=True,
                     expect_ok=False,
                 )
-                if isinstance(data_mv, dict):
-                    muted = data_mv.get("muted", None)
-                    if muted is True:
-                        mute_label = "Unmute"
-                    elif muted is False:
-                        mute_label = "Mute"
             except Exception:
-                pass
+                state = None
+    
+            # Mute label: use combined state (muted)
+            mute_label = "Mute/Unmute"
+            if isinstance(state, dict):
+                muted = state.get("muted", None)
+                if muted is True:
+                    mute_label = "Unmute"
+                elif muted is False:
+                    mute_label = "Mute"
             self.menu.entryconfig(self.mute_menu_index, label=mute_label, state="normal")
     
-            # Listen label (Capture only) – query state via CLI get-listen
+            # Listen label (Capture only): use combined state (listenEnabled)
             if d["flow"] == "Capture":
                 listen_label = self.listen_menu_default_label
-                try:
-                    data_ls = run_audioctl(
-                        ["get-listen", "--id", d["id"]],
-                        capture_json=True,
-                        expect_ok=False,
-                    )
-                    if isinstance(data_ls, dict):
-                        ls = data_ls.get("listenEnabled", None)
-                        if ls is True:
-                            listen_label = "Disable Listen"
-                        elif ls is False:
-                            listen_label = "Enable Listen"
-                except Exception:
-                    pass
+                if isinstance(state, dict):
+                    ls = state.get("listenEnabled", None)
+                    if ls is True:
+                        listen_label = "Disable Listen"
+                    elif ls is False:
+                        listen_label = "Enable Listen"
                 self.menu.entryconfig(self.listen_menu_index, label=listen_label, state="normal")
             else:
                 self.menu.entryconfig(self.listen_menu_index, label=self.listen_menu_default_label, state="disabled")
     
-            # Main enhancements toggle – query vendor status via CLI get-enhancements
+            # Main enhancements toggle – use combined state (enhancementsEnabled)
             self._pending_enh = None
             enh_label = self.enh_menu_default_label
             current_enh_state = None
-            try:
-                data_enh = run_audioctl(
-                    ["get-enhancements", "--id", d["id"], "--flow", d["flow"]],
-                    capture_json=True,
-                    expect_ok=False,
-                )
-                if isinstance(data_enh, dict):
-                    current_enh_state = data_enh.get("enhancementsEnabled", None)
-                    if current_enh_state is True:
-                        enh_label = "Disable Enhancements"
-                    elif current_enh_state is False:
-                        enh_label = "Enable Enhancements"
-            except Exception:
-                current_enh_state = None
+            if isinstance(state, dict):
+                current_enh_state = state.get("enhancementsEnabled", None)
+                if current_enh_state is True:
+                    enh_label = "Disable Enhancements"
+                elif current_enh_state is False:
+                    enh_label = "Enable Enhancements"
             # Remember state for click-time toggling
             self._pending_enh = {
                 "id": d["id"],
@@ -450,48 +437,33 @@ class AudioGUI:
             }
             self.menu.entryconfig(self.enh_menu_index, label=enh_label, state="normal")
     
-            # Enhancement Effects submenu via CLI
+            # Enhancement Effects submenu via combined state
             try:
                 self.fx_menu.delete(0, "end")
             except Exception:
                 pass
-            try:
-                args = [
-                    "enhancements",
-                    "--id", d["id"],
-                    "--flow", d["flow"],
-                    "--list-fx",
-                    "--json",
-                ]
-                data = run_audioctl(args, capture_json=True, expect_ok=False)
-                fx_list = data.get("availableFX", [])
+            fx_list = []
+            if isinstance(state, dict):
+                fx_list = state.get("availableFX", []) or []
+            if fx_list:
                 fx_list = sorted(fx_list, key=lambda x: (x.get("fx_name") or "").lower())
-                if fx_list:
-                    for fx in fx_list:
-                        fx_name = fx.get("fx_name")
-                        state = fx.get("state")
-                        if state is True:
-                            label = f"Disable {fx_name}"
-                        elif state is False:
-                            label = f"Enable {fx_name}"
-                        else:
-                            label = f"Toggle {fx_name}"
-                        def make_fx_command(name, current_state):
-                            def cmd():
-                                self.on_toggle_fx_live(name, current_state)
-                            return cmd
-                        self.fx_menu.add_command(label=label, command=make_fx_command(fx_name, state))
-                    self.menu.entryconfig(self.fx_cascade_index, state="normal")
-                else:
-                    self.fx_menu.add_command(label="No effects available", state="disabled")
-                    self.menu.entryconfig(self.fx_cascade_index, state="disabled")
-            except Exception as e:
-                try:
-                    from .logging_setup import _log
-                    _log(f"Failed to build FX submenu for {d['name']}: {e}")
-                except Exception:
-                    pass
-                self.fx_menu.add_command(label="Failed to load effects", state="disabled")
+                for fx in fx_list:
+                    fx_name = fx.get("fx_name")
+                    state_fx = fx.get("state")
+                    if state_fx is True:
+                        label = f"Disable {fx_name}"
+                    elif state_fx is False:
+                        label = f"Enable {fx_name}"
+                    else:
+                        label = f"Toggle {fx_name}"
+                    def make_fx_command(name, current_state):
+                        def cmd():
+                            self.on_toggle_fx_live(name, current_state)
+                        return cmd
+                    self.fx_menu.add_command(label=label, command=make_fx_command(fx_name, state_fx))
+                self.menu.entryconfig(self.fx_cascade_index, state="normal")
+            else:
+                self.fx_menu.add_command(label="No effects available", state="disabled")
                 self.menu.entryconfig(self.fx_cascade_index, state="disabled")
     
             self.menu.tk_popup(event.x_root, event.y_root)
