@@ -6,34 +6,67 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 from contextlib import redirect_stderr
 import re
+import subprocess
+import json
+import shlex
+import os
 from .logging_setup import resource_path, _log, _log_exc, _log_path
 from .compat import is_admin
-import comtypes
-from .devices import (
-    list_devices, _sort_and_tag_gui_indices,
-    get_endpoint_mute, set_endpoint_mute,
-    get_endpoint_volume, set_endpoint_volume,
-    set_default_endpoint,
-    _get_listen_to_device_status_ps, _read_listen_enable_from_registry,
-    _verify_listen_via_registry, set_listen_to_device_ps,
-    _collect_sysfx_snapshot, _diff_mmdevices_lists,
-    _reemit_non_error_stderr,
-)
+# GUI uses only CLI commands; it does not import low-level device helpers directly.
 from .vendor_db import (
     _vendor_ini_default_path,
-    _find_first_vendor_entry,
-    _get_enhancements_status_any,
-    _append_vendor_ini_entry_if_missing,
-    _append_fx_ini_entry,             # ADDED
-    _sanitize_ini_section_name,
-    _build_vendor_ini_snippet,
-    _apply_enhancements,
-    _enhancements_supported
 )
+def run_audioctl(args_list, capture_json=False, expect_ok=True):
+    """
+    Run 'audioctl' CLI as a subprocess.
+    args_list: list of strings, e.g. ["list", "--json"]
+    capture_json: if True, parse stdout as JSON and return the object
+    expect_ok: if True, raise RuntimeError on non-zero exit codes
+    Returns:
+      - If capture_json=False: (rc, stdout_text, stderr_text)
+      - If capture_json=True: parsed JSON object
+    """
+    if getattr(sys, "frozen", False):
+        exe = sys.executable
+        cmd = [exe] + args_list
+    else:
+        exe = sys.executable
+        cmd = [exe, "-m", "audioctl"] + args_list
+    try:
+        from .logging_setup import _dbg
+        _dbg(f"GUI run_audioctl: {shlex.join(cmd)}")
+    except Exception:
+        pass
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace"
+    )
+    out, err = proc.communicate()
+    rc = proc.returncode
+    if capture_json:
+        try:
+            data = json.loads(out or "{}")
+        except Exception as e:
+            if expect_ok:
+                raise RuntimeError(
+                    f"Failed to parse JSON from audioctl: {e}\nstdout={out!r}\nstderr={err!r}"
+                )
+            else:
+                return None
+        if expect_ok and rc != 0:
+            raise RuntimeError(f"audioctl failed with rc={rc}: {err or out}")
+        return data
+    if expect_ok and rc != 0:
+        raise RuntimeError(f"audioctl failed with rc={rc}: {err or out}")
+    return rc, out, err
 class AudioGUI:
     def __init__(self, root):
         self.root = root
-        self.root.title("Audio Control v1.4.4.2 01-01-2026")
+        self.root.title("Audio Control v1.4.5.0 01-11-2026")
         # Style and theme
         style = ttk.Style(self.root)
         try:
@@ -138,7 +171,7 @@ class AudioGUI:
         self.menu.add_command(label="Set as Default (all roles)", command=self.on_set_default)
         self.menu.add_separator()
         self.menu.add_command(label="Set Volume...", command=self.on_set_volume)
-        self.menu.add_command(label="Mute", command=self.on_toggle_mute)
+        self.menu.add_command(label="Mute/Unmute", command=self.on_toggle_mute)
         self.mute_menu_index = self.menu.index("end")
         self.menu.add_separator()
         self.listen_menu_default_label = "Toggle Listen (capture only)"
@@ -147,14 +180,14 @@ class AudioGUI:
         self.enh_menu_default_label = "Enable Enhancements"
         self.menu.add_command(label=self.enh_menu_default_label, command=self.on_toggle_enhancements)
         self.enh_menu_index = self.menu.index("end")
-        # NEW: Enhancement Effects cascade submenu (populated dynamically)
+        # Enhancement Effects cascade submenu (populated via CLI)
         self.fx_menu = tk.Menu(self.menu, tearoff=0)
         self.menu.add_cascade(label="Enhancement Effects", menu=self.fx_menu)
         self.fx_cascade_index = self.menu.index("end")
         # Learn Enhancements remains after the cascade
         self.menu.add_command(label="Learn Enhancements", command=self.on_learn_enhancements)
         self.learn_menu_index = self.menu.index("end")
-        # NEW: Track dynamically added FX menu items
+        # Track dynamically added FX menu items
         self._dynamic_fx_menu_items = []
         self._pending_enh = None
         # Bindings
@@ -200,15 +233,34 @@ class AudioGUI:
         try:
             from .logging_setup import _dbg
             _dbg("GUI: refresh_devices begin")
-            self.devices = list_devices(include_all=self.include_all.get())
+            # Build CLI args: audioctl list [--all] --json
+            args = ["list", "--json"]
+            if self.include_all.get():
+                args.insert(1, "--all")
+            data = run_audioctl(args, capture_json=True, expect_ok=True)
+            self.devices = data.get("devices", [])
             _dbg("GUI: refresh_devices end")
+            # Clear tree
             self.item_to_device.clear()
             for item in self.tree.get_children():
                 self.tree.delete(item)
-            render_devs = sorted([d for d in self.devices if d["flow"] == "Render"], key=lambda x: x["name"].lower())
-            capture_devs = sorted([d for d in self.devices if d["flow"] == "Capture"], key=lambda x: x["name"].lower())
-            grp_render = self.tree.insert("", "end", text="Playback (Render)", values=("", "", "", "", ""), open=True, tags=("group",))
-            grp_capture = self.tree.insert("", "end", text="Recording (Capture)", values=("", "", "", "", ""), open=True, tags=("group",))
+            # Split by flow for display
+            render_devs = sorted(
+                [d for d in self.devices if d["flow"] == "Render"],
+                key=lambda x: x["name"].lower()
+            )
+            capture_devs = sorted(
+                [d for d in self.devices if d["flow"] == "Capture"],
+                key=lambda x: x["name"].lower()
+            )
+            grp_render = self.tree.insert(
+                "", "end", text="Playback (Render)",
+                values=("", "", "", "", ""), open=True, tags=("group",)
+            )
+            grp_capture = self.tree.insert(
+                "", "end", text="Recording (Capture)",
+                values=("", "", "", "", ""), open=True, tags=("group",)
+            )
             def insert_group(parent, devs, flow_name):
                 for idx, d in enumerate(devs):
                     flags = [k for k, v in d["isDefault"].items() if v]
@@ -216,7 +268,10 @@ class AudioGUI:
                     d_copy = dict(d)
                     d_copy["_index"] = idx
                     d_copy["_group"] = flow_name
-                    iid = self.tree.insert(parent, "end", text="", values=(idx, d["name"], d["flow"], defaults_txt, d["id"]))
+                    iid = self.tree.insert(
+                        parent, "end", text="",
+                        values=(idx, d["name"], d["flow"], defaults_txt, d["id"])
+                    )
                     self.item_to_device[iid] = d_copy
             insert_group(grp_render, render_devs, "Render")
             insert_group(grp_capture, capture_devs, "Capture")
@@ -300,7 +355,6 @@ class AudioGUI:
         if not sel:
             return None
         return self.item_to_device.get(sel[0])
-
     def show_menu_for_item(self, event, iid=None):
         try:
             if iid is None:
@@ -331,84 +385,102 @@ class AudioGUI:
                 if etype in ("command", "cascade", "checkbutton", "radiobutton"):
                     self.menu.entryconfig(i, state="normal")
     
-            # Mute label (no GUI-level GC guard)
+            # Mute label: query current state via CLI get-volume
+            mute_label = "Mute/Unmute"
             try:
-                muted = get_endpoint_mute(d["id"])
+                data_mv = run_audioctl(
+                    ["get-volume", "--id", d["id"], "--flow", d["flow"]],
+                    capture_json=True,
+                    expect_ok=False,
+                )
+                if isinstance(data_mv, dict):
+                    muted = data_mv.get("muted", None)
+                    if muted is True:
+                        mute_label = "Unmute"
+                    elif muted is False:
+                        mute_label = "Mute"
             except Exception:
-                muted = None
-            mute_label = "Unmute" if muted is True else ("Mute" if muted is False else "Unmute")
+                pass
             self.menu.entryconfig(self.mute_menu_index, label=mute_label, state="normal")
     
-            # Listen label (Capture only) (raw function guards itself if needed)
+            # Listen label (Capture only) – query state via CLI get-listen
             if d["flow"] == "Capture":
+                listen_label = self.listen_menu_default_label
                 try:
-                    current = _get_listen_to_device_status_ps(d["id"])
+                    data_ls = run_audioctl(
+                        ["get-listen", "--id", d["id"]],
+                        capture_json=True,
+                        expect_ok=False,
+                    )
+                    if isinstance(data_ls, dict):
+                        ls = data_ls.get("listenEnabled", None)
+                        if ls is True:
+                            listen_label = "Disable Listen"
+                        elif ls is False:
+                            listen_label = "Enable Listen"
                 except Exception:
-                    current = None
-                if current is None:
-                    current = _read_listen_enable_from_registry(d["id"])
-                if current is True:
-                    label = "Disable Listen"
-                elif current is False:
-                    label = "Enable Listen"
-                else:
-                    label = self.listen_menu_default_label
-                self.menu.entryconfig(self.listen_menu_index, label=label, state="normal")
+                    pass
+                self.menu.entryconfig(self.listen_menu_index, label=listen_label, state="normal")
             else:
                 self.menu.entryconfig(self.listen_menu_index, label=self.listen_menu_default_label, state="disabled")
     
-            # Main enhancements toggle
-            vend_available = False
+            # Main enhancements toggle – query vendor status via CLI get-enhancements
+            self._pending_enh = None
+            enh_label = self.enh_menu_default_label
+            current_enh_state = None
             try:
-                vend_available = bool(_find_first_vendor_entry(d["id"], d["flow"], ini_path=_vendor_ini_default_path()))
+                data_enh = run_audioctl(
+                    ["get-enhancements", "--id", d["id"], "--flow", d["flow"]],
+                    capture_json=True,
+                    expect_ok=False,
+                )
+                if isinstance(data_enh, dict):
+                    current_enh_state = data_enh.get("enhancementsEnabled", None)
+                    if current_enh_state is True:
+                        enh_label = "Disable Enhancements"
+                    elif current_enh_state is False:
+                        enh_label = "Enable Enhancements"
             except Exception:
-                vend_available = False
+                current_enh_state = None
+            # Remember state for click-time toggling
+            self._pending_enh = {
+                "id": d["id"],
+                "flow": d["flow"],
+                "current": current_enh_state,
+            }
+            self.menu.entryconfig(self.enh_menu_index, label=enh_label, state="normal")
     
-            if vend_available:
-                try:
-                    enh = _get_enhancements_status_any(d["id"], d["flow"])
-                except Exception:
-                    enh = None
-                if enh is True:
-                    enh_label = "Disable Enhancements"; target_enable_next = False
-                elif enh is False:
-                    enh_label = "Enable Enhancements"; target_enable_next = True
-                else:
-                    enh_label = "Enable Enhancements"; target_enable_next = True
-                self._pending_enh = {"id": d["id"], "enable": target_enable_next}
-                self.menu.entryconfig(self.enh_menu_index, label=enh_label, state="normal")
-            else:
-                self._pending_enh = None
-                self.menu.entryconfig(self.enh_menu_index, label=self.enh_menu_default_label, state="disabled")
-    
-            # Enhancement Effects submenu (alphabetical)
+            # Enhancement Effects submenu via CLI
             try:
                 self.fx_menu.delete(0, "end")
             except Exception:
                 pass
             try:
-                from .vendor_db import _list_fx_for_device, _read_vendor_entry_state
-                fx_list = _list_fx_for_device(d["id"], d["flow"], ini_path=_vendor_ini_default_path())
+                args = [
+                    "enhancements",
+                    "--id", d["id"],
+                    "--flow", d["flow"],
+                    "--list-fx",
+                    "--json",
+                ]
+                data = run_audioctl(args, capture_json=True, expect_ok=False)
+                fx_list = data.get("availableFX", [])
                 fx_list = sorted(fx_list, key=lambda x: (x.get("fx_name") or "").lower())
                 if fx_list:
-                    for fx_info in fx_list:
-                        fx_name = fx_info["fx_name"]
-                        entry = fx_info["entry"]
-                        try:
-                            st = _read_vendor_entry_state(entry, d["id"], d["flow"])
-                        except Exception:
-                            st = None
-                        if st is True:
+                    for fx in fx_list:
+                        fx_name = fx.get("fx_name")
+                        state = fx.get("state")
+                        if state is True:
                             label = f"Disable {fx_name}"
-                        elif st is False:
+                        elif state is False:
                             label = f"Enable {fx_name}"
                         else:
                             label = f"Toggle {fx_name}"
-                        def make_fx_command(fx_n):
+                        def make_fx_command(name, current_state):
                             def cmd():
-                                self.on_toggle_fx_live(fx_n)
+                                self.on_toggle_fx_live(name, current_state)
                             return cmd
-                        self.fx_menu.add_command(label=label, command=make_fx_command(fx_name))
+                        self.fx_menu.add_command(label=label, command=make_fx_command(fx_name, state))
                     self.menu.entryconfig(self.fx_cascade_index, state="normal")
                 else:
                     self.fx_menu.add_command(label="No effects available", state="disabled")
@@ -441,7 +513,6 @@ class AudioGUI:
                 self.menu.grab_release()
             except Exception:
                 pass
-
     def on_right_click(self, event):
         iid = self.tree.identify_row(event.y)
         if not iid:
@@ -474,10 +545,9 @@ class AudioGUI:
             from .logging_setup import _log, _dbg
             _dbg(f"GUI: on_set_default for id={d['id']} flow={d['flow']}")
             if d["flow"] == "Render":
-                cmd = f'audioctl set-default --playback-id "{d["id"]}" --playback-role all'
+                args = ["set-default", "--playback-id", d["id"], "--playback-role", "all"]
             else:
-                cmd = f'audioctl set-default --recording-id "{d["id"]}" --recording-role all'
-            _log(f"GUI action: set-default start id={d['id']} name={d['name']} flow={d['flow']} roles=all")
+                args = ["set-default", "--recording-id", d["id"], "--recording-role", "all"]
             if not is_admin():
                 if not messagebox.askyesno(
                     "Administrator recommended",
@@ -485,15 +555,17 @@ class AudioGUI:
                 ):
                     _log(f"GUI action: set-default cancelled id={d['id']} name={d['name']}")
                     return
-            set_default_endpoint(d["id"], "all")
-            self.maybe_print_cli(cmd)
+            _log(f"GUI action: set-default start via CLI id={d['id']} name={d['name']} flow={d['flow']} roles=all")
+            data = run_audioctl(args, capture_json=True, expect_ok=True)
+            cmd_str = "audioctl " + " ".join(shlex.quote(a) for a in args)
+            self.maybe_print_cli(cmd_str)
             self.set_status(f"Set default ({d['flow']}) device: {d['name']} (all roles)")
             self.refresh_devices()
-            _log(f"GUI action: set-default success id={d['id']} name={d['name']} flow={d['flow']}")
-            _dbg(f"GUI: on_set_default successful")
+            _log(f"GUI action: set-default success via CLI id={d['id']} name={d['name']} flow={d['flow']}")
+            _dbg("GUI: on_set_default successful")
         except Exception as e:
             from .logging_setup import _log
-            _log(f"GUI action: set-default failed id={d['id']} name={d['name']} error={e}")
+            _log(f"GUI action: set-default failed via CLI id={d['id']} name={d['name']} error={e}")
             messagebox.showerror("Error", f"Failed to set default:\n{e}")
             self.set_status("Failed to set default")
     def on_set_volume(self):
@@ -506,20 +578,33 @@ class AudioGUI:
             if level is None:
                 _log(f"GUI action: set-volume cancelled id={d['id']} name={d['name']}")
                 return
-            _log(f"GUI action: set-volume start id={d['id']} name={d['name']} flow={d['flow']} level={level}")
-            ok = set_endpoint_volume(d["id"], level)
-            if ok:
-                cmd = f'audioctl set-volume --id "{d["id"]}" --flow {d["flow"]} --level {level}'
-                self.maybe_print_cli(cmd)
-                self.set_status(f"Volume set to {level}% for: {d['name']}")
-                _log(f"GUI action: set-volume success id={d['id']} name={d['name']} level={level}")
+            _log(f"GUI action: set-volume start via CLI id={d['id']} name={d['name']} flow={d['flow']} level={level}")
+            args = [
+                "set-volume",
+                "--id", d["id"],
+                "--flow", d["flow"],
+                "--level", str(level),
+                "--json",
+            ]
+            rc, out, err = run_audioctl(args, capture_json=False, expect_ok=False)
+            cmd_str = "audioctl " + " ".join(shlex.quote(a) for a in args)
+            self.maybe_print_cli(cmd_str)
+            if rc == 0:
+                try:
+                    info = json.loads(out or "{}")
+                    vs = info.get("volumeSet") or {}
+                    final = vs.get("level", level)
+                except Exception:
+                    final = level
+                self.set_status(f"Volume set to {final}% for: {d['name']}")
+                _log(f"GUI action: set-volume success via CLI id={d['id']} name={d['name']} level={final}")
             else:
-                _log(f"GUI action: set-volume failed id={d['id']} name={d['name']} level={level}")
-                messagebox.showerror("Error", "Failed to set volume/mute")
+                _log(f"GUI action: set-volume failed via CLI id={d['id']} name={d['name']} rc={rc} err={err}")
+                messagebox.showerror("Error", f"Failed to set volume/mute:\n{err or out}")
                 self.set_status("Failed to set volume")
         except Exception as e:
             from .logging_setup import _log
-            _log(f"GUI action: set-volume error id={d['id']} name={d['name']} err={e}")
+            _log(f"GUI action: set-volume error via CLI id={d['id']} name={d['name']} err={e}")
             messagebox.showerror("Error", f"Failed to set volume:\n{e}")
             self.set_status("Failed to set volume")
     def on_toggle_mute(self):
@@ -528,22 +613,46 @@ class AudioGUI:
             return
         try:
             from .logging_setup import _log
-            current = get_endpoint_mute(d["id"])
-            target = False if current is None else (not bool(current))
-            _log(f"GUI action: toggle-mute start id={d['id']} name={d['name']} current={current} target={target}")
-            ok = set_endpoint_mute(d["id"], target)
-            if ok:
-                cmd = f'audioctl set-volume --id "{d["id"]}" --flow {d["flow"]} --{"mute" if target else "unmute"}'
-                self.maybe_print_cli(cmd)
-                self.set_status(f'{"Muted" if target else "Unmuted"}: {d["name"]}')
-                _log(f"GUI action: toggle-mute success id={d['id']} name={d['name']} final={target}")
+            # Query current mute state via CLI
+            muted = None
+            try:
+                data = run_audioctl(
+                    ["get-volume", "--id", d["id"], "--flow", d["flow"]],
+                    capture_json=True,
+                    expect_ok=False,
+                )
+                if isinstance(data, dict):
+                    muted = data.get("muted", None)
+            except Exception:
+                muted = None
+            # Decide target action
+            target_flag = "--unmute" if muted is True else "--mute"
+            args = [
+                "set-volume",
+                "--id", d["id"],
+                "--flow", d["flow"],
+                target_flag,
+                "--json",
+            ]
+            rc, out, err = run_audioctl(args, capture_json=False, expect_ok=False)
+            cmd_str = "audioctl " + " ".join(shlex.quote(a) for a in args)
+            self.maybe_print_cli(cmd_str)
+            if rc == 0:
+                try:
+                    info = json.loads(out or "{}")
+                    ms = info.get("muteSet") or {}
+                    final = ms.get("muted", target_flag == "--mute")
+                except Exception:
+                    final = (target_flag == "--mute")
+                self.set_status(f'{"Muted" if final else "Unmuted"}: {d["name"]}')
+                _log(f"GUI action: toggle-mute success via CLI id={d['id']} name={d['name']} final={final}")
             else:
-                _log(f"GUI action: toggle-mute failed id={d['id']} name={d['name']} target={target}")
-                messagebox.showerror("Error", "Failed to change mute state")
+                _log(f"GUI action: toggle-mute failed via CLI id={d['id']} name={d['name']} rc={rc} err={err}")
+                messagebox.showerror("Error", f"Failed to change mute state:\n{err or out}")
                 self.set_status("Failed to change mute state")
         except Exception as e:
             from .logging_setup import _log
-            _log(f"GUI action: toggle-mute error id={d['id']} name={d['name']} err={e}")
+            _log(f"GUI action: toggle-mute error via CLI id={d['id']} name={d['name']} err={e}")
             messagebox.showerror("Error", f"Failed to toggle mute:\n{e}")
             self.set_status("Failed to toggle mute")
     def on_toggle_listen(self):
@@ -551,39 +660,58 @@ class AudioGUI:
         if not d:
             return
         if d["flow"] != "Capture":
-            messagebox.showinfo("Not a capture device", "Listen can only be toggled for capture (recording) devices.")
+            messagebox.showinfo(
+                "Not a capture device",
+                "Listen can only be toggled for capture (recording) devices."
+            )
             return
         try:
+            from .logging_setup import _log
             _log(f"Listen toggle requested for {d['name']} ({d['id']})")
-            current = _get_listen_to_device_status_ps(d["id"])
-            if current is None:
-                current = _read_listen_enable_from_registry(d["id"])
-            enable = not bool(current)
-            cmd = f'audioctl listen --id "{d["id"]}" --{"enable" if enable else "disable"}'
+            # Query current 'Listen' state via CLI get-listen
+            current = None
+            try:
+                data_ls = run_audioctl(
+                    ["get-listen", "--id", d["id"]],
+                    capture_json=True,
+                    expect_ok=False,
+                )
+                if isinstance(data_ls, dict):
+                    current = data_ls.get("listenEnabled", None)
+            except Exception:
+                current = None
+            # Decide new target: invert if known, else ask the user
+            if current is True:
+                enable = False
+            elif current is False:
+                enable = True
+            else:
+                choice = messagebox.askyesno(
+                    "Toggle Listen",
+                    "Enable 'Listen to this device' for this capture device?\n\n"
+                    "Yes = Enable\nNo = Disable"
+                )
+                enable = bool(choice)
+            args = ["listen", "--id", d["id"], "--enable" if enable else "--disable", "--json"]
+            rc, out, err = run_audioctl(args, capture_json=False, expect_ok=False)
+            cmd = "audioctl " + " ".join(shlex.quote(a) for a in args)
             self.maybe_print_cli(cmd)
-            captured_stderr = io.StringIO()
-            with redirect_stderr(captured_stderr):
-                ok = set_listen_to_device_ps(d["id"], enable, render_device_id=None)
-            if not ok:
-                actual = _get_listen_to_device_status_ps(d["id"])
-                if actual is None:
-                    verified, reg_state = _verify_listen_via_registry(d["id"], enable, timeout=3.0, interval=0.20)
-                    actual = reg_state if verified or reg_state is not None else None
-            else:
-                actual = _get_listen_to_device_status_ps(d["id"])
-                if actual is None:
-                    verified, reg_state = _verify_listen_via_registry(d["id"], enable, timeout=3.0, interval=0.20)
-                    actual = reg_state if verified or reg_state is not None else None
-            if actual is None:
-                _log(f"Listen toggle result unknown for {d['name']} ({d['id']}); requested={enable}")
-                messagebox.showwarning("Listen status unknown", "Could not verify final 'Listen' state. It may still have applied.")
-                self.set_status(f"Listen toggle requested for: {d['name']}")
-            else:
-                _log(f"Listen toggle result for {d['name']} ({d['id']}): final={actual}")
-                state_txt = "enabled" if actual else "disabled"
+            if rc == 0:
+                try:
+                    info = json.loads(out or "{}")
+                    final = (info.get("listenSet") or {}).get("enabled", enable)
+                except Exception:
+                    final = enable
+                state_txt = "enabled" if final else "disabled"
                 self.set_status(f"Listen {state_txt} for: {d['name']}")
+                _log(f"Listen toggle result via CLI for {d['name']} ({d['id']}): final={final}")
+            else:
+                _log(f"Listen toggle failed via CLI for {d['name']} ({d['id']}): rc={rc} err={err}")
+                messagebox.showerror("Error", f"Failed to toggle Listen:\n{err or out}")
+                self.set_status("Failed to toggle Listen")
         except Exception as e:
-            _log(f"Listen toggle exception for {d['name']} ({d['id']}): {e!r}")
+            from .logging_setup import _log
+            _log(f"Listen toggle exception via CLI for {d['name']} ({d['id']}): {e!r}")
             messagebox.showerror("Error", f"Failed to toggle Listen:\n{e}")
             self.set_status("Failed to toggle Listen")
     def on_toggle_enhancements(self):
@@ -591,71 +719,59 @@ class AudioGUI:
         if not d:
             return
         try:
+            from .logging_setup import _log
             _log(f"Enhancements toggle requested for {d['name']} ({d['id']})")
-            if getattr(self, "_pending_enh", None) and self._pending_enh.get("id") == d["id"]:
-                enable = bool(self._pending_enh["enable"])
+            # Use the state captured when the context menu was built, if available
+            st = None
+            pe = getattr(self, "_pending_enh", None)
+            if pe and pe.get("id") == d["id"] and pe.get("flow") == d["flow"]:
+                st = pe.get("current", None)
+            # Decide target: invert current state if known; else, ask user
+            if st is True:
+                enable = False
+            elif st is False:
+                enable = True
             else:
-                current = _get_enhancements_status_any(d["id"], d["flow"])
-                enable = True if current is None else (not bool(current))
-            if not _enhancements_supported(d["id"], d["flow"]):
-                from .logging_setup import _log as _ilog
-                _ilog(f"GUI action: enhancements not-supported id={d['id']} name={d['name']} flow={d['flow']}")
-                messagebox.showinfo("Not supported", "This endpoint does not have a configured vendor toggle for 'Audio Enhancements'. Use 'Learn Enhancements' first.")
-                self.set_status("Enhancements toggle failed: No vendor method.")
-                return
-            self.maybe_print_cli(f'audioctl enhancements --id "{d["id"]}" --flow {d["flow"]} --{"enable" if enable else "disable"}')
-            ok, verified_by, state = _apply_enhancements(
-                d["id"], d["flow"], enable,
-                prefer_hklm=is_admin(),
-                allow_universal_scan=False,
-                vendor_ini_path=_vendor_ini_default_path()
-            )
-            self._pending_enh = None
-            if ok and (state is None or state == enable):
+                choice = messagebox.askyesno(
+                    "Toggle Enhancements",
+                    f"Enable 'Audio Enhancements' for this device?\n\n"
+                    f"Device: {d['name']} ({d['flow']})\n\n"
+                    "Yes = Enable\nNo = Disable"
+                )
+                enable = bool(choice)
+            args = [
+                "enhancements",
+                "--id", d["id"],
+                "--flow", d["flow"],
+                "--enable" if enable else "--disable",
+            ]
+            data = run_audioctl(args, capture_json=True, expect_ok=False)
+            cmd_str = "audioctl " + " ".join(shlex.quote(a) for a in args)
+            self.maybe_print_cli(cmd_str)
+            enh = data.get("enhancementsSet")
+            if enh:
+                state = enh.get("enabled", enable)
                 state_txt = "enabled" if state else "disabled"
-                _log(f"Enhancements toggle result for {d['name']} ({d['id']}): final={state_txt} via {verified_by}")
-                if verified_by.startswith("vendor"):
-                    self.set_status(f"Enhancements {state_txt} for: {d['name']} (Vendor controlled)")
-                else:
-                    self.set_status(f"Enhancements {state_txt} for: {d['name']} (Unknown success path)")
+                verified_by = enh.get("verifiedBy", "vendor")
+                _log(f"Enhancements toggle via CLI for {d['name']} ({d['id']}): final={state_txt} via {verified_by}")
+                self.set_status(f"Enhancements {state_txt} for: {d['name']}")
             else:
-                from .logging_setup import _log as _ilog
-                _ilog(f"GUI action: enhancements failed-or-unverified id={d['id']} name={d['name']} flow={d['flow']} requested_enable={enable} ok={ok} state={state} verified_by={verified_by}")
-                messagebox.showwarning("Could not verify", "Vendor toggle applied but could not verify final state, or the toggle failed.")
-                self.set_status(f"Enhancements toggle requested for: {d['name']} (Verification failed)")
+                _log(f"Enhancements toggle via CLI unverified/failed id={d['id']} name={d['name']} data={data}")
+                messagebox.showwarning(
+                    "Could not verify",
+                    "Vendor toggle applied but could not verify final state, or the toggle failed."
+                )
+                self.set_status("Enhancements toggle requested (verification failed)")
+        except RuntimeError as e:
+            from .logging_setup import _log
+            _log(f"Enhancements toggle error via CLI for {d['name']} ({d['id']}): {e}")
+            messagebox.showerror("Error", str(e))
+            self.set_status("Failed to toggle Enhancements")
         except Exception as e:
-            _log(f"Enhancements toggle exception for {d['name']} ({d['id']}): {e!r}")
+            from .logging_setup import _log
+            _log(f"Enhancements toggle exception via CLI for {d['name']} ({d['id']}): {e!r}")
             messagebox.showerror("Error", f"Failed to toggle Enhancements:\n{e}")
             self.set_status("Failed to toggle Enhancements")
-    def _run_elevated_vendor_ini_append(self, work_dict):
-        """
-        Elevate a tiny CLI helper to append to vendor_toggles.ini at a protected path.
-        We write a temp JSON work order, then ShellExecute 'runas' audioctl vendor-ini-append --work <json>.
-        """
-        import tempfile, json, os, sys, ctypes
-        try:
-            # Write work order file
-            tmp_dir = tempfile.gettempdir()
-            work_path = os.path.join(tmp_dir, f"audioctl_work_{int(time.time())}.json")
-            with open(work_path, "w", encoding="utf-8") as f:
-                json.dump(work_dict, f, indent=2)
-            # Build elevated command
-            if getattr(sys, "frozen", False):
-                exe = sys.executable
-                params = f'vendor-ini-append --work "{work_path}"'
-            else:
-                exe = sys.executable
-                params = f'-m audioctl vendor-ini-append --work "{work_path}"'
-            # ShellExecuteW returns >32 on success
-            ret = ctypes.windll.shell32.ShellExecuteW(None, "runas", exe, params, None, 1)
-            if ret <= 32:
-                messagebox.showerror("Elevation failed", "Could not start elevated helper. Please run as Administrator or choose a user-writable INI path.")
-                return False
-            messagebox.showinfo("Elevated write started", "An elevated helper was launched to write vendor_toggles.ini.\nIf you see a UAC prompt, click Yes.")
-            return True
-        except Exception as e:
-            messagebox.showerror("Elevation error", f"Failed to start elevated helper:\n{e}")
-            return False
     def on_learn_enhancements(self):
         d = self.get_selected_device()
         if not d:
@@ -760,381 +876,154 @@ class AudioGUI:
                 return
             
             if result["type"] == "main":
-                self._learn_main_toggle(d)
+                self._learn_main_toggle_via_cli(d)
             else:
-                self._learn_fx_toggle(d, result["fx_name"])
+                self._learn_fx_toggle_via_cli(d, result["fx_name"])
         
         except Exception as e:
             messagebox.showerror("Error", f"Learn failed:\n{e}")
             self.set_status("Learn failed")
-    def _learn_main_toggle(self, d):
-        """Existing learn logic (main Enhancements switch)."""
+    def _learn_main_toggle_via_cli(self, d):
+        """
+        Delegate 'Learn Enhancements' for main switch entirely to CLI:
+          audioctl enhancements --id "<id>" --flow "<flow>" --learn
+        """
         from .logging_setup import _log
-        ini_path = _vendor_ini_default_path()
+        try:
+            ini_path = _vendor_ini_default_path()
+        except Exception:
+            ini_path = "<vendor_toggles.ini>"
         warn_txt = (
             "READ CAREFULLY\n\n"
-            "This Learn mode will capture two registry snapshots and write a vendor entry into:\n"
+            "This Learn mode will capture two registry snapshots and write a vendor entry via the CLI into:\n"
             f"  {ini_path}\n\n"
-            "From now on, future 'Enhancements' commands for this device WILL WRITE registry values on this machine "
-            "(HKCU/optional HKLM) to toggle Enhancements. This is persistent until you manually remove the learned section.\n\n"
-            "Critical rules during Learn:\n"
-            "- Do NOT change any other audio settings.\n"
-            "- Do NOT switch default devices.\n"
-            "- Do NOT open other audio/control apps.\n"
-            "- Only toggle 'Audio Enhancements' for THIS device exactly when asked.\n\n"
-            "Click OK to continue, or Cancel to abort."
+            "From now on, future 'Enhancements' commands for this device WILL WRITE registry values.\n\n"
+            "During Learn:\n"
+            "- Do NOT change other audio settings.\n"
+            "- Do NOT switch devices.\n"
+            "- Only toggle 'Audio Enhancements' for THIS device when prompted by the CLI.\n\n"
+            "Click OK to continue (the CLI will guide you in the console),\n"
+            "or Cancel to abort."
         )
         if not messagebox.askokcancel("Warning – Learn writes registry (persistent)", warn_txt):
             self.set_status("Learn Enhancements: aborted by user")
             _log(f"GUI action: learn-main cancelled id={d['id']} name={d['name']}")
             return
-        # Print CLI equivalent for learn
-        self.maybe_print_cli(f'audioctl enhancements --id "{d["id"]}" --flow {d["flow"]} --learn')
-        _log(f"GUI action: learn-main start id={d['id']} name={d['name']} flow={d['flow']} ini={ini_path}")
-        messagebox.showinfo(
-            "Learn Enhancements - Step 1",
-            "Set 'Audio Enhancements' to ENABLED for this device in Windows Sound settings.\n\nClick OK to capture snapshot A."
-        )
-        captured_stderr = io.StringIO()
-        with redirect_stderr(captured_stderr):
-            snapA = _collect_sysfx_snapshot(d["id"])
-        _reemit_non_error_stderr(captured_stderr.getvalue())
-        messagebox.showinfo(
-            "Learn Enhancements - Step 2",
-            "Set 'Audio Enhancements' to DISABLED for the same device.\n\nClick OK to capture snapshot B."
-        )
-        captured_stderr = io.StringIO()
-        with redirect_stderr(captured_stderr):
-            snapB = _collect_sysfx_snapshot(d["id"])
-        _reemit_non_error_stderr(captured_stderr.getvalue())
-        diffs = _diff_mmdevices_lists(snapA.get("registry") or [], snapB.get("registry") or [])
-        snippet, picked = _build_vendor_ini_snippet(d, snapA, snapB, diffs)
-        if not picked:
-            _log(f"GUI action: learn-main no-dword-flip id={d['id']} name={d['name']}")
-            # First vendor availability check
-            try:
-                vend_entry = _find_first_vendor_entry(d["id"], d["flow"], ini_path=_vendor_ini_default_path())
-            except Exception:
-                vend_entry = None
-            if vend_entry:
-                # Vendor path is already available (INI or built-in) due to your toggle
-                messagebox.showinfo(
-                    "Enhancements vendor available",
-                    "A vendor method was detected for this device after your toggle.\n\n"
-                    "No INI write was needed. You can now use 'Enable/Disable Enhancements' from the menu."
-                )
-                self.set_status("Vendor method available (no INI required)")
-                return
-            # Guide user to try again (drivers often materialize keys only after the first toggle)
-            retry = messagebox.askyesno(
-                "Try again?",
-                "No DWORD flip was detected.\n\n"
-                "This may be the first time this endpoint was toggled. Drivers often create keys only after the first toggle.\n\n"
-                "Would you like to try again? Please toggle 'Audio Enhancements' to ENABLED, then DISABLED when prompted."
-            )
-            if not retry:
-                self.set_status("Learn Enhancements: user skipped retry")
-                return
-            # Second pass: capture snapshots again
-            messagebox.showinfo(
-                "Learn Enhancements - Retry Step 1",
-                "Set 'Audio Enhancements' to ENABLED for this device.\n\nClick OK to capture snapshot A."
-            )
-            captured_stderr = io.StringIO()
-            with redirect_stderr(captured_stderr):
-                snapA2 = _collect_sysfx_snapshot(d["id"])
-            _reemit_non_error_stderr(captured_stderr.getvalue())
-            messagebox.showinfo(
-                "Learn Enhancements - Retry Step 2",
-                "Set 'Audio Enhancements' to DISABLED for the same device.\n\nClick OK to capture snapshot B."
-            )
-            captured_stderr = io.StringIO()
-            with redirect_stderr(captured_stderr):
-                snapB2 = _collect_sysfx_snapshot(d["id"])
-            _reemit_non_error_stderr(captured_stderr.getvalue())
-            diffs2 = _diff_mmdevices_lists(snapA2.get("registry") or [], snapB2.get("registry") or [])
-            snippet2, picked2 = _build_vendor_ini_snippet(d, snapA2, snapB2, diffs2)
-            if picked2:
-                # Proceed with writing INI (same as original success path)
-                value_name2 = picked2["name"]
-                dword_enable2 = int(picked2["before"])
-                dword_disable2 = int(picked2["after"])
-                section_name2 = _sanitize_ini_section_name(value_name2)
-                notes2 = f"Auto-learned (retry) on '{d['name']}' ({d['flow']}). A=enabled,B=disabled."
-                try:
-                    res = _append_vendor_ini_entry_if_missing(
-                        _vendor_ini_default_path(), section_name2, value_name2,
-                        dword_enable2, dword_disable2,
-                        flows="Render,Capture", hives="HKCU,HKLM", notes=notes2
-                    )
-                    if res == "exists":
-                        messagebox.showinfo(
-                            "Learn Enhancements",
-                            f"Vendor section already exists:\n{_vendor_ini_default_path()}\n\nSection: [{section_name2}]\nNo changes were made."
-                        )
-                        self.set_status("Learn Enhancements: entry already exists (retry)")
-                    else:
-                        messagebox.showinfo(
-                            "Learn Enhancements",
-                            f"Learned vendor toggle (retry) and appended to:\n{_vendor_ini_default_path()}\n\n"
-                            f"Section: [{section_name2}]\nValue: {value_name2}\nEnabled={dword_enable2}, Disabled={dword_disable2}"
-                        )
-                        self.set_status("Learn Enhancements: vendor INI updated (retry)")
-                except PermissionError:
-                    # Elevation or fallback to user INI (same as original block)
-                    if messagebox.askyesno(
-                        "Permission denied",
-                        f"Cannot write INI at:\n{_vendor_ini_default_path()}\n\n"
-                        "Choose Yes to attempt elevation and write here.\n"
-                        "Choose No to save into a user-writable location instead."
-                    ):
-                        work = {
-                            "kind": "main",
-                            "ini_path": _vendor_ini_default_path(),
-                            "section": section_name2,
-                            "value_name": value_name2,
-                            "dword_enable": int(dword_enable2),
-                            "dword_disable": int(dword_disable2),
-                            "flows": "Render,Capture",
-                            "hives": "HKCU,HKLM",
-                            "notes": notes2,
-                        }
-                        ok = self._run_elevated_vendor_ini_append(work)
-                        if ok:
-                            self.set_status("Learn Enhancements: elevated write started (retry)")
-                        else:
-                            self.set_status("Learn Enhancements: elevation failed (retry)")
-                    else:
-                        user_ini = _vendor_ini_default_path()
-                        try:
-                            res = _append_vendor_ini_entry_if_missing(
-                                user_ini, section_name2, value_name2,
-                                dword_enable2, dword_disable2,
-                                flows="Render,Capture", hives="HKCU,HKLM", notes=notes2
-                            )
-                            messagebox.showinfo("Saved to user INI", f"INI entry written to:\n{user_ini}\nSection: [{section_name2}]")
-                            self.set_status("Learn Enhancements: saved to user INI (retry)")
-                        except Exception as e2:
-                            messagebox.showerror("Write failed", f"Could not write to user INI either:\n{e2}")
-                            self.set_status("Learn Enhancements: write failed (retry)")
-                except Exception as e:
-                    messagebox.showerror("Error", f"Failed to write INI (retry): {e}")
-                    self.set_status("Learn Enhancements: write failed (retry)")
-                return  # retry path done
-            # Still no DWORD flip after retry: vendor availability final check
-            try:
-                vend_entry3 = _find_first_vendor_entry(d["id"], d["flow"], ini_path=_vendor_ini_default_path())
-            except Exception:
-                vend_entry3 = None
-            if vend_entry3:
-                messagebox.showinfo(
-                    "Enhancements vendor available",
-                    "A vendor method is now available for this device after your toggles.\n\n"
-                    "No INI write was needed. You can now use 'Enable/Disable Enhancements'."
-                )
-                self.set_status("Vendor method available (retry)")
-                return
-            # Nothing found
-            messagebox.showwarning(
-                "Learn Enhancements",
-                "No suitable REG_DWORD flip found under FxProperties and no vendor method became available after retry."
-            )
-            self.set_status("Learn Enhancements: no DWORD flip and no vendor method after retry")
-            return
-        value_name = picked["name"]
-        dword_enable = int(picked["before"])
-        dword_disable = int(picked["after"])
-        section_name = _sanitize_ini_section_name(value_name)
-        notes = f"Auto-learned (manual UI) on '{d['name']}' ({d['flow']}). A=enabled,B=disabled."
+        cli_preview = f'audioctl enhancements --id "{d["id"]}" --flow {d["flow"]} --learn'
+        self.maybe_print_cli(cli_preview)
+        _log(f"GUI action: learn-main start via CLI id={d['id']} name={d['name']} flow={d['flow']}")
         try:
-            res = _append_vendor_ini_entry_if_missing(
-                ini_path, section_name, value_name,
-                dword_enable, dword_disable,
-                flows="Render,Capture", hives="HKCU,HKLM", notes=notes
-            )
-            if res == "exists":
-                messagebox.showinfo(
-                    "Learn Enhancements",
-                    f"Vendor section already exists:\n{ini_path}\n\nSection: [{section_name}]\nNo changes were made."
+            args = [
+                "enhancements",
+                "--id", d["id"],
+                "--flow", d["flow"],
+                "--learn",
+            ]
+            data = run_audioctl(args, capture_json=True, expect_ok=False)
+            if "vendorLearned" in data:
+                info = data["vendorLearned"]
+                msg = (
+                    "Learned a vendor toggle via CLI.\n\n"
+                    f"Section: {info.get('section')}\n"
+                    f"Value:   {info.get('value_name')}\n"
+                    f"INI:     {info.get('iniPath')}\n\n"
+                    "You can now use 'Enable/Disable Enhancements' on this device."
                 )
-                self.set_status("Learn Enhancements: entry already exists")
-                _log(f"GUI action: learn-main exists id={d['id']} name={d['name']} section={section_name}")
-            else:
-                messagebox.showinfo(
-                    "Learn Enhancements",
-                    f"Learned vendor toggle and appended to:\n{ini_path}\n\nSection: [{section_name}]\nValue: {value_name}\nEnabled={dword_enable}, Disabled={dword_disable}"
+                messagebox.showinfo("Learn Enhancements", msg)
+                self.set_status("Learn Enhancements: vendor learned via CLI")
+                _log(f"GUI action: learn-main success via CLI id={d['id']} name={d['name']} info={info}")
+            elif "vendorAvailable" in data:
+                info = data["vendorAvailable"]
+                msg = (
+                    "A vendor method is available for this device.\n\n"
+                    f"Vendor: {info.get('vendor')}\n"
+                    f"Value:  {info.get('value_name')}\n\n"
+                    "No new INI section was written, but this device can already be controlled."
                 )
-                self.set_status("Learn Enhancements: vendor INI updated")
-                _log(f"GUI action: learn-main success id={d['id']} name={d['name']} section={section_name} value={value_name} enable={dword_enable} disable={dword_disable} ini={ini_path}")
-        except PermissionError:
-            # Offer elevation or fallback
-            if messagebox.askyesno(
-                "Permission denied",
-                f"Cannot write INI at:\n{ini_path}\n\n"
-                "Choose Yes to attempt elevation and write here.\n"
-                "Choose No to save into a user-writable location instead."
-            ):
-                # Elevate just the write using a work order
-                work = {
-                    "kind": "main",
-                    "ini_path": ini_path,
-                    "section": section_name,
-                    "value_name": value_name,
-                    "dword_enable": int(dword_enable),
-                    "dword_disable": int(dword_disable),
-                    "flows": "Render,Capture",
-                    "hives": "HKCU,HKLM",
-                    "notes": notes,
-                }
-                ok = self._run_elevated_vendor_ini_append(work)
-                if ok:
-                    self.set_status("Learn Enhancements: elevated write started")
-                    _log(f"GUI action: learn-main elevation-started id={d['id']} name={d['name']} section={section_name}")
-                else:
-                    self.set_status("Learn Enhancements: elevation failed")
-                    _log(f"GUI action: learn-main elevation-failed id={d['id']} name={d['name']} section={section_name}")
+                messagebox.showinfo("Learn Enhancements", msg)
+                self.set_status("Learn Enhancements: vendor already available (CLI)")
+                _log(f"GUI action: learn-main vendor-available via CLI id={d['id']} name={d['name']} info={info}")
             else:
-                # Fallback to user-writable INI (use module-level import)
-                user_ini = _vendor_ini_default_path()
-                try:
-                    res = _append_vendor_ini_entry_if_missing(
-                        user_ini, section_name, value_name,
-                        dword_enable, dword_disable,
-                        flows="Render,Capture", hives="HKCU,HKLM", notes=notes
-                    )
-                    messagebox.showinfo("Saved to user INI", f"INI entry written to:\n{user_ini}\nSection: [{section_name}]")
-                    self.set_status("Learn Enhancements: saved to user INI")
-                    _log(f"GUI action: learn-main success-user-ini id={d['id']} name={d['name']} section={section_name} ini={user_ini}")
-                except Exception as e2:
-                    messagebox.showerror("Write failed", f"Could not write to user INI either:\n{e2}")
-                    self.set_status("Learn Enhancements: write failed")
-                    _log(f"GUI action: learn-main user-ini-failed id={d['id']} name={d['name']} err={e2}")
+                messagebox.showwarning(
+                    "Learn Enhancements",
+                    "CLI ran but did not report a learned vendor entry.\n"
+                    "See console/log for details."
+                )
+                self.set_status("Learn Enhancements: CLI did not learn entry")
+                _log(f"GUI action: learn-main unknown-cli-output id={d['id']} name={d['name']} data={data}")
+        except RuntimeError as e:
+            _log(f"GUI action: learn-main CLI failed id={d['id']} name={d['name']} err={e}")
+            messagebox.showerror("Error", f"Learn failed via CLI:\n{e}")
+            self.set_status("Learn Enhancements: CLI failed")
         except Exception as e:
-            _log(f"GUI action: learn-main failed id={d['id']} name={d['name']} err={e}")
-            messagebox.showerror("Error", f"Failed to write INI: {e}")
-            self.set_status("Learn Enhancements: write failed")
-    def _learn_fx_toggle(self, d, fx_name):
-        """Learn a specific FX effect using GUI prompts and core logic."""
-        from .vendor_db import _learn_fx_and_write_ini, _vendor_ini_default_path
+            _log(f"GUI action: learn-main CLI exception id={d['id']} name={d['name']} err={e}")
+            messagebox.showerror("Error", f"Learn failed via CLI:\n{e}")
+            self.set_status("Learn Enhancements: CLI error")
+    def _learn_fx_toggle_via_cli(self, d, fx_name):
+        """
+        Delegate 'Learn FX' for a specific effect entirely to CLI:
+          audioctl enhancements --id "<id>" --flow "<flow>" --learn-fx "<FX_NAME>"
+        """
         from .logging_setup import _log
-        ini_path = _vendor_ini_default_path()
+        try:
+            ini_path = _vendor_ini_default_path()
+        except Exception:
+            ini_path = "<vendor_toggles.ini>"
         warn_txt = (
-            "READ CAREFULLY\n\n"
+            f"READ CAREFULLY\n\n"
             f"This Learn mode will capture two registry snapshots for the effect '{fx_name}' "
-            f"and write a vendor entry into:\n  {ini_path}\n\n"
-            "From now on, this effect WILL BE CONTROLLABLE via registry writes.\n\n"
-            "Critical rules during Learn:\n"
-            f"- ONLY toggle the '{fx_name}' checkbox/effect\n"
-            "- Do NOT toggle the main 'Audio Enhancements' switch\n"
-            "- Do NOT change any other audio settings\n"
-            "- Do NOT switch devices\n\n"
-            "Click OK to continue, or Cancel to abort."
+            f"and write a vendor FX entry via the CLI into:\n  {ini_path}\n\n"
+            "From now on, this effect may be controlled via registry writes.\n\n"
+            "During Learn:\n"
+            f"- ONLY toggle the '{fx_name}' checkbox/effect.\n"
+            "- Do NOT toggle the main 'Audio Enhancements' switch.\n"
+            "- Do NOT change other audio settings.\n"
+            "- Do NOT switch devices.\n\n"
+            "Click OK to continue (the CLI will guide you), or Cancel to abort."
         )
         if not messagebox.askokcancel(f"Warning – Learn FX '{fx_name}'", warn_txt):
             self.set_status(f"Learn FX '{fx_name}': aborted by user")
             _log(f"GUI action: learn-fx cancelled id={d['id']} name={d['name']} fx={fx_name}")
             return
-        # Print CLI equivalent for FX learn
-        self.maybe_print_cli(f'audioctl enhancements --id "{d["id"]}" --flow {d["flow"]} --learn-fx "{fx_name}"')
-        _log(f"GUI action: learn-fx start id={d['id']} name={d['name']} flow={d['flow']} fx={fx_name} ini={ini_path}")
-        messagebox.showinfo(
-            f"Learn FX '{fx_name}' - Step 1",
-            f"ENABLE the '{fx_name}' effect for this device.\n"
-            "(Do NOT toggle the main switch, only this specific effect)\n\n"
-            "Click OK to capture snapshot A."
-        )
-        captured_stderr = io.StringIO()
-        with redirect_stderr(captured_stderr):
-            snapA = _collect_sysfx_snapshot(d["id"])
-        _reemit_non_error_stderr(captured_stderr.getvalue())
-        messagebox.showinfo(
-            f"Learn FX '{fx_name}' - Step 2",
-            f"DISABLE the '{fx_name}' effect for the same device.\n\n"
-            "Click OK to capture snapshot B."
-        )
-        captured_stderr = io.StringIO()
-        with redirect_stderr(captured_stderr):
-            snapB = _collect_sysfx_snapshot(d["id"])
-        _reemit_non_error_stderr(captured_stderr.getvalue())
-        ok, info = _learn_fx_and_write_ini(
-            d, fx_name, snapA, snapB,
-            ini_path=ini_path, prefer_hkcu=True
-        )
-        if ok:
-            try:
-                messagebox.showinfo(
-                    f"Learn FX '{fx_name}'",
-                    f"Learned effect '{fx_name}' and appended to:\n{info.get('iniPath', ini_path)}\n\n"
-                    f"Section: [{info.get('section')}]\n"
-                    f"Value: {info.get('value_name')}\n"
-                    f"Enabled={info.get('dword_enable')}, Disabled={info.get('dword_disable')}\n\n"
-                    "The effect will now appear in the context menu."
+        cli_preview = f'audioctl enhancements --id "{d["id"]}" --flow {d["flow"]} --learn-fx "{fx_name}"'
+        self.maybe_print_cli(cli_preview)
+        _log(f"GUI action: learn-fx start via CLI id={d['id']} name={d['name']} flow={d['flow']} fx={fx_name}")
+        try:
+            args = [
+                "enhancements",
+                "--id", d["id"],
+                "--flow", d["flow"],
+                "--learn-fx", fx_name,
+            ]
+            data = run_audioctl(args, capture_json=True, expect_ok=False)
+            if "fxLearned" in data:
+                info = data["fxLearned"]
+                msg = (
+                    f"Learned FX '{fx_name}' via CLI.\n\n"
+                    f"Section: {info.get('section')}\n"
+                    f"FX:      {info.get('fx_name')}\n"
+                    f"INI:     {info.get('iniPath')}\n\n"
+                    "The effect will now appear in the context menu (via CLI list-fx)."
                 )
-                self.set_status(f"Learn FX '{fx_name}': vendor INI updated")
-                _log(f"GUI action: learn-fx success id={d['id']} name={d['name']} fx={fx_name} section={info.get('section')} value={info.get('value_name')}")
-            except PermissionError:
-                # Offer elevation or fallback
-                section_name = info.get("section")
-                value_name = info.get("value_name")
-                dword_enable = int(info.get("dword_enable"))
-                dword_disable = int(info.get("dword_disable"))
-                notes = f"Learned FX '{fx_name}' for '{d['name']}' ({d['flow']})"
-                if messagebox.askyesno(
-                    "Permission denied",
-                    f"Cannot write INI at:\n{ini_path}\n\n"
-                    "Choose Yes to attempt elevation and write here.\n"
-                    "Choose No to save into a user-writable location instead."
-                ):
-                    work = {
-                        "kind": "fx",
-                        "ini_path": ini_path,
-                        "section": section_name,
-                        "fx_name": fx_name,
-                        "device_name": d["name"],
-                        "value_name": value_name,
-                        "dword_enable": dword_enable,
-                        "dword_disable": dword_disable,
-                        "flows": "Render,Capture",
-                        "hives": "HKCU,HKLM",
-                        "notes": notes,
-                    }
-                    ok2 = self._run_elevated_vendor_ini_append(work)
-                    if ok2:
-                        self.set_status(f"Learn FX '{fx_name}': elevated write started")
-                        _log(f"GUI action: learn-fx elevation-started id={d['id']} name={d['name']} fx={fx_name} section={section_name}")
-                    else:
-                        self.set_status(f"Learn FX '{fx_name}': elevation failed")
-                        _log(f"GUI action: learn-fx elevation-failed id={d['id']} name={d['name']} fx={fx_name} section={section_name}")
-                else:
-                    user_ini = _vendor_ini_default_path()
-                    try:
-                        _append_fx_ini_entry(
-                            user_ini, section_name, fx_name, d["name"],
-                            value_name, dword_enable, dword_disable,
-                            flows="Render,Capture", hives="HKCU,HKLM", notes=notes
-                        )
-                        messagebox.showinfo("Saved to user INI", f"INI entry written to:\n{user_ini}\nSection: [{section_name}]")
-                        self.set_status(f"Learn FX '{fx_name}': saved to user INI")
-                        _log(f"GUI action: learn-fx success-user-ini id={d['id']} name={d['name']} fx={fx_name} section={section_name} ini={user_ini}")
-                    except Exception as e2:
-                        messagebox.showerror("Write failed", f"Could not write to user INI either:\n{e2}")
-                        self.set_status(f"Learn FX '{fx_name}': write failed")
-                        _log(f"GUI action: learn-fx user-ini-failed id={d['id']} name={d['name']} fx={fx_name} err={e2}")
-        else:
-            msg = str(info) if info else "Unknown failure (no details)."
-            if "No suitable REG_DWORD flip" in msg:
-                messagebox.showwarning(
-                    f"Learn FX '{fx_name}'",
-                    f"No suitable REG_DWORD flip was found for effect '{fx_name}'.\n"
-                    "The driver may use a non-DWORD or a different location.\n\n"
-                    f"Details: {msg}"
-                )
-                self.set_status(f"Learn FX '{fx_name}': no DWORD flip found")
-                _log(f"GUI action: learn-fx no-dword-flip id={d['id']} name={d['name']} fx={fx_name}")
+                messagebox.showinfo(f"Learn FX '{fx_name}'", msg)
+                self.set_status(f"Learn FX '{fx_name}': vendor INI updated (CLI)")
+                _log(f"GUI action: learn-fx success via CLI id={d['id']} name={d['name']} fx={fx_name} info={info}")
             else:
-                messagebox.showerror("Error", f"FX learn failed:\n{msg}")
-                self.set_status(f"Learn FX '{fx_name}': failed")
-                _log(f"GUI action: learn-fx failed id={d['id']} name={d['name']} fx={fx_name} msg={msg}")
+                msg = (
+                    f"CLI ran but did not report a learned FX entry for '{fx_name}'.\n"
+                    "See console/log for details."
+                )
+                messagebox.showwarning(f"Learn FX '{fx_name}'", msg)
+                self.set_status(f"Learn FX '{fx_name}': CLI did not learn entry")
+                _log(f"GUI action: learn-fx unknown-cli-output id={d['id']} name={d['name']} fx={fx_name} data={data}")
+        except RuntimeError as e:
+            _log(f"GUI action: learn-fx CLI failed id={d['id']} name={d['name']} fx={fx_name} err={e}")
+            messagebox.showerror("Error", f"FX learn failed via CLI:\n{e}")
+            self.set_status(f"Learn FX '{fx_name}': CLI failed")
+        except Exception as e:
+            _log(f"GUI action: learn-fx CLI exception id={d['id']} name={d['name']} fx={fx_name} err={e}")
+            messagebox.showerror("Error", f"FX learn failed via CLI:\n{e}")
+            self.set_status(f"Learn FX '{fx_name}': CLI error")
     def open_volume_dialog(self, device_id, device_name):
         top = tk.Toplevel(self.root)
         try:
@@ -1149,9 +1038,17 @@ class AudioGUI:
         frm = ttk.Frame(top, padding=12)
         frm.pack(fill="both", expand=True)
         ttk.Label(frm, text=device_name, anchor="w").grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 8))
-        initial = get_endpoint_volume(device_id)
-        if initial is None:
-            initial = 50
+        # Query current volume via CLI
+        initial = 50
+        try:
+            data = run_audioctl(
+                ["get-volume", "--id", device_id],
+                capture_json=True, expect_ok=False
+            )
+            if isinstance(data, dict) and data.get("volume") is not None:
+                initial = int(data["volume"])
+        except Exception:
+            pass
         v = tk.IntVar(value=initial)
         syncing = {"entry": False, "scale": False}
         def _validate(P):
@@ -1213,25 +1110,36 @@ class AudioGUI:
         entry.focus_set()
         top.wait_window()
         return result["value"]
-    def on_toggle_fx(self, fx_name, enable):
-        """Toggle an FX via high-level vendor_db function."""
+    def on_toggle_fx_live(self, fx_name, current_state):
+        """
+        Toggle an FX via CLI, based on the state we saw when the menu was built.
+        current_state: True (enabled), False (disabled), or None (unknown).
+        """
         d = self.get_selected_device()
         if not d:
             return
         try:
-            from .vendor_db import _apply_fx, _vendor_ini_default_path
             from .logging_setup import _log
-            _log(f"GUI action: toggle-fx start id={d['id']} name={d['name']} flow={d['flow']} fx={fx_name} enable={bool(enable)}")
-            ok, verified_by, state = _apply_fx(
-                d["id"], d["flow"], fx_name, bool(enable),
-                ini_path=_vendor_ini_default_path()
-            )
-            # Print the CLI equivalent for this toggle
-            self.maybe_print_cli(f'audioctl enhancements --id "{d["id"]}" --flow {d["flow"]} --{"enable-fx" if enable else "disable-fx"} "{fx_name}"')
-            if ok:
+            if current_state is True:
+                enable = False
+            else:
+                enable = True
+            args = [
+                "enhancements",
+                "--id", d["id"],
+                "--flow", d["flow"],
+                "--enable-fx" if enable else "--disable-fx",
+                fx_name,
+            ]
+            data = run_audioctl(args, capture_json=True, expect_ok=False)
+            cmd_str = "audioctl " + " ".join(shlex.quote(a) for a in args)
+            self.maybe_print_cli(cmd_str)
+            fx_set = data.get("fxSet")
+            if fx_set:
+                state = fx_set.get("enabled", enable)
                 state_txt = "enabled" if state else "disabled"
                 self.set_status(f"{fx_name} {state_txt} for: {d['name']}")
-                _log(f"GUI action: toggle-fx success id={d['id']} name={d['name']} fx={fx_name} final={state}")
+                _log(f"GUI action: toggle-fx success via CLI id={d['id']} name={d['name']} fx={fx_name} final={state}")
             else:
                 messagebox.showwarning(
                     "FX Toggle Failed",
@@ -1239,77 +1147,18 @@ class AudioGUI:
                     "The effect may not be properly learned for this device."
                 )
                 self.set_status(f"Failed to toggle {fx_name}")
-                _log(f"GUI action: toggle-fx failed id={d['id']} name={d['name']} fx={fx_name}")
-        except Exception as e:
+                _log(f"GUI action: toggle-fx via CLI failed id={d['id']} name={d['name']} fx={fx_name}")
+        except RuntimeError as e:
             from .logging_setup import _log
-            _log(f"GUI action: toggle-fx error id={d['id']} name={d['name']} fx={fx_name} err={e}")
+            _log(f"GUI action: toggle-fx via CLI error id={d['id']} name={d['name']} fx={fx_name} err={e}")
             messagebox.showerror("Error", f"Failed to toggle {fx_name}:\n{e}")
             self.set_status(f"Error toggling {fx_name}")
-    def on_toggle_fx_live(self, fx_name):
-        """
-        Toggle an FX at click-time by reading current state again, so the action is correct
-        even if the state changed while the context menu was open.
-        """
-        d = self.get_selected_device()
-        if not d:
-            return
-        try:
-            from .vendor_db import _list_fx_for_device, _read_vendor_entry_state, _apply_fx, _vendor_ini_default_path
-            from .logging_setup import _log
-            entries = _list_fx_for_device(d["id"], d["flow"], ini_path=_vendor_ini_default_path())
-            # Find the specific FX entry
-            entry = None
-            for e in entries:
-                if str(e.get("fx_name") or "").strip().lower() == str(fx_name).strip().lower():
-                    entry = e.get("entry")
-                    break
-            if not entry:
-                messagebox.showwarning("FX Toggle", f"Effect '{fx_name}' is not currently learned for this device.")
-                _log(f"GUI action: toggle-fx unavailable id={d['id']} name={d['name']} fx={fx_name}")
-                return
-            current = None
-            try:
-                current = _read_vendor_entry_state(entry, d["id"], d["flow"])
-            except Exception:
-                current = None
-            # Decide the new desired state based on current live state
-            if current is True:
-                enable = False
-            elif current is False:
-                enable = True
-            else:
-                # Unknown -> choose enable as a safe default
-                enable = True
-            _log(f"GUI action: toggle-fx start id={d['id']} name={d['name']} fx={fx_name} current={current} target={enable}")
-            ok, verified_by, state = _apply_fx(
-                d["id"], d["flow"], fx_name, enable,
-                ini_path=_vendor_ini_default_path()
-            )
-            # Print the CLI equivalent
-            self.maybe_print_cli(f'audioctl enhancements --id "{d["id"]}" --flow {d["flow"]} --{"enable-fx" if enable else "disable-fx"} "{fx_name}"')
-            if ok:
-                state_txt = "enabled" if state else "disabled"
-                self.set_status(f"{fx_name} {state_txt} for: {d['name']}")
-                _log(f"GUI action: toggle-fx success id={d['id']} name={d['name']} fx={fx_name} final={state}")
-            else:
-                messagebox.showwarning(
-                    "FX Toggle Failed",
-                    f"Could not toggle effect '{fx_name}'.\n"
-                    "It may have been removed or is not properly learned for this device."
-                )
-                self.set_status(f"Failed to toggle {fx_name}")
-                _log(f"GUI action: toggle-fx failed id={d['id']} name={d['name']} fx={fx_name}")
         except Exception as e:
             from .logging_setup import _log
             messagebox.showerror("Error", f"Failed to toggle {fx_name}:\n{e}")
             self.set_status(f"Error toggling {fx_name}")
-            _log(f"GUI action: toggle-fx error id={d['id']} name={d['name']} fx={fx_name} err={e}")
+            _log(f"GUI action: toggle-fx via CLI exception id={d['id']} name={d['name']} fx={fx_name} err={e}")
 def launch_gui():
-    try:
-        # Use the library's own initializer
-        comtypes.CoInitialize()
-    except Exception:
-        pass
     _log("launch_gui: creating Tk root")
     root = tk.Tk()
     try:
@@ -1357,14 +1206,4 @@ def launch_gui():
     except Exception:
         _log_exc("MAINLOOP EXCEPTION")
     _log("launch_gui: mainloop exited")
-    
-    try:
-        # Use the library's own uninitializer.
-        # This correctly handles cleanup at process exit.
-        comtypes.CoUninitialize()
-    except Exception:
-        pass
-        
     return 0
-
-
