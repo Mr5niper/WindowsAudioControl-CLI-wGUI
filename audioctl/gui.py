@@ -933,8 +933,8 @@ class AudioGUI:
             self.set_status("Learn Enhancements: CLI error")
     def _learn_fx_toggle_via_cli(self, d, fx_name):
         """
-        Delegate 'Learn FX' for a specific effect entirely to CLI:
-          audioctl enhancements --id "<id>" --flow "<flow>" --learn-fx "<FX_NAME>"
+        Learn FX via CLI protocol mode:
+          enhancements --learn-fx FX --mode protocol --stage promptA/doA/promptB/doB
         """
         from .logging_setup import _log
         try:
@@ -943,59 +943,103 @@ class AudioGUI:
             ini_path = "<vendor_toggles.ini>"
         warn_txt = (
             f"READ CAREFULLY\n\n"
-            f"This Learn mode will capture two registry snapshots for the effect '{fx_name}' "
-            f"and write a vendor FX entry via the CLI into:\n  {ini_path}\n\n"
+            f"This Learn mode will drive the CLI through FX learn for '{fx_name}'.\n"
+            f"CLI will write into:\n  {ini_path}\n\n"
             "From now on, this effect may be controlled via registry writes.\n\n"
-            "During Learn:\n"
-            f"- ONLY toggle the '{fx_name}' checkbox/effect.\n"
-            "- Do NOT toggle the main 'Audio Enhancements' switch.\n"
-            "- Do NOT change other audio settings.\n"
-            "- Do NOT switch devices.\n\n"
-            "Click OK to continue (the CLI will guide you), or Cancel to abort."
+            "Critical rules:\n"
+            f"- ONLY toggle the '{fx_name}' checkbox/effect\n"
+            "- Do NOT toggle the main 'Audio Enhancements' switch\n"
+            "- Do NOT change other audio settings\n"
+            "- Do NOT switch devices\n\n"
+            "Click OK to continue, or Cancel to abort."
         )
         if not messagebox.askokcancel(f"Warning – Learn FX '{fx_name}'", warn_txt):
             self.set_status(f"Learn FX '{fx_name}': aborted by user")
             _log(f"GUI action: learn-fx cancelled id={d['id']} name={d['name']} fx={fx_name}")
             return
-        cli_preview = f'audioctl enhancements --id "{d["id"]}" --flow {d["flow"]} --learn-fx "{fx_name}"'
-        self.maybe_print_cli(cli_preview)
-        _log(f"GUI action: learn-fx start via CLI id={d['id']} name={d['name']} flow={d['flow']} fx={fx_name}")
+        # Stage promptA
         try:
-            args = [
+            args_promptA = [
                 "enhancements",
                 "--id", d["id"],
                 "--flow", d["flow"],
                 "--learn-fx", fx_name,
+                "--mode", "protocol",
+                "--stage", "promptA",
             ]
-            data = run_audioctl(args, capture_json=True, expect_ok=False)
-            if "fxLearned" in data:
-                info = data["fxLearned"]
-                msg = (
-                    f"Learned FX '{fx_name}' via CLI.\n\n"
-                    f"Section: {info.get('section')}\n"
-                    f"FX:      {info.get('fx_name')}\n"
-                    f"INI:     {info.get('iniPath')}\n\n"
-                    "The effect will now appear in the context menu (via CLI list-fx)."
-                )
-                messagebox.showinfo(f"Learn FX '{fx_name}'", msg)
-                self.set_status(f"Learn FX '{fx_name}': vendor INI updated (CLI)")
-                _log(f"GUI action: learn-fx success via CLI id={d['id']} name={d['name']} fx={fx_name} info={info}")
-            else:
-                msg = (
-                    f"CLI ran but did not report a learned FX entry for '{fx_name}'.\n"
-                    "See console/log for details."
-                )
-                messagebox.showwarning(f"Learn FX '{fx_name}'", msg)
-                self.set_status(f"Learn FX '{fx_name}': CLI did not learn entry")
-                _log(f"GUI action: learn-fx unknown-cli-output id={d['id']} name={d['name']} fx={fx_name} data={data}")
-        except RuntimeError as e:
-            _log(f"GUI action: learn-fx CLI failed id={d['id']} name={d['name']} fx={fx_name} err={e}")
-            messagebox.showerror("Error", f"FX learn failed via CLI:\n{e}")
-            self.set_status(f"Learn FX '{fx_name}': CLI failed")
+            infoA = run_audioctl(args_promptA, capture_json=True, expect_ok=True)
         except Exception as e:
-            _log(f"GUI action: learn-fx CLI exception id={d['id']} name={d['name']} fx={fx_name} err={e}")
-            messagebox.showerror("Error", f"FX learn failed via CLI:\n{e}")
-            self.set_status(f"Learn FX '{fx_name}': CLI error")
+            messagebox.showerror("Error", f"FX learn prompt A failed via CLI:\n{e}")
+            self.set_status(f"Learn FX '{fx_name}': promptA failed")
+            return
+        msgA = infoA.get("message") or f"ENABLE the '{fx_name}' effect, then continue."
+        messagebox.showinfo(f"Learn FX '{fx_name}' - Step 1", msgA)
+        # Stage doA
+        try:
+            args_doA = [
+                "enhancements",
+                "--id", d["id"],
+                "--flow", d["flow"],
+                "--learn-fx", fx_name,
+                "--mode", "protocol",
+                "--stage", "doA",
+            ]
+            run_audioctl(args_doA, capture_json=True, expect_ok=True)
+        except Exception as e:
+            messagebox.showerror("Error", f"FX learn step A failed via CLI:\n{e}")
+            self.set_status(f"Learn FX '{fx_name}': step A failed")
+            return
+        # Stage promptB
+        try:
+            args_promptB = [
+                "enhancements",
+                "--id", d["id"],
+                "--flow", d["flow"],
+                "--learn-fx", fx_name,
+                "--mode", "protocol",
+                "--stage", "promptB",
+            ]
+            infoB = run_audioctl(args_promptB, capture_json=True, expect_ok=True)
+        except Exception as e:
+            messagebox.showerror("Error", f"FX learn prompt B failed via CLI:\n{e}")
+            self.set_status(f"Learn FX '{fx_name}': promptB failed")
+            return
+        msgB = infoB.get("message") or f"DISABLE the '{fx_name}' effect, then continue."
+        messagebox.showinfo(f"Learn FX '{fx_name}' - Step 2", msgB)
+        # Stage doB (finalize)
+        try:
+            args_doB = [
+                "enhancements",
+                "--id", d["id"],
+                "--flow", d["flow"],
+                "--learn-fx", fx_name,
+                "--mode", "protocol",
+                "--stage", "doB",
+            ]
+            info_final = run_audioctl(args_doB, capture_json=True, expect_ok=True)
+        except Exception as e:
+            messagebox.showerror("Error", f"FX learn step B failed via CLI:\n{e}")
+            self.set_status(f"Learn FX '{fx_name}': step B failed")
+            return
+        fx_info = info_final.get("fxLearned")
+        if fx_info:
+            msg = (
+                f"Learned FX '{fx_name}' via CLI.\n\n"
+                f"Section: {fx_info.get('section')}\n"
+                f"FX:      {fx_info.get('fx_name')}\n"
+                f"INI:     {fx_info.get('iniPath')}\n\n"
+                "The effect will now appear in the context menu."
+            )
+            messagebox.showinfo(f"Learn FX '{fx_name}'", msg)
+            self.set_status(f"Learn FX '{fx_name}': vendor INI updated")
+            _log(f"GUI action: learn-fx success via CLI protocol id={d['id']} name={d['name']} fx={fx_name} info={fx_info}")
+        else:
+            messagebox.showwarning(
+                f"Learn FX '{fx_name}'",
+                "CLI protocol completed but did not report a learned FX entry.\n"
+                "See console/log for details."
+            )
+            self.set_status(f"Learn FX '{fx_name}': CLI protocol did not learn entry")
     def open_volume_dialog(self, device_id, device_name):
         top = tk.Toplevel(self.root)
         try:
