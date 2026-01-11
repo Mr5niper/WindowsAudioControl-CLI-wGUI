@@ -932,7 +932,7 @@ class AudioGUI:
         """
         Delegate 'Learn Enhancements' for main switch to the existing CLI interactive flow:
           audioctl enhancements --id "<id>" --flow "<flow>" --learn
-        GUI hosts the prompts in messageboxes and feeds stdin accordingly.
+        GUI hosts the CLI prompts via run_audioctl_interactive and then parses the final JSON.
         """
         from .logging_setup import _log
         try:
@@ -957,96 +957,47 @@ class AudioGUI:
         cli_preview = f'audioctl enhancements --id "{d["id"]}" --flow {d["flow"]} --learn'
         self.maybe_print_cli(cli_preview)
         _log(f"GUI action: learn-main start via CLI id={d['id']} name={d['name']} flow={d['flow']}")
-        # Prompt patterns for main learn:
+        # Patterns for the main interactive CLI prompts.
+        # We don't try to parse the huge warning; we already showed our own.
         prompt_patterns = [
-            # Confirmation "I UNDERSTAND" (we auto-send it)
-            (
-                "\n> ",  # the prompt from _learn_vendor_from_discovery_and_write_ini
-                "Learn Enhancements – Confirmation",
-                "The CLI is asking you to confirm by typing:\n\nI UNDERSTAND\n\n"
-                "Click OK to proceed.",
-            ),
-            # Step 1: ENABLED -> A
+            # Step 1: ENABLED for A
             (
                 "set 'Audio Enhancements' to ENABLED",
                 "Learn Enhancements – Step 1",
                 "In Windows Sound settings, set 'Audio Enhancements' to ENABLED for this device.\n\n"
                 "Click OK to capture snapshot A.",
             ),
-            # Step 2: DISABLED -> B
+            # Step 2: DISABLED for B
             (
                 "set 'Audio Enhancements' to DISABLED",
                 "Learn Enhancements – Step 2",
                 "In Windows Sound settings, set 'Audio Enhancements' to DISABLED for this device.\n\n"
                 "Click OK to capture snapshot B.",
             ),
+            # Generic "When ready, press Enter" prompts (optional).
+            (
+                "When ready, press Enter",
+                "Learn Enhancements",
+                None,  # use CLI's line as-is if you want to show it
+            ),
         ]
-        # Slightly specialized interactive runner for main learn because first prompt requires "I UNDERSTAND"
-        if getattr(sys, "frozen", False):
-            exe = sys.executable
-            cmd = [exe, "enhancements", "--id", d["id"], "--flow", d["flow"], "--learn"]
-        else:
-            exe = sys.executable
-            cmd = [exe, "-m", "audioctl", "enhancements", "--id", d["id"], "--flow", d["flow"], "--learn"]
+        args = [
+            "enhancements",
+            "--id", d["id"],
+            "--flow", d["flow"],
+            "--learn",
+        ]
         try:
-            from .logging_setup import _dbg
-            _dbg("GUI run_audioctl_interactive(main-learn): " + shlex.join(cmd))
-        except Exception:
-            pass
-        proc = subprocess.Popen(
-            cmd,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            bufsize=1,
-        )
-        collected_out = []
-        collected_err = []
-        while True:
-            line = proc.stdout.readline()
-            if line == "":
-                break
-            collected_out.append(line)
-            # Handle prompts
-            for substring, title, custom_message in prompt_patterns:
-                if substring in line:
-                    msg_text = custom_message if custom_message is not None else line.strip()
-                    try:
-                        messagebox.showinfo(title, msg_text)
-                    except Exception:
-                        pass
-                    try:
-                        # Special case: the confirmation "I UNDERSTAND"
-                        if substring == "\n> ":
-                            proc.stdin.write("I UNDERSTAND\n")
-                        else:
-                            proc.stdin.write("\n")
-                        proc.stdin.flush()
-                    except Exception:
-                        pass
-                    break
-        remaining_out, err = proc.communicate()
-        if remaining_out:
-            collected_out.append(remaining_out)
-        if err:
-            collected_err.append(err)
-        rc = proc.returncode
-        out_text = "".join(collected_out)
-        err_text = "".join(collected_err)
-        if rc != 0:
-            _log(f"GUI action: learn-main CLI returned rc={rc} err={err_text!r} out={out_text!r}")
-            messagebox.showerror("Error", f"Learn failed via CLI (rc={rc}).\n\n{err_text or out_text}")
-            self.set_status("Learn Enhancements: CLI failed")
+            rc, out, err = run_audioctl_interactive(args, prompt_patterns, expect_ok=False)
+        except Exception as e:
+            messagebox.showerror("Error", f"Learn failed via CLI interactive flow:\n{e}")
+            self.set_status("Learn Enhancements: CLI interactive failed")
+            _log(f"GUI action: learn-main interactive error id={d['id']} name={d['name']} err={e}")
             return
-        # Try to parse vendorLearned/vendorAvailable from the final JSON output
+        # Try to parse the final JSON object (vendorLearned/vendorAvailable)
         data = None
         try:
-            # We know CLI prints one JSON object at the end (vendorLearned/vendorAvailable or error JSON)
-            # Try last JSON-looking line
-            lines = (out_text or "").splitlines()
+            lines = (out or "").splitlines()
             for raw in reversed(lines):
                 line = raw.strip()
                 if not line or not line.startswith("{"):
@@ -1065,7 +1016,7 @@ class AudioGUI:
                 "See console/log for details."
             )
             self.set_status("Learn Enhancements: CLI did not learn entry")
-            _log(f"GUI action: learn-main unknown-cli-output id={d['id']} name={d['name']} out={out_text!r} err={err_text!r}")
+            _log(f"GUI action: learn-main unknown-cli-output id={d['id']} name={d['name']} out={out!r} err={err!r}")
             return
         if "vendorLearned" in data:
             info = data["vendorLearned"]
