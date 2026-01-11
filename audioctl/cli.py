@@ -602,6 +602,106 @@ def cmd_get_enhancements(args):
         "enhancementsEnabled": state,
     }))
     return 0
+def cmd_get_device_state(args):
+    """
+    Return a combined view of device state for GUI:
+      - volume & mute
+      - listenEnabled (for capture)
+      - enhancementsEnabled (vendor-only)
+      - available FX with states
+    JSON shape:
+      {
+        "id": "...",
+        "name": "...",
+        "flow": "Render"|"Capture",
+        "volume": int or null,
+        "muted": bool or null,
+        "listenEnabled": bool or null,
+        "enhancementsEnabled": bool or null,
+        "availableFX": [
+          { "fx_name": "...", "state": true|false|null, "source": "ini"|"code" }
+        ]
+      }
+    """
+    devices = list_devices(include_all=False)
+    matches = find_devices_by_selector(
+        devices,
+        dev_id=args.id,
+        name_substr=args.name,
+        flow=args.flow,
+        regex=args.regex,
+    )
+    if not matches:
+        print("ERROR: device not found (active only)", file=sys.stderr)
+        return 3
+    if len(matches) > 1 and args.index is None:
+        print(_pretty_matches_msg("device", matches), file=sys.stderr)
+        return 4
+    buckets = _sort_and_tag_gui_indices(matches[:])
+    ordered = (buckets.get(args.flow) or []) if args.flow else (buckets["Render"] + buckets["Capture"])
+    if not ordered:
+        print("ERROR: no target device found for the specified criteria", file=sys.stderr)
+        return 4
+    if args.index is not None:
+        if args.index < 0 or args.index >= len(ordered):
+            print(f"ERROR: --index out of range (0..{len(ordered)-1})", file=sys.stderr)
+            return 4
+        target = ordered[args.index]
+    else:
+        target = ordered[0]
+    dev_id = target["id"]
+    flow   = target["flow"]
+    # Volume & mute
+    vol = get_endpoint_volume(dev_id)
+    muted = get_endpoint_mute(dev_id)
+    # Listen (only meaningful for capture)
+    listen_enabled = None
+    if flow == "Capture":
+        try:
+            listen_enabled = _get_listen_to_device_status_ps(dev_id)
+            if listen_enabled is None:
+                # One quick registry read (timeout=0 -> single check)
+                verified, reg_state = _verify_listen_via_registry(dev_id, expected_enabled=True, timeout=0.0, interval=0.0)
+                if reg_state is not None:
+                    listen_enabled = reg_state
+        except Exception:
+            listen_enabled = None
+    # Enhancements (vendor-only) + FX using vendor_db helpers
+    from .vendor_db import _get_enhancements_status_any, _list_fx_for_device, _read_vendor_entry_state
+    try:
+        enh_enabled = _get_enhancements_status_any(dev_id, flow)
+    except Exception:
+        enh_enabled = None
+    available_fx = []
+    try:
+        fx_list = _list_fx_for_device(dev_id, flow, ini_path=getattr(args, "vendor_ini", None))
+        fx_list = sorted(fx_list, key=lambda x: (x.get("fx_name") or "").lower())
+        for fx in fx_list:
+            entry = fx.get("entry")
+            state = None
+            try:
+                state = _read_vendor_entry_state(entry, dev_id, flow)
+            except Exception:
+                state = None
+            available_fx.append({
+                "fx_name": fx.get("fx_name"),
+                "state": state,
+                "source": entry.get("source", "ini")
+            })
+    except Exception:
+        available_fx = []
+    result = {
+        "id": dev_id,
+        "name": target["name"],
+        "flow": flow,
+        "volume": vol,
+        "muted": muted,
+        "listenEnabled": listen_enabled,
+        "enhancementsEnabled": enh_enabled,
+        "availableFX": available_fx,
+    }
+    print(json.dumps(result))
+    return 0
 def cmd_diag_sysfx(args):
     devices = list_devices(include_all=False)
     matches = find_devices_by_selector(devices, dev_id=args.id, name_substr=args.name, flow=args.flow, regex=args.regex)
@@ -821,6 +921,17 @@ def build_parser():
     p_ge.add_argument("--index", type=int)
     p_ge.add_argument("--regex", action="store_true")
     p_ge.set_defaults(func=cmd_get_enhancements)
+    p_gds = sub.add_parser(
+        "get-device-state",
+        help="Get current state for a device (volume, mute, listen, enhancements, FX) for GUI"
+    )
+    p_gds.add_argument("--id")
+    p_gds.add_argument("--name")
+    p_gds.add_argument("--flow", choices=["Render", "Capture"])
+    p_gds.add_argument("--index", type=int)
+    p_gds.add_argument("--regex", action="store_true")
+    p_gds.add_argument("--vendor-ini", help="Optional vendor INI path for FX lookup")
+    p_gds.set_defaults(func=cmd_get_device_state)
     p_dx = sub.add_parser(
         "diag-sysfx",
         help="Dump live Enhancements state (COM, PropertyStore, vendor toggles)"
