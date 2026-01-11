@@ -63,6 +63,76 @@ def run_audioctl(args_list, capture_json=False, expect_ok=True):
     if expect_ok and rc != 0:
         raise RuntimeError(f"audioctl failed with rc={rc}: {err or out}")
     return rc, out, err
+def run_audioctl_interactive(args_list, prompt_patterns, expect_ok=True):
+    """
+    Run 'audioctl' CLI as a subprocess, line-by-line.
+    prompt_patterns: list of (substring, title, custom_message) tuples.
+      - substring: text to look for in a stdout line.
+      - title: window title for the messagebox.
+      - custom_message: if not None, this is shown instead of the raw line.
+    When a line matches, we show a messagebox and then send '\n' to stdin.
+    Returns (rc, collected_stdout, collected_stderr).
+    """
+    if getattr(sys, "frozen", False):
+        exe = sys.executable
+        cmd = [exe] + args_list
+    else:
+        exe = sys.executable
+        cmd = [exe, "-m", "audioctl"] + args_list
+    try:
+        from .logging_setup import _dbg
+        _dbg("GUI run_audioctl_interactive: " + shlex.join(cmd))
+    except Exception:
+        pass
+    # IMPORTANT: open stdin for writing
+    proc = subprocess.Popen(
+        cmd,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        bufsize=1,  # line-buffered
+    )
+    collected_out = []
+    collected_err = []
+    # Read stdout line by line, handle prompts
+    while True:
+        line = proc.stdout.readline()
+        if line == "":
+            break  # EOF
+        collected_out.append(line)
+        handled = False
+        for substring, title, custom_message in prompt_patterns:
+            if substring in line:
+                # Decide what to show
+                msg_text = custom_message if custom_message is not None else line.strip()
+                try:
+                    messagebox.showinfo(title, msg_text)
+                except Exception:
+                    pass
+                # Simulate pressing Enter
+                try:
+                    proc.stdin.write("\n")
+                    proc.stdin.flush()
+                except Exception:
+                    pass
+                handled = True
+                break  # stop checking other patterns for this line
+        # Only prompt-specific handling is needed; other lines are just collected.
+    # Read remaining stdout/stderr
+    remaining_out, err = proc.communicate()
+    if remaining_out:
+        collected_out.append(remaining_out)
+    if err:
+        collected_err.append(err)
+    rc = proc.returncode
+    out_text = "".join(collected_out)
+    err_text = "".join(collected_err)
+    if expect_ok and rc != 0:
+        raise RuntimeError(f"audioctl interactive failed with rc={rc}: {err_text or out_text}")
+    return rc, out_text, err_text
 class AudioGUI:
     def __init__(self, root):
         self.root = root
@@ -626,7 +696,7 @@ class AudioGUI:
             from .logging_setup import _log
             _log(f"GUI action: toggle-mute error via CLI id={d['id']} name={d['name']} err={e}")
             messagebox.showerror("Error", f"Failed to toggle mute:\n{e}")
-            self.set_status("Failed to toggle mute")
+            self.set_status("Failed to change mute state")
     def on_toggle_listen(self):
         d = self.get_selected_device()
         if not d:
@@ -933,8 +1003,10 @@ class AudioGUI:
             self.set_status("Learn Enhancements: CLI error")
     def _learn_fx_toggle_via_cli(self, d, fx_name):
         """
-        Learn FX via CLI protocol mode:
-          enhancements --learn-fx FX --mode protocol --stage promptA/doA/promptB/doB
+        Delegate FX learn to the existing interactive CLI flow:
+          audioctl enhancements --learn-fx "<FX_NAME>" ...
+        GUI reads prompts from stdout and shows them in messageboxes,
+        then sends Enter to stdin.
         """
         from .logging_setup import _log
         try:
@@ -943,85 +1015,77 @@ class AudioGUI:
             ini_path = "<vendor_toggles.ini>"
         warn_txt = (
             f"READ CAREFULLY\n\n"
-            f"This Learn mode will drive the CLI through FX learn for '{fx_name}'.\n"
-            f"CLI will write into:\n  {ini_path}\n\n"
+            f"This Learn mode will use the CLI interactive flow for '{fx_name}'.\n"
+            f"CLI will write a vendor FX entry into:\n  {ini_path}\n\n"
             "From now on, this effect may be controlled via registry writes.\n\n"
-            "Critical rules:\n"
-            f"- ONLY toggle the '{fx_name}' checkbox/effect\n"
-            "- Do NOT toggle the main 'Audio Enhancements' switch\n"
-            "- Do NOT change other audio settings\n"
-            "- Do NOT switch devices\n\n"
+            "Critical rules during Learn:\n"
+            f"- ONLY toggle the '{fx_name}' checkbox/effect.\n"
+            "- Do NOT toggle the main 'Audio Enhancements' switch.\n"
+            "- Do NOT change any other audio settings.\n"
+            "- Do NOT switch devices.\n\n"
             "Click OK to continue, or Cancel to abort."
         )
         if not messagebox.askokcancel(f"Warning – Learn FX '{fx_name}'", warn_txt):
             self.set_status(f"Learn FX '{fx_name}': aborted by user")
             _log(f"GUI action: learn-fx cancelled id={d['id']} name={d['name']} fx={fx_name}")
             return
-        # Stage promptA
+        # Prompts we expect from the CLI learn-fx flow, mapped to clearer A/B messages
+        prompt_patterns = [
+            # Step A: enable FX
+            (
+                "effect to ENABLED for this device.",
+                f"Learn FX '{fx_name}' - Step 1",
+                f"ENABLE the '{fx_name}' effect for this device.\n"
+                "(Do NOT toggle the main 'Audio Enhancements' switch.)\n\n"
+                "Click OK to capture snapshot A."
+            ),
+            # Step B: disable FX
+            (
+                "to DISABLED for the same device.",
+                f"Learn FX '{fx_name}' - Step 2",
+                f"DISABLE the '{fx_name}' effect for this device.\n\n"
+                "Click OK to capture snapshot B."
+            ),
+            # Generic input prompts: just show whatever CLI says
+            (
+                "When ready, press Enter",
+                f"Learn FX '{fx_name}'",
+                None,  # use the CLI line as-is
+            ),
+        ]
+        args = [
+            "enhancements",
+            "--id", d["id"],
+            "--flow", d["flow"],
+            "--learn-fx", fx_name,
+        ]
         try:
-            args_promptA = [
-                "enhancements",
-                "--id", d["id"],
-                "--flow", d["flow"],
-                "--learn-fx", fx_name,
-                "--mode", "protocol",
-                "--stage", "promptA",
-            ]
-            infoA = run_audioctl(args_promptA, capture_json=True, expect_ok=True)
+            rc, out, err = run_audioctl_interactive(args, prompt_patterns, expect_ok=False)
         except Exception as e:
-            messagebox.showerror("Error", f"FX learn prompt A failed via CLI:\n{e}")
-            self.set_status(f"Learn FX '{fx_name}': promptA failed")
+            messagebox.showerror("Error", f"FX learn failed via CLI interactive flow:\n{e}")
+            self.set_status(f"Learn FX '{fx_name}': CLI interactive failed")
+            _log(f"GUI action: learn-fx interactive error id={d['id']} name={d['name']} fx={fx_name} err={e}")
             return
-        msgA = infoA.get("message") or f"ENABLE the '{fx_name}' effect, then continue."
-        messagebox.showinfo(f"Learn FX '{fx_name}' - Step 1", msgA)
-        # Stage doA
+        # Try to parse final fxLearned JSON if present (more precise matching)
+        fx_info = None
         try:
-            args_doA = [
-                "enhancements",
-                "--id", d["id"],
-                "--flow", d["flow"],
-                "--learn-fx", fx_name,
-                "--mode", "protocol",
-                "--stage", "doA",
-            ]
-            run_audioctl(args_doA, capture_json=True, expect_ok=True)
-        except Exception as e:
-            messagebox.showerror("Error", f"FX learn step A failed via CLI:\n{e}")
-            self.set_status(f"Learn FX '{fx_name}': step A failed")
-            return
-        # Stage promptB
-        try:
-            args_promptB = [
-                "enhancements",
-                "--id", d["id"],
-                "--flow", d["flow"],
-                "--learn-fx", fx_name,
-                "--mode", "protocol",
-                "--stage", "promptB",
-            ]
-            infoB = run_audioctl(args_promptB, capture_json=True, expect_ok=True)
-        except Exception as e:
-            messagebox.showerror("Error", f"FX learn prompt B failed via CLI:\n{e}")
-            self.set_status(f"Learn FX '{fx_name}': promptB failed")
-            return
-        msgB = infoB.get("message") or f"DISABLE the '{fx_name}' effect, then continue."
-        messagebox.showinfo(f"Learn FX '{fx_name}' - Step 2", msgB)
-        # Stage doB (finalize)
-        try:
-            args_doB = [
-                "enhancements",
-                "--id", d["id"],
-                "--flow", d["flow"],
-                "--learn-fx", fx_name,
-                "--mode", "protocol",
-                "--stage", "doB",
-            ]
-            info_final = run_audioctl(args_doB, capture_json=True, expect_ok=True)
-        except Exception as e:
-            messagebox.showerror("Error", f"FX learn step B failed via CLI:\n{e}")
-            self.set_status(f"Learn FX '{fx_name}': step B failed")
-            return
-        fx_info = info_final.get("fxLearned")
+            lines = (out or "").splitlines()
+            for line in reversed(lines):
+                line = line.strip()
+                # Quick filter: only consider lines that mention "fxLearned"
+                if '"fxLearned"' not in line:
+                    continue
+                if line.startswith("{") and line.endswith("}"):
+                    try:
+                        data = json.loads(line)
+                    except Exception:
+                        continue
+                    candidate = data.get("fxLearned")
+                    if candidate:
+                        fx_info = candidate
+                        break
+        except Exception:
+            fx_info = None
         if fx_info:
             msg = (
                 f"Learned FX '{fx_name}' via CLI.\n\n"
@@ -1032,14 +1096,15 @@ class AudioGUI:
             )
             messagebox.showinfo(f"Learn FX '{fx_name}'", msg)
             self.set_status(f"Learn FX '{fx_name}': vendor INI updated")
-            _log(f"GUI action: learn-fx success via CLI protocol id={d['id']} name={d['name']} fx={fx_name} info={fx_info}")
+            _log(f"GUI action: learn-fx success via CLI interactive id={d['id']} name={d['name']} fx={fx_name} info={fx_info}")
         else:
             messagebox.showwarning(
                 f"Learn FX '{fx_name}'",
-                "CLI protocol completed but did not report a learned FX entry.\n"
+                "CLI interactive flow completed but did not report a learned FX entry.\n"
                 "See console/log for details."
             )
-            self.set_status(f"Learn FX '{fx_name}': CLI protocol did not learn entry")
+            self.set_status(f"Learn FX '{fx_name}': no fxLearned JSON detected")
+            _log(f"GUI action: learn-fx no-json id={d['id']} name={d['name']} fx={fx_name} out={out!r} err={err!r}")
     def open_volume_dialog(self, device_id, device_name):
         top = tk.Toplevel(self.root)
         try:
