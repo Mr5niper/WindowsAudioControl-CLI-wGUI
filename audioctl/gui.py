@@ -930,8 +930,9 @@ class AudioGUI:
             self.set_status("Learn failed")
     def _learn_main_toggle_via_cli(self, d):
         """
-        Delegate 'Learn Enhancements' for main switch entirely to CLI:
+        Delegate 'Learn Enhancements' for main switch to the existing CLI interactive flow:
           audioctl enhancements --id "<id>" --flow "<flow>" --learn
+        GUI hosts the prompts in messageboxes and feeds stdin accordingly.
         """
         from .logging_setup import _log
         try:
@@ -947,8 +948,7 @@ class AudioGUI:
             "- Do NOT change other audio settings.\n"
             "- Do NOT switch devices.\n"
             "- Only toggle 'Audio Enhancements' for THIS device when prompted by the CLI.\n\n"
-            "Click OK to continue (the CLI will guide you in the console),\n"
-            "or Cancel to abort."
+            "Click OK to continue, or Cancel to abort."
         )
         if not messagebox.askokcancel("Warning – Learn writes registry (persistent)", warn_txt):
             self.set_status("Learn Enhancements: aborted by user")
@@ -957,53 +957,147 @@ class AudioGUI:
         cli_preview = f'audioctl enhancements --id "{d["id"]}" --flow {d["flow"]} --learn'
         self.maybe_print_cli(cli_preview)
         _log(f"GUI action: learn-main start via CLI id={d['id']} name={d['name']} flow={d['flow']}")
+        # Prompt patterns for main learn:
+        prompt_patterns = [
+            # Confirmation "I UNDERSTAND" (we auto-send it)
+            (
+                "\n> ",  # the prompt from _learn_vendor_from_discovery_and_write_ini
+                "Learn Enhancements – Confirmation",
+                "The CLI is asking you to confirm by typing:\n\nI UNDERSTAND\n\n"
+                "Click OK to proceed.",
+            ),
+            # Step 1: ENABLED -> A
+            (
+                "set 'Audio Enhancements' to ENABLED",
+                "Learn Enhancements – Step 1",
+                "In Windows Sound settings, set 'Audio Enhancements' to ENABLED for this device.\n\n"
+                "Click OK to capture snapshot A.",
+            ),
+            # Step 2: DISABLED -> B
+            (
+                "set 'Audio Enhancements' to DISABLED",
+                "Learn Enhancements – Step 2",
+                "In Windows Sound settings, set 'Audio Enhancements' to DISABLED for this device.\n\n"
+                "Click OK to capture snapshot B.",
+            ),
+        ]
+        # Slightly specialized interactive runner for main learn because first prompt requires "I UNDERSTAND"
+        if getattr(sys, "frozen", False):
+            exe = sys.executable
+            cmd = [exe, "enhancements", "--id", d["id"], "--flow", d["flow"], "--learn"]
+        else:
+            exe = sys.executable
+            cmd = [exe, "-m", "audioctl", "enhancements", "--id", d["id"], "--flow", d["flow"], "--learn"]
         try:
-            args = [
-                "enhancements",
-                "--id", d["id"],
-                "--flow", d["flow"],
-                "--learn",
-            ]
-            data = run_audioctl(args, capture_json=True, expect_ok=False)
-            if "vendorLearned" in data:
-                info = data["vendorLearned"]
-                msg = (
-                    "Learned a vendor toggle via CLI.\n\n"
-                    f"Section: {info.get('section')}\n"
-                    f"Value:   {info.get('value_name')}\n"
-                    f"INI:     {info.get('iniPath')}\n\n"
-                    "You can now use 'Enable/Disable Enhancements' on this device."
-                )
-                messagebox.showinfo("Learn Enhancements", msg)
-                self.set_status("Learn Enhancements: vendor learned via CLI")
-                _log(f"GUI action: learn-main success via CLI id={d['id']} name={d['name']} info={info}")
-            elif "vendorAvailable" in data:
-                info = data["vendorAvailable"]
-                msg = (
-                    "A vendor method is available for this device.\n\n"
-                    f"Vendor: {info.get('vendor')}\n"
-                    f"Value:  {info.get('value_name')}\n\n"
-                    "No new INI section was written, but this device can already be controlled."
-                )
-                messagebox.showinfo("Learn Enhancements", msg)
-                self.set_status("Learn Enhancements: vendor already available (CLI)")
-                _log(f"GUI action: learn-main vendor-available via CLI id={d['id']} name={d['name']} info={info}")
-            else:
-                messagebox.showwarning(
-                    "Learn Enhancements",
-                    "CLI ran but did not report a learned vendor entry.\n"
-                    "See console/log for details."
-                )
-                self.set_status("Learn Enhancements: CLI did not learn entry")
-                _log(f"GUI action: learn-main unknown-cli-output id={d['id']} name={d['name']} data={data}")
-        except RuntimeError as e:
-            _log(f"GUI action: learn-main CLI failed id={d['id']} name={d['name']} err={e}")
-            messagebox.showerror("Error", f"Learn failed via CLI:\n{e}")
+            from .logging_setup import _dbg
+            _dbg("GUI run_audioctl_interactive(main-learn): " + shlex.join(cmd))
+        except Exception:
+            pass
+        proc = subprocess.Popen(
+            cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
+        )
+        collected_out = []
+        collected_err = []
+        while True:
+            line = proc.stdout.readline()
+            if line == "":
+                break
+            collected_out.append(line)
+            # Handle prompts
+            for substring, title, custom_message in prompt_patterns:
+                if substring in line:
+                    msg_text = custom_message if custom_message is not None else line.strip()
+                    try:
+                        messagebox.showinfo(title, msg_text)
+                    except Exception:
+                        pass
+                    try:
+                        # Special case: the confirmation "I UNDERSTAND"
+                        if substring == "\n> ":
+                            proc.stdin.write("I UNDERSTAND\n")
+                        else:
+                            proc.stdin.write("\n")
+                        proc.stdin.flush()
+                    except Exception:
+                        pass
+                    break
+        remaining_out, err = proc.communicate()
+        if remaining_out:
+            collected_out.append(remaining_out)
+        if err:
+            collected_err.append(err)
+        rc = proc.returncode
+        out_text = "".join(collected_out)
+        err_text = "".join(collected_err)
+        if rc != 0:
+            _log(f"GUI action: learn-main CLI returned rc={rc} err={err_text!r} out={out_text!r}")
+            messagebox.showerror("Error", f"Learn failed via CLI (rc={rc}).\n\n{err_text or out_text}")
             self.set_status("Learn Enhancements: CLI failed")
-        except Exception as e:
-            _log(f"GUI action: learn-main CLI exception id={d['id']} name={d['name']} err={e}")
-            messagebox.showerror("Error", f"Learn failed via CLI:\n{e}")
-            self.set_status("Learn Enhancements: CLI error")
+            return
+        # Try to parse vendorLearned/vendorAvailable from the final JSON output
+        data = None
+        try:
+            # We know CLI prints one JSON object at the end (vendorLearned/vendorAvailable or error JSON)
+            # Try last JSON-looking line
+            lines = (out_text or "").splitlines()
+            for raw in reversed(lines):
+                line = raw.strip()
+                if not line or not line.startswith("{"):
+                    continue
+                try:
+                    data = json.loads(line)
+                except Exception:
+                    continue
+                break
+        except Exception:
+            data = None
+        if not isinstance(data, dict):
+            messagebox.showwarning(
+                "Learn Enhancements",
+                "CLI ran but did not report a learned vendor entry.\n"
+                "See console/log for details."
+            )
+            self.set_status("Learn Enhancements: CLI did not learn entry")
+            _log(f"GUI action: learn-main unknown-cli-output id={d['id']} name={d['name']} out={out_text!r} err={err_text!r}")
+            return
+        if "vendorLearned" in data:
+            info = data["vendorLearned"]
+            msg = (
+                "Learned a vendor toggle via CLI.\n\n"
+                f"Section: {info.get('section')}\n"
+                f"Value:   {info.get('value_name')}\n"
+                f"INI:     {info.get('iniPath')}\n\n"
+                "You can now use 'Enable/Disable Enhancements' on this device."
+            )
+            messagebox.showinfo("Learn Enhancements", msg)
+            self.set_status("Learn Enhancements: vendor learned via CLI")
+            _log(f"GUI action: learn-main success via CLI interactive id={d['id']} name={d['name']} info={info}")
+        elif "vendorAvailable" in data:
+            info = data["vendorAvailable"]
+            msg = (
+                "A vendor method is available for this device.\n\n"
+                f"Vendor: {info.get('vendor')}\n"
+                f"Value:  {info.get('value_name')}\n\n"
+                "No new INI section was written, but this device can already be controlled."
+            )
+            messagebox.showinfo("Learn Enhancements", msg)
+            self.set_status("Learn Enhancements: vendor already available (CLI)")
+            _log(f"GUI action: learn-main vendor-available via CLI interactive id={d['id']} name={d['name']} info={info}")
+        else:
+            messagebox.showwarning(
+                "Learn Enhancements",
+                "CLI ran but did not report a learned vendor entry.\n"
+                "See console/log for details."
+            )
+            self.set_status("Learn Enhancements: CLI did not learn entry")
+            _log(f"GUI action: learn-main unknown-json via CLI interactive id={d['id']} name={d['name']} data={data}")
     def _learn_fx_toggle_via_cli(self, d, fx_name):
         """
         Delegate FX learn to the existing interactive CLI flow:
