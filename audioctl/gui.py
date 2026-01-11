@@ -115,6 +115,9 @@ def run_audioctl_interactive(args_list, prompt_patterns, expect_ok=True):
                 # Simulate pressing Enter
                 try:
                     proc.stdin.write("\n")
+                except Exception:
+                    pass
+                try:
                     proc.stdin.flush()
                 except Exception:
                     pass
@@ -1046,12 +1049,6 @@ class AudioGUI:
                 f"DISABLE the '{fx_name}' effect for this device.\n\n"
                 "Click OK to capture snapshot B."
             ),
-            # Generic input prompts: just show whatever CLI says
-            (
-                "When ready, press Enter",
-                f"Learn FX '{fx_name}'",
-                None,  # use the CLI line as-is
-            ),
         ]
         args = [
             "enhancements",
@@ -1066,24 +1063,29 @@ class AudioGUI:
             self.set_status(f"Learn FX '{fx_name}': CLI interactive failed")
             _log(f"GUI action: learn-fx interactive error id={d['id']} name={d['name']} fx={fx_name} err={e}")
             return
-        # Try to parse final fxLearned JSON if present (more precise matching)
+        # Try to parse final fxLearned JSON if present (robust extraction even if concatenated with prompt text)
         fx_info = None
         try:
             lines = (out or "").splitlines()
-            for line in reversed(lines):
-                line = line.strip()
-                # Quick filter: only consider lines that mention "fxLearned"
+            for raw in reversed(lines):
+                line = raw.strip()
+                # Only consider lines that contain the fxLearned key
                 if '"fxLearned"' not in line:
                     continue
-                if line.startswith("{") and line.endswith("}"):
-                    try:
-                        data = json.loads(line)
-                    except Exception:
-                        continue
-                    candidate = data.get("fxLearned")
-                    if candidate:
-                        fx_info = candidate
-                        break
+                # Extract JSON substring from first '{' to last '}' in the line
+                start = line.find("{")
+                end = line.rfind("}")
+                if start == -1 or end == -1 or end <= start:
+                    continue
+                json_text = line[start:end+1]
+                try:
+                    data = json.loads(json_text)
+                except Exception:
+                    continue
+                candidate = data.get("fxLearned")
+                if candidate:
+                    fx_info = candidate
+                    break
         except Exception:
             fx_info = None
         if fx_info:
