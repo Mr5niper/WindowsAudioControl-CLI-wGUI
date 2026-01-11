@@ -157,6 +157,50 @@ def cmd_set_volume(args):
         print("ERROR: failed to set volume/mute", file=sys.stderr)
         return 1
     return 0
+def cmd_get_volume(args):
+    """
+    Get current volume and mute status for a device.
+    This is a read-only helper so the GUI (or scripts) can query state
+    without using low-level code directly.
+    """
+    devices = list_devices(include_all=False)
+    matches = find_devices_by_selector(
+        devices,
+        dev_id=args.id,
+        name_substr=args.name,
+        flow=args.flow,
+        regex=args.regex,
+    )
+    if len(matches) == 0:
+        print("ERROR: device not found (active only)", file=sys.stderr)
+        return 3
+    if len(matches) > 1 and args.index is None:
+        print("ERROR: multiple matches; specify --index", file=sys.stderr)
+        return 4
+    buckets = _sort_and_tag_gui_indices([d for d in matches])
+    flow = args.flow or (matches[0]["flow"] if matches else None)
+    ordered = (buckets.get(flow) or []) if args.flow else (buckets["Render"] + buckets["Capture"])
+    if not ordered:
+        print("ERROR: no target device found for the specified criteria", file=sys.stderr)
+        return 4
+    if args.index is not None:
+        if args.index < 0 or args.index >= len(ordered):
+            print(f"ERROR: --index out of range (0..{len(ordered)-1})", file=sys.stderr)
+            return 4
+        target = ordered[args.index]
+    else:
+        target = ordered[0]
+    vol = get_endpoint_volume(target["id"])
+    muted = get_endpoint_mute(target["id"])
+    result = {
+        "id": target["id"],
+        "name": target["name"],
+        "flow": target["flow"],
+        "volume": vol,
+        "muted": muted,
+    }
+    print(json.dumps(result))
+    return 0
 def cmd_listen(args):
     # Resolve playback target. Start with ID if it was provided.
     render_device_id = args.playback_target_id
@@ -227,6 +271,53 @@ def cmd_listen(args):
             actual_enabled_state = reg_state
             
     print(json.dumps({"listenSet": {"id": target["id"], "name": target["name"], "enabled": actual_enabled_state}}))
+    return 0
+def cmd_get_listen(args):
+    """
+    Get current 'Listen to this device' enabled/disabled state for a capture device.
+    Returns JSON:
+      { "id": "...", "name": "...", "flow": "Capture", "listenEnabled": true|false|null }
+    """
+    devices = list_devices(include_all=False)
+    matches = find_devices_by_selector(
+        devices,
+        dev_id=args.id,
+        name_substr=args.name,
+        flow="Capture",
+        regex=args.regex,
+    )
+    if len(matches) == 0:
+        print("ERROR: capture device not found (active only)", file=sys.stderr)
+        return 3
+    if len(matches) > 1 and args.index is None:
+        print("ERROR: multiple matches; specify --index", file=sys.stderr)
+        return 4
+    buckets = _sort_and_tag_gui_indices(matches[:])
+    ordered = buckets["Capture"]
+    if not ordered:
+        print("ERROR: no target device found for the specified criteria", file=sys.stderr)
+        return 4
+    if args.index is not None:
+        if args.index < 0 or args.index >= len(ordered):
+            print(f"ERROR: --index out of range (0..{len(ordered)-1})", file=sys.stderr)
+            return 4
+        target = ordered[args.index]
+    else:
+        target = ordered[0]
+    # Use low-level helper to get status (COM + registry logic)
+    state = _get_listen_to_device_status_ps(target["id"])
+    if state is None:
+        # Fallback to registry poll once
+        verified, reg_state = _verify_listen_via_registry(target["id"], expected_enabled=True, timeout=0.0, interval=0.0)
+        # Above call with timeout 0 won't loop, but reg_state may be last_state
+        if reg_state is not None:
+            state = reg_state
+    print(json.dumps({
+        "id": target["id"],
+        "name": target["name"],
+        "flow": target["flow"],
+        "listenEnabled": state,
+    }))
     return 0
 def cmd_enhancements(args):
     # Validation: exactly one operation
@@ -462,6 +553,55 @@ def cmd_enhancements(args):
         return 0
     print("ERROR: vendor toggle failed.", file=sys.stderr)
     return 1
+def cmd_get_enhancements(args):
+    """
+    Get current enhancements enabled/disabled state from vendor methods only.
+    Returns JSON:
+      {
+        "id": "...",
+        "name": "...",
+        "flow": "Render"|"Capture",
+        "enhancementsEnabled": true|false|null
+      }
+    """
+    devices = list_devices(include_all=False)
+    matches = find_devices_by_selector(
+        devices,
+        dev_id=args.id,
+        name_substr=args.name,
+        flow=args.flow,
+        regex=args.regex,
+    )
+    if not matches:
+        print("ERROR: device not found (active only)", file=sys.stderr)
+        return 3
+    if len(matches) > 1 and args.index is None:
+        print(_pretty_matches_msg("device", matches), file=sys.stderr)
+        return 4
+    buckets = _sort_and_tag_gui_indices(matches[:])
+    ordered = (buckets.get(args.flow) or []) if args.flow else (buckets["Render"] + buckets["Capture"])
+    if not ordered:
+        print("ERROR: no target device found for the specified criteria", file=sys.stderr)
+        return 4
+    if args.index is not None:
+        if args.index < 0 or args.index >= len(ordered):
+            print(f"ERROR: --index out of range (0..{len(ordered)-1})", file=sys.stderr)
+            return 4
+        target = ordered[args.index]
+    else:
+        target = ordered[0]
+    from .vendor_db import _get_enhancements_status_any
+    try:
+        state = _get_enhancements_status_any(target["id"], target["flow"])
+    except Exception:
+        state = None
+    print(json.dumps({
+        "id": target["id"],
+        "name": target["name"],
+        "flow": target["flow"],
+        "enhancementsEnabled": state,
+    }))
+    return 0
 def cmd_diag_sysfx(args):
     devices = list_devices(include_all=False)
     matches = find_devices_by_selector(devices, dev_id=args.id, name_substr=args.name, flow=args.flow, regex=args.regex)
@@ -620,7 +760,15 @@ def build_parser():
     p_sv.add_argument("--unmute", action="store_true", help="Unmute the device")
     p_sv.add_argument("--index", type=int)
     p_sv.add_argument("--regex", action="store_true")
+    p_sv.add_argument("--json", action="store_true", help="Output JSON on success (default) and minimized text on error")
     p_sv.set_defaults(func=cmd_set_volume)
+    p_gv = sub.add_parser("get-volume", help="Get endpoint volume and mute state (render or capture)")
+    p_gv.add_argument("--id")
+    p_gv.add_argument("--name")
+    p_gv.add_argument("--flow", choices=["Render", "Capture"], help="Optional filter to disambiguate")
+    p_gv.add_argument("--index", type=int)
+    p_gv.add_argument("--regex", action="store_true")
+    p_gv.set_defaults(func=cmd_get_volume)
     p_ls = sub.add_parser("listen", help="Enable/disable 'Listen to this device' (capture only)")
     p_ls.add_argument("--id", help="Device ID for the capture device.")
     p_ls.add_argument("--name", help="Substring of the device name for the capture device.")
@@ -630,7 +778,14 @@ def build_parser():
     p_ls.add_argument("--playback-target-name", nargs='?', const='', default=None, help="Optional: Render endpoint name to play through. Use without a value for 'Default Playback Device'.")
     p_ls.add_argument("--index", type=int)
     p_ls.add_argument("--regex", action="store_true")
+    p_ls.add_argument("--json", action="store_true", help="Output JSON on success (default) and minimized text on error")
     p_ls.set_defaults(func=cmd_listen)
+    p_gl = sub.add_parser("get-listen", help="Get 'Listen to this device' enabled/disabled state for a capture device")
+    p_gl.add_argument("--id", help="Device ID for the capture device.")
+    p_gl.add_argument("--name", help="Substring or regex of the device name")
+    p_gl.add_argument("--index", type=int)
+    p_gl.add_argument("--regex", action="store_true")
+    p_gl.set_defaults(func=cmd_get_listen)
     p_fx = sub.add_parser("enhancements", help="Enable/disable 'Audio Enhancements' (SysFX) on a device")
     p_fx.add_argument("--id", help="Endpoint ID")
     p_fx.add_argument("--name", help="Substring or regex of the endpoint name")
@@ -656,6 +811,16 @@ def build_parser():
     p_fx.add_argument("--json", action="store_true",
                       help="For --list-fx: output JSON instead of human-readable text")
     p_fx.set_defaults(func=cmd_enhancements)
+    p_ge = sub.add_parser(
+        "get-enhancements",
+        help="Get current enhancements enabled/disabled state for a device (vendor-only)"
+    )
+    p_ge.add_argument("--id")
+    p_ge.add_argument("--name")
+    p_ge.add_argument("--flow", choices=["Render", "Capture"])
+    p_ge.add_argument("--index", type=int)
+    p_ge.add_argument("--regex", action="store_true")
+    p_ge.set_defaults(func=cmd_get_enhancements)
     p_dx = sub.add_parser(
         "diag-sysfx",
         help="Dump live Enhancements state (COM, PropertyStore, vendor toggles)"
@@ -852,4 +1017,3 @@ def main(argv=None):
         except Exception:
             pass
     return rc
-
