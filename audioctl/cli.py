@@ -1,4 +1,3 @@
-# Path: audioctl/cli.py
 # audioctl/cli.py
 import sys
 import argparse
@@ -1162,3 +1161,4 @@ def main(argv=None):
         except Exception:
             pass
     return rc
+
