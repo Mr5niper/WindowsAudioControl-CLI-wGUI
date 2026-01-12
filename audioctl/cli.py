@@ -654,7 +654,7 @@ def cmd_get_device_state(args):
         target = ordered[0]
     dev_id = target["id"]
     flow   = target["flow"]
-    # Volume & mute (same for all devices)
+    # Volume & mute
     vol = get_endpoint_volume(dev_id)
     muted = get_endpoint_mute(dev_id)
     if muted is not None:
@@ -666,40 +666,45 @@ def cmd_get_device_state(args):
             listen_enabled = _get_listen_to_device_status_ps(dev_id)
             if listen_enabled is None:
                 # One quick registry read (timeout=0 -> single check)
-                verified, reg_state = _verify_listen_via_registry(
-                    dev_id,
-                    expected_enabled=True,
-                    timeout=0.0,
-                    interval=0.0,
-                )
+                verified, reg_state = _verify_listen_via_registry(dev_id, expected_enabled=True, timeout=0.0, interval=0.0)
                 if reg_state is not None:
                     listen_enabled = reg_state
         except Exception:
             listen_enabled = None
-    # Enhancements / FX (vendor-only), same logic for ALL devices.
-    # INI first, then built-in vendors/FX. Any errors -> enh=null, FX=[].
-    enh_enabled = None
-    available_fx = []
+    # Enhancements (vendor-only) + FX using vendor_db helpers
+    from .vendor_db import (
+        _get_enhancements_status_any,
+        _list_fx_for_device,
+        _read_vendor_entry_state,
+        _vendor_ini_default_path,
+        _enhancements_supported,
+    )
+    # Determine effective INI path (for learned vendors/FX)
+    ini_path = getattr(args, "vendor_ini", None)
+    if not ini_path:
+        try:
+            ini_path = _vendor_ini_default_path()
+        except Exception:
+            ini_path = None
+    # If no vendor toggle is known for this device yet, skip expensive lookups.
+    # This does NOT disable built-in vendors; _enhancements_supported already
+    # considers INI vendors and built-in code vendors.
+    has_vendor = False
     try:
-        from .vendor_db import (
-            _get_enhancements_status_any,
-            _list_fx_for_device,
-            _read_vendor_entry_state,
-            _vendor_ini_default_path,
-        )
-        # Resolve ini path once
-        ini_path = getattr(args, "vendor_ini", None)
-        if not ini_path:
-            try:
-                ini_path = _vendor_ini_default_path()
-            except Exception:
-                ini_path = None
-        # 1) Main enhancements state (vendor-only)
+        has_vendor = _enhancements_supported(dev_id, flow)
+    except Exception:
+        has_vendor = False
+    # Enhancements (vendor-only). If vendor not supported, or anything fails, treat as unknown.
+    if has_vendor:
         try:
             enh_enabled = _get_enhancements_status_any(dev_id, flow)
         except Exception:
             enh_enabled = None
-        # 2) FX list + states
+    else:
+        enh_enabled = None
+    # FX list with states. Only query if vendor applies; errors must not break JSON.
+    available_fx = []
+    if has_vendor:
         try:
             fx_list = _list_fx_for_device(dev_id, flow, ini_path=ini_path)
             fx_list = sorted(fx_list, key=lambda x: (x.get("fx_name") or "").lower())
@@ -717,9 +722,7 @@ def cmd_get_device_state(args):
                 })
         except Exception:
             available_fx = []
-    except Exception:
-        # Any unexpected vendor failure -> just drop enhancements info
-        enh_enabled = None
+    else:
         available_fx = []
     result = {
         "id": dev_id,
