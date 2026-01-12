@@ -44,7 +44,6 @@ from .vendor_db import (
     _list_fx_for_device,          # ADDED
     _learn_fx_and_write_ini       # ADDED
 )
-
 def cmd_list(args):
     devices = list_devices(include_all=args.all)
     buckets = _sort_and_tag_gui_indices(devices)
@@ -60,7 +59,6 @@ def cmd_list(args):
         flags = [k for k, v in d["isDefault"].items() if v]
         print(f"[{d['guiIndex']}] {d['name']}  id={d['id']}  defaults={','.join(flags) if flags else '-'}\n")
     return 0
-
 def cmd_set_default(args):
     if not is_admin():
         print("WARNING: 'set-default' might require Administrator privileges on this system.", file=sys.stderr)
@@ -111,7 +109,6 @@ def cmd_set_default(args):
             exit_code = 1
     print(json.dumps(results))
     return exit_code
-
 def cmd_set_volume(args):
     if (args.mute or args.unmute) and args.level is not None:
         print("ERROR: Cannot specify both --level and --mute/--unmute", file=sys.stderr)
@@ -160,7 +157,6 @@ def cmd_set_volume(args):
         print("ERROR: failed to set volume/mute", file=sys.stderr)
         return 1
     return 0
-
 def cmd_get_volume(args):
     """
     Get current volume and mute status for a device.
@@ -196,9 +192,6 @@ def cmd_get_volume(args):
         target = ordered[0]
     vol = get_endpoint_volume(target["id"])
     muted = get_endpoint_mute(target["id"])
-    # Normalize muted to a plain bool/null-like; don't let odd types leak
-    if muted is not None:
-        muted = bool(muted)
     result = {
         "id": target["id"],
         "name": target["name"],
@@ -208,7 +201,6 @@ def cmd_get_volume(args):
     }
     print(json.dumps(result))
     return 0
-
 def cmd_listen(args):
     # Resolve playback target. Start with ID if it was provided.
     render_device_id = args.playback_target_id
@@ -280,7 +272,6 @@ def cmd_listen(args):
             
     print(json.dumps({"listenSet": {"id": target["id"], "name": target["name"], "enabled": actual_enabled_state}}))
     return 0
-
 def cmd_get_listen(args):
     """
     Get current 'Listen to this device' enabled/disabled state for a capture device.
@@ -328,7 +319,6 @@ def cmd_get_listen(args):
         "listenEnabled": state,
     }))
     return 0
-
 def cmd_enhancements(args):
     # Validation: exactly one operation
     ops = [
@@ -563,7 +553,6 @@ def cmd_enhancements(args):
         return 0
     print("ERROR: vendor toggle failed.", file=sys.stderr)
     return 1
-
 def cmd_get_enhancements(args):
     """
     Get current enhancements enabled/disabled state from vendor methods only.
@@ -613,7 +602,6 @@ def cmd_get_enhancements(args):
         "enhancementsEnabled": state,
     }))
     return 0
-
 def cmd_get_device_state(args):
     """
     Return a combined view of device state for GUI:
@@ -666,6 +654,8 @@ def cmd_get_device_state(args):
     # Volume & mute
     vol = get_endpoint_volume(dev_id)
     muted = get_endpoint_mute(dev_id)
+    if muted is not None:
+        muted = bool(muted)
     # Listen (only meaningful for capture)
     listen_enabled = None
     if flow == "Capture":
@@ -679,28 +669,14 @@ def cmd_get_device_state(args):
         except Exception:
             listen_enabled = None
     # Enhancements (vendor-only) + FX using vendor_db helpers
-    from .vendor_db import (
-        _get_enhancements_status_any,
-        _list_fx_for_device,
-        _read_vendor_entry_state,
-        _vendor_ini_default_path,
-    )
-    # Determine effective INI path (for learned vendors/FX)
-    ini_path = getattr(args, "vendor_ini", None)
-    if not ini_path:
-        try:
-            ini_path = _vendor_ini_default_path()
-        except Exception:
-            ini_path = None
-    # Enhancements (vendor-only). If anything fails, fall back to None
+    from .vendor_db import _get_enhancements_status_any, _list_fx_for_device, _read_vendor_entry_state
     try:
         enh_enabled = _get_enhancements_status_any(dev_id, flow)
     except Exception:
         enh_enabled = None
-    # FX list with states. Any errors here must not break the rest of the JSON.
     available_fx = []
     try:
-        fx_list = _list_fx_for_device(dev_id, flow, ini_path=ini_path)
+        fx_list = _list_fx_for_device(dev_id, flow, ini_path=getattr(args, "vendor_ini", None))
         fx_list = sorted(fx_list, key=lambda x: (x.get("fx_name") or "").lower())
         for fx in fx_list:
             entry = fx.get("entry")
@@ -728,7 +704,6 @@ def cmd_get_device_state(args):
     }
     print(json.dumps(result))
     return 0
-
 def cmd_diag_sysfx(args):
     devices = list_devices(include_all=False)
     matches = find_devices_by_selector(devices, dev_id=args.id, name_substr=args.name, flow=args.flow, regex=args.regex)
@@ -762,7 +737,6 @@ def cmd_diag_sysfx(args):
         "vendor_toggle_status": {vend_tag or "None Found": vend_state}
     }, indent=2))
     return 0
-
 def cmd_discover_enhancements(args):
     devices = list_devices(include_all=False)
     matches = find_devices_by_selector(devices, dev_id=args.id, name_substr=args.name, flow=args.flow, regex=args.regex)
@@ -836,7 +810,6 @@ def cmd_discover_enhancements(args):
     print(f"  TXT  -> {txt_path}")
     print(f"  JSON -> {json_path}")
     return 0
-
 def cmd_wait(args):
     deadline = time.time() + args.timeout
     while time.time() < deadline:
@@ -861,7 +834,6 @@ def cmd_wait(args):
         time.sleep(0.5)
     print("ERROR: timeout waiting for device", file=sys.stderr)
     return 3
-
 def build_parser():
     p = argparse.ArgumentParser(prog="audioctl", description="Windows audio control CLI (pycaw-based)")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -1001,7 +973,6 @@ def build_parser():
     p_vi.add_argument("--work", required=True, help=argparse.SUPPRESS)  # path to JSON work order
     p_vi.set_defaults(func=cmd_vendor_ini_append)
     return p
-
 def cmd_diag_mmdevices(args):
     devices = list_devices(include_all=False)
     matches = find_devices_by_selector(devices, dev_id=args.id, name_substr=args.name, flow=args.flow, regex=args.regex)
@@ -1029,7 +1000,6 @@ def cmd_diag_mmdevices(args):
     dump = _dump_mmdevices_all_values(target["id"])
     print(json.dumps({"id": target["id"], "name": target["name"], "flow": target["flow"], "mmdevices": dump}, indent=2))
     return 0
-
 def cmd_vendor_ini_append(args):
     try:
         with open(args.work, "r", encoding="utf-8") as f:
@@ -1089,7 +1059,6 @@ def cmd_vendor_ini_append(args):
     except Exception as e:
         print(f"ERROR: failed to append INI: {e}", file=sys.stderr)
         return 1
-
 def main(argv=None):
     if argv is None and len(sys.argv) <= 1:
         try:
@@ -1161,4 +1130,3 @@ def main(argv=None):
         except Exception:
             pass
     return rc
-
