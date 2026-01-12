@@ -16,24 +16,6 @@ from .compat import is_admin
 from .vendor_db import (
     _vendor_ini_default_path,
 )
-import ctypes
-from ctypes import wintypes
-def _set_appusermodel_id(appid: str):
-    """
-    Set a Windows AppUserModelID for this process so the taskbar uses the
-    executable's icon (audioctl.exe) instead of the Python default.
-    Safe no-op on non-Windows.
-    """
-    try:
-        if not sys.platform.startswith("win"):
-            return
-        SetCurrentProcessExplicitAppUserModelID = ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID
-        SetCurrentProcessExplicitAppUserModelID.restype = wintypes.HRESULT
-        SetCurrentProcessExplicitAppUserModelID.argtypes = [wintypes.LPCWSTR]
-        SetCurrentProcessExplicitAppUserModelID(appid)
-    except Exception:
-        # Don't crash GUI if this fails
-        pass
 def run_audioctl(args_list, capture_json=False, expect_ok=True):
     """
     Run 'audioctl' CLI as a subprocess.
@@ -1332,19 +1314,12 @@ class AudioGUI:
             _log(f"GUI action: toggle-fx via CLI exception id={d['id']} name={d['name']} fx={fx_name} err={e}")
 def launch_gui():
     _log("launch_gui: creating Tk root")
-    # Ensure Windows taskbar uses our EXE's icon (when frozen)
-    _set_appusermodel_id("audioctl.gui.1.4.5.0")
     root = tk.Tk()
     try:
         if sys.platform.startswith("win"):
             root.iconbitmap(resource_path("audio.ico"))
     except Exception:
-        # If audio.ico can't be used (e.g., path/permissions), fall back
-        # to the EXE's icon so we don't get the generic Tk icon.
-        try:
-            root.iconbitmap("")
-        except Exception:
-            pass
+        pass
     gui = AudioGUI(root)
     def _on_root_close():
         try:
