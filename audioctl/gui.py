@@ -496,19 +496,33 @@ class AudioGUI:
             self._pending_enh = None
             enh_label = self.enh_menu_default_label
             current_enh_state = None
+            enh_state_from_cli = None
             if isinstance(state, dict):
-                current_enh_state = state.get("enhancementsEnabled", None)
-                if current_enh_state is True:
-                    enh_label = "Disable Enhancements"
-                elif current_enh_state is False:
-                    enh_label = "Enable Enhancements"
+                enh_state_from_cli = state.get("enhancementsEnabled", None)
+            if enh_state_from_cli is True:
+                enh_label = "Disable Enhancements"
+                enh_state_normalized = True
+                enh_state_enabled = True
+                enh_menu_state = "normal"
+            elif enh_state_from_cli is False:
+                enh_label = "Enable Enhancements"
+                enh_state_normalized = False
+                enh_state_enabled = True
+                enh_menu_state = "normal"
+            else:
+                # No vendor toggle available (CLI reported null): disable menu item.
+                enh_label = "Enhancements (no vendor toggle)"
+                enh_state_normalized = None
+                enh_state_enabled = False
+                enh_menu_state = "disabled"
             # Remember state for click-time toggling
             self._pending_enh = {
                 "id": d["id"],
                 "flow": d["flow"],
-                "current": current_enh_state,
+                "current": enh_state_normalized,
+                "supported": enh_state_enabled,
             }
-            self.menu.entryconfig(self.enh_menu_index, label=enh_label, state="normal")
+            self.menu.entryconfig(self.enh_menu_index, label=enh_label, state=enh_menu_state)
     
             # Enhancement Effects submenu via combined state
             try:
@@ -768,9 +782,21 @@ class AudioGUI:
             _log(f"Enhancements toggle requested for {d['name']} ({d['id']})")
             # Use the state captured when the context menu was built, if available
             st = None
+            supported = True
             pe = getattr(self, "_pending_enh", None)
             if pe and pe.get("id") == d["id"] and pe.get("flow") == d["flow"]:
                 st = pe.get("current", None)
+                supported = pe.get("supported", True)
+            # If GUI knows there is no vendor toggle, do not call CLI and inform the user.
+            if not supported:
+                messagebox.showinfo(
+                    "Enhancements not learned",
+                    "No vendor method is available for 'Audio Enhancements' on this device yet.\n\n"
+                    "Use 'Learn Enhancements' first, then try again."
+                )
+                self.set_status("Enhancements: no vendor toggle for this device")
+                _log(f"Enhancements toggle aborted (no vendor toggle) for {d['name']} ({d['id']})")
+                return
             # Decide target: invert current state if known; else, ask user
             if st is True:
                 enable = False
