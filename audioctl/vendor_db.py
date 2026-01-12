@@ -1,3 +1,4 @@
+# Path: audioctl/vendor_db.py
 # audioctl/vendor_db.py
 import os
 import re
@@ -21,12 +22,14 @@ from .devices import (
     _verify_effect_only, # Used by auto-learn to confirm Windows changes
     _dump_mmdevices_all_values,
 )
+
 # --- Helpers for multi-write FX entries ---
 def _reg_type_to_name(typ: int) -> str:
     if typ == winreg.REG_DWORD: return "REG_DWORD"
     if typ == winreg.REG_SZ:    return "REG_SZ"
     if typ == winreg.REG_BINARY:return "REG_BINARY"
     return f"REG_{typ}"
+
 def _reg_name_to_type(name: str) -> int:
     nm = (name or "").strip().upper()
     if nm == "REG_DWORD":  return winreg.REG_DWORD
@@ -34,10 +37,12 @@ def _reg_name_to_type(name: str) -> int:
     if nm == "REG_BINARY": return winreg.REG_BINARY
     # Fallback; unsupported types will be ignored gracefully
     raise ValueError(f"Unsupported registry type: {name}")
+
 def _format_bin_hex(data_hex_no_prefix: str) -> str:
     """Return 'hex:' form for INI readability from raw hex (no prefix)."""
     h = data_hex_no_prefix or ""
     return "hex:" + ",".join(h[i:i+2] for i in range(0, len(h), 2))
+
 def _parse_bin_hex(text: str) -> bytes:
     """
     Accepts:
@@ -52,13 +57,16 @@ def _parse_bin_hex(text: str) -> bytes:
     if t == "":
         return b""
     return bytes.fromhex(t)
+
 def _key_tuple(rec):
     return (str(rec.get("hive")), str(rec.get("flow")), str(rec.get("subkey")), str(rec.get("name")))
+
 def _index_registry_list(lst):
     idx = {}
     for e in (lst or []):
         idx[_key_tuple(e)] = e
     return idx
+
 def _build_fx_multiwrite_from_snapshots(target, snapA, snapB):
     """
     Build a comprehensive multi-write plan from two snapshots (A=enabled, B=disabled).
@@ -116,6 +124,14 @@ def _build_fx_multiwrite_from_snapshots(target, snapA, snapB):
             "disable": v_disable,
         })
     return writes
+
+# --- Lightweight vendor DB cache (path + mtime -> parsed data) ---
+_VENDOR_DB_CACHE = {
+    "path": None,
+    "mtime": None,
+    "data": {"main": [], "fx": []},
+}
+
 # Code vendor entries (Realtek, etc.)
 _CODE_VENDOR_ENTRIES = [
     {
@@ -128,6 +144,7 @@ _CODE_VENDOR_ENTRIES = [
         "notes": "Realtek/Waves primary DWORD toggle (0=enabled,1=disabled)"
     },
 ]
+
 # Built-in FX vendor entries (used only if no learned INI entry exists for the same FX)
 _CODE_FX_ENTRIES = [
     {
@@ -175,6 +192,7 @@ _CODE_FX_ENTRIES = [
         "notes": "Intel SST default FX: Acoustic Echo Cancellation"
     },
 ]
+
 def _vendor_ini_default_path():
     """
     Return a default vendor_toggles.ini path:
@@ -216,23 +234,55 @@ def _vendor_ini_default_path():
     except Exception:
         pass
     return os.path.join(fallback_dir, "vendor_toggles.ini")
+
 def _load_vendor_db_split(ini_path=None):
-    """Load vendor toggles from INI. Returns dict with 'main' and 'fx' lists."""
-    path = ini_path or _vendor_ini_default_path()
+    """
+    Load vendor toggles from INI. Returns dict with 'main' and 'fx' lists.
+    Uses a lightweight cache keyed by (absolute path, mtime) so we don't
+    re-parse or re-fail on a missing file for every CLI call.
+    """
+    global _VENDOR_DB_CACHE
+    # Resolve path
+    path = os.path.abspath(ini_path or _vendor_ini_default_path())
+    # Check file existence & mtime up front
+    try:
+        st = os.stat(path)
+        mtime = st.st_mtime
+        exists = True
+    except OSError:
+        exists = False
+        mtime = None
+    # If file does not exist, cache and return empty DB
+    if not exists:
+        if (_VENDOR_DB_CACHE.get("path") == path and
+                _VENDOR_DB_CACHE.get("mtime") is None):
+            # Already know it's missing; reuse empty DB
+            return _VENDOR_DB_CACHE.get("data") or {"main": [], "fx": []}
+        _VENDOR_DB_CACHE["path"] = path
+        _VENDOR_DB_CACHE["mtime"] = None
+        _VENDOR_DB_CACHE["data"] = {"main": [], "fx": []}
+        return _VENDOR_DB_CACHE["data"]
+    # If path and mtime match cache, reuse parsed DB
+    if (_VENDOR_DB_CACHE.get("path") == path and
+            _VENDOR_DB_CACHE.get("mtime") == mtime):
+        return _VENDOR_DB_CACHE.get("data") or {"main": [], "fx": []}
+    # Otherwise parse INI fresh (same logic as before)
     cfg = configparser.ConfigParser()
     entries = {"main": [], "fx": []}
     try:
-        if not os.path.exists(path):
-            return entries
         cfg.read(path, encoding="utf-8")
     except Exception:
+        # On read failure, cache empty DB so we don't hammer again
+        _VENDOR_DB_CACHE["path"] = path
+        _VENDOR_DB_CACHE["mtime"] = mtime
+        _VENDOR_DB_CACHE["data"] = entries
         return entries
     for sec in cfg.sections():
         try:
             entry_type = cfg.get(sec, "type", fallback="main").strip().lower()
             notes = cfg.get(sec, "notes", fallback="")
             if entry_type == "fx":
-                # FX entry: could be single-DWORD or multi-write
+                # FX entry: could be single-DWORD or multi-write (existing behavior)
                 fx_name = cfg.get(sec, "fx_name", fallback="").strip()
                 devpat = cfg.get(sec, "device_name_pattern", fallback="").strip()
                 if not fx_name or not devpat:
@@ -246,7 +296,6 @@ def _load_vendor_db_split(ini_path=None):
                 }
                 multi_write = cfg.get(sec, "multi_write", fallback="0").strip()
                 if multi_write in ("1", "true", "yes"):
-                    # Multi-write form
                     write_count = int(cfg.get(sec, "write_count", fallback="0") or "0")
                     decider_index = int(cfg.get(sec, "decider_index", fallback="1") or "1")
                     quorum_text = cfg.get(sec, "quorum_threshold", fallback="0.60").strip()
@@ -279,11 +328,9 @@ def _load_vendor_db_split(ini_path=None):
                     e["writes"] = writes
                     e["decider_index"] = max(1, decider_index)
                     e["quorum_threshold"] = quorum_threshold
-                    # Optional scoping for listing (not used for clicking)
                     e["flows"] = [x.strip().capitalize() for x in cfg.get(sec, "flows", fallback="Render,Capture").split(",") if x.strip()]
                     e["hives"] = [x.strip().upper() for x in cfg.get(sec, "hives", fallback="HKLM,HKCU").split(",") if x.strip()]
                 else:
-                    # Single-DWORD classic FX
                     value_name = cfg.get(sec, "value_name").strip().lower()
                     en = int(cfg.get(sec, "dword_enable"))
                     di = int(cfg.get(sec, "dword_disable"))
@@ -299,7 +346,7 @@ def _load_vendor_db_split(ini_path=None):
                     e["multi_write"] = False
                 entries["fx"].append(e)
             else:
-                # MAIN entry (unchanged)
+                # MAIN entry (same behavior as before)
                 value_name = cfg.get(sec, "value_name").strip().lower()
                 en = int(cfg.get(sec, "dword_enable"))
                 di = int(cfg.get(sec, "dword_disable"))
@@ -320,8 +367,12 @@ def _load_vendor_db_split(ini_path=None):
                 entries["main"].append(entry)
         except Exception:
             continue
+    # Update cache with newly parsed DB
+    _VENDOR_DB_CACHE["path"] = path
+    _VENDOR_DB_CACHE["mtime"] = mtime
+    _VENDOR_DB_CACHE["data"] = entries
     return entries
-    
+
 def _endpoint_fx_key(device_id, flow):
     guid = _extract_endpoint_guid_from_device_id(device_id)
     if not guid:
@@ -329,6 +380,7 @@ def _endpoint_fx_key(device_id, flow):
     flow_name = "Render" if str(flow).lower().startswith("r") else "Capture"
     key_path = rf"SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\{flow_name}\{guid}\FxProperties"
     return flow_name, key_path
+
 def _vendor_entry_applies(entry, device_id, flow):
     """
     Return True if entry.flow matches and REG_DWORD value exists under any listed hive for this endpoint.
@@ -352,6 +404,7 @@ def _vendor_entry_applies(entry, device_id, flow):
         except OSError:
             continue
     return False
+
 def _set_vendor_entry_state(entry, device_id, flow, enable):
     """
     Write vendor entry DWORD to desired value across its configured hives. Returns True if any write succeeded.
@@ -370,6 +423,7 @@ def _set_vendor_entry_state(entry, device_id, flow, enable):
         except OSError:
             continue
     return ok
+
 def _append_fx_ini_entry(ini_path, section_name, fx_name, device_name,
                          value_name, dword_enable, dword_disable,
                          flows, hives, notes):
@@ -404,6 +458,7 @@ def _append_fx_ini_entry(ini_path, section_name, fx_name, device_name,
     ]
     with open(ini_path, "a", encoding="utf-8", errors="replace") as f:
         f.write("\n".join(lines) + "\n")
+
 def _append_fx_ini_entry_multi(ini_path, section_name, fx_name, device_name, writes, notes=""):
     """
     Append an FX multi-write section. Raises ValueError if section exists.
@@ -462,6 +517,7 @@ def _append_fx_ini_entry_multi(ini_path, section_name, fx_name, device_name, wri
         lines.append(f"notes = {notes}")
     with open(ini_path, "a", encoding="utf-8", errors="replace") as f:
         f.write("\n".join(lines) + "\n")
+
 def _read_vendor_entry_state(entry, device_id, flow):
     """
     Return True if current state equals 'enable' value, False if equals 'disable', None otherwise.
@@ -513,6 +569,7 @@ def _read_vendor_entry_state(entry, device_id, flow):
         if v == entry.get("disable"):
             return False
     return None
+
 def _verify_vendor_entry(entry, device_id, flow, expected_enabled, timeout=2.5, interval=0.2, consecutive=2):
     """
     Poll the same vendor DWORD until it reflects expected_enabled for 'consecutive' reads or timeout.
@@ -531,6 +588,7 @@ def _verify_vendor_entry(entry, device_id, flow, expected_enabled, timeout=2.5, 
             ok_streak = 0
         time.sleep(interval)
     return False, last
+
 def _try_vendor_first(device_id, flow, enable, ini_path=None):
     """
     Try MAIN vendor entries from INI first, then built-in code vendors.
@@ -561,6 +619,7 @@ def _try_vendor_first(device_id, flow, enable, ini_path=None):
         except Exception:
             continue
     return False, None, None
+
 def _find_first_vendor_entry(device_id, flow, ini_path=None):
     """
     Read-only: return the first MAIN vendor entry that applies to this endpoint.
@@ -581,10 +640,12 @@ def _find_first_vendor_entry(device_id, flow, ini_path=None):
         except Exception:
             continue
     return None
+
 def _sanitize_ini_section_name(value_name: str):
     # e.g. "{1da5d803-...},5" -> "vendor_{1da5d803-...},5"
     base = re.sub(r'[^A-Za-z0-9_,\-{}]+', "_", value_name)
     return f"vendor_{base}"
+
 def _append_vendor_ini_entry_if_missing(ini_path, section_name, value_name, dword_enable, dword_disable,
                                         flows="Render,Capture", hives="HKCU,HKLM", notes=""):
     """
@@ -618,6 +679,7 @@ def _append_vendor_ini_entry_if_missing(ini_path, section_name, value_name, dwor
     with open(ini_path, "a", encoding="utf-8", errors="replace") as f:
         f.write(text)
     return "appended"
+
 def _build_vendor_ini_snippet(target, snapA, snapB, diffs, section_name=None):
     """
     Build a suggested vendor INI section based on DWORD flips observed.
@@ -658,6 +720,7 @@ def _build_vendor_ini_snippet(target, snapA, snapB, diffs, section_name=None):
     snippet.append(f"flows = {flows_all}")
     snippet.append(f"notes = {notes}")
     return "\n".join(snippet) + "\n", pick
+
 def _collect_registry_samples(device_id, repeats=3, delay=0.15):
     """
     Collect several registry-only samples for the current device state to filter UI noise.
@@ -672,6 +735,7 @@ def _collect_registry_samples(device_id, repeats=3, delay=0.15):
         if i + 1 < repeats:
             _short_settle(delay)
     return samples
+
 def _stable_registry_map(samples):
     """
     From a list of registry dumps (lists of rec dicts), build a stability map:
@@ -701,6 +765,7 @@ def _stable_registry_map(samples):
         if info["ok"] and info["seen"] == total:
             out[k] = {"type": info["type"], "value": info["value"]}
     return out
+
 def _build_fx_multiwrite_from_stable_maps(target, stableA, stableB):
     """
     Build multi-write entries from stability-filtered maps:
@@ -759,6 +824,7 @@ def _build_fx_multiwrite_from_stable_maps(target, stableA, stableB):
         return score
     writes.sort(key=_score, reverse=True)
     return writes
+
 def _learn_vendor_from_discovery_and_write_ini(target, ini_path=None, prefer_hkcu=True):
     """
     Manual learn using discovery flow.
@@ -819,6 +885,7 @@ I UNDERSTAND
         "dword_enable": dword_enable,
         "dword_disable": dword_disable
     }
+
 def _learn_vendor_and_write_ini(target, ini_path=None):
     """
     Auto-learn a vendor DWORD toggle for target {'id','name','flow'}.
@@ -894,6 +961,7 @@ Type exactly: I UNDERSTAND
         "dword_enable": dword_enable,
         "dword_disable": dword_disable
     }
+
 def _get_enhancements_status_any(device_id, flow):
     """
     Best-effort read for display (GUI/labels), vendor-only:
@@ -913,12 +981,14 @@ def _get_enhancements_status_any(device_id, flow):
     except Exception:
         pass
     return None
+
 def _endpoint_base_path(device_id, flow, subkey):
     guid = _extract_endpoint_guid_from_device_id(device_id)
     if not guid:
         return None
     flow_name = "Render" if str(flow).lower().startswith("r") else "Capture"
     return rf"SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\{flow_name}\{guid}\{subkey}"
+
 def _perform_multi_writes(entry, device_id, flow, enable):
     """
     Write all configured values for enable/disable.
@@ -966,6 +1036,7 @@ def _perform_multi_writes(entry, device_id, flow, enable):
             ok_all = False
             continue
     return ok_all
+
 def _read_decider_state(entry, device_id, flow):
     """
     Read current FX state based on the configured decider write item.
@@ -1081,9 +1152,11 @@ def _read_decider_state(entry, device_id, flow):
         if state is not None:
             return state
     return None
+
 def _dump_mmdevices_all_values_for_fx_learn(device_id):
     # Deprecated in favor of _dump_mmdevices_all_values from devices.py
     return _dump_mmdevices_all_values(device_id)
+
 def _learn_fx_and_write_ini(target, fx_name, snapA, snapB, ini_path=None, prefer_hkcu=True):
     """
     Pure logic: Learn an FX toggle from two pre-captured snapshots.
@@ -1157,6 +1230,7 @@ def _learn_fx_and_write_ini(target, fx_name, snapA, snapB, ini_path=None, prefer
         "dword_enable": dword_enable,
         "dword_disable": dword_disable
     }
+
 def _list_fx_for_device(device_id, flow, ini_path=None):
     """List all available FX for a device (learned INI first, then code defaults). Returns [{'fx_name','entry'}]."""
     from .devices import list_devices
@@ -1200,6 +1274,7 @@ def _list_fx_for_device(device_id, flow, ini_path=None):
                     "entry": e
                 })
     return available_fx
+
 def _find_fx_for_device(device_id, flow, fx_name, ini_path=None):
     """Find FX entries matching device and effect name. Learned INI entries first, then built-in code entries."""
     from .devices import list_devices
@@ -1231,6 +1306,7 @@ def _find_fx_for_device(device_id, flow, fx_name, ini_path=None):
                 e["source"] = "code"
                 matches.append(e)
     return matches
+
 def _apply_enhancements(device_id, flow, enable, prefer_hklm=False, allow_universal_scan=False, vendor_ini_path=None):
     """
     Vendor-only policy:
@@ -1241,6 +1317,7 @@ def _apply_enhancements(device_id, flow, enable, prefer_hklm=False, allow_univer
     if ok_v:
         return True, tag_v, state_v
     return False, "no-vendor-method", None
+
 def _enhancements_supported(device_id, flow):
     """
     Returns True if any vendor entry applies:
@@ -1252,6 +1329,7 @@ def _enhancements_supported(device_id, flow):
         return True if vend else False
     except Exception:
         return False
+
 def _apply_fx(device_id, flow, fx_name, enable, ini_path=None):
     """
     Toggle a learned or built-in FX effect.
