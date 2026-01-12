@@ -192,6 +192,9 @@ def cmd_get_volume(args):
         target = ordered[0]
     vol = get_endpoint_volume(target["id"])
     muted = get_endpoint_mute(target["id"])
+    # Normalize muted to a plain bool/null-like; don't let odd types leak
+    if muted is not None:
+        muted = bool(muted)
     result = {
         "id": target["id"],
         "name": target["name"],
@@ -669,28 +672,57 @@ def cmd_get_device_state(args):
         except Exception:
             listen_enabled = None
     # Enhancements (vendor-only) + FX using vendor_db helpers
-    from .vendor_db import _get_enhancements_status_any, _list_fx_for_device, _read_vendor_entry_state
+    from .vendor_db import (
+        _get_enhancements_status_any,
+        _list_fx_for_device,
+        _read_vendor_entry_state,
+        _vendor_ini_default_path,
+        _enhancements_supported,
+    )
+    # Determine effective INI path (for learned vendors/FX)
+    ini_path = getattr(args, "vendor_ini", None)
+    if not ini_path:
+        try:
+            ini_path = _vendor_ini_default_path()
+        except Exception:
+            ini_path = None
+    # If no vendor toggle is known for this device yet, skip expensive lookups.
+    # This does NOT disable built-in vendors; _enhancements_supported already
+    # considers INI vendors and built-in code vendors.
+    has_vendor = False
     try:
-        enh_enabled = _get_enhancements_status_any(dev_id, flow)
+        has_vendor = _enhancements_supported(dev_id, flow)
     except Exception:
+        has_vendor = False
+    # Enhancements (vendor-only). If vendor not supported, or anything fails, treat as unknown.
+    if has_vendor:
+        try:
+            enh_enabled = _get_enhancements_status_any(dev_id, flow)
+        except Exception:
+            enh_enabled = None
+    else:
         enh_enabled = None
+    # FX list with states. Only query if vendor applies; errors must not break JSON.
     available_fx = []
-    try:
-        fx_list = _list_fx_for_device(dev_id, flow, ini_path=getattr(args, "vendor_ini", None))
-        fx_list = sorted(fx_list, key=lambda x: (x.get("fx_name") or "").lower())
-        for fx in fx_list:
-            entry = fx.get("entry")
-            state = None
-            try:
-                state = _read_vendor_entry_state(entry, dev_id, flow)
-            except Exception:
+    if has_vendor:
+        try:
+            fx_list = _list_fx_for_device(dev_id, flow, ini_path=ini_path)
+            fx_list = sorted(fx_list, key=lambda x: (x.get("fx_name") or "").lower())
+            for fx in fx_list:
+                entry = fx.get("entry")
                 state = None
-            available_fx.append({
-                "fx_name": fx.get("fx_name"),
-                "state": state,
-                "source": entry.get("source", "ini")
-            })
-    except Exception:
+                try:
+                    state = _read_vendor_entry_state(entry, dev_id, flow)
+                except Exception:
+                    state = None
+                available_fx.append({
+                    "fx_name": fx.get("fx_name"),
+                    "state": state,
+                    "source": entry.get("source", "ini"),
+                })
+        except Exception:
+            available_fx = []
+    else:
         available_fx = []
     result = {
         "id": dev_id,
