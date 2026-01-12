@@ -1,4 +1,3 @@
-# Path: audioctl/vendor_db.py
 # audioctl/vendor_db.py
 import os
 import re
@@ -1357,3 +1356,4 @@ def _apply_fx(device_id, flow, fx_name, enable, ini_path=None):
     src = entry.get("source", "ini")
     verified_by = f"vendor-fx:{'code:' if src=='code' else ''}{entry.get('fx_name','')}"
     return ok, verified_by if ok else None, state
+
