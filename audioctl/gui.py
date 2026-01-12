@@ -263,6 +263,8 @@ class AudioGUI:
         # Track dynamically added FX menu items
         self._dynamic_fx_menu_items = []
         self._pending_enh = None
+        # Prevent overlapping menu builds (avoid racing CLI calls)
+        self._menu_build_in_progress = False
         # Bindings
         self.tree.bind("<Button-3>", self.on_right_click)
         self.tree.bind("<ButtonRelease-1>", self.on_left_release)
@@ -430,6 +432,10 @@ class AudioGUI:
         return self.item_to_device.get(sel[0])
     def show_menu_for_item(self, event, iid=None):
         try:
+            # Prevent overlapping menu builds caused by rapid clicks
+            if self._menu_build_in_progress:
+                return
+            self._menu_build_in_progress = True
             if iid is None:
                 iid = self.tree.identify_row(event.y)
             if not iid:
@@ -572,6 +578,8 @@ class AudioGUI:
                 self.menu.grab_release()
             except Exception:
                 pass
+            # Allow next menu build
+            self._menu_build_in_progress = False
     def on_right_click(self, event):
         iid = self.tree.identify_row(event.y)
         if not iid:
@@ -595,7 +603,12 @@ class AudioGUI:
             self.tree.item(iid, open=not bool(self.tree.item(iid, "open")))
             self.tree.selection_remove(iid)
             return
-        self.show_menu_for_item(event, iid=iid)
+        # Schedule menu build slightly later to avoid racing with other events
+        def _open_menu_later():
+            if not self.tree.exists(iid):
+                return
+            self.show_menu_for_item(event, iid=iid)
+        self.root.after(50, _open_menu_later)
     def on_set_default(self):
         d = self.get_selected_device()
         if not d:
