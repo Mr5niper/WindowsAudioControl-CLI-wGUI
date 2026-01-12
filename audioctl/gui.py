@@ -16,7 +16,6 @@ from .compat import is_admin
 from .vendor_db import (
     _vendor_ini_default_path,
 )
-
 import ctypes
 from ctypes import wintypes
 def _set_appusermodel_id(appid: str):
@@ -35,7 +34,6 @@ def _set_appusermodel_id(appid: str):
     except Exception:
         # Don't crash GUI if this fails
         pass
-
 def run_audioctl(args_list, capture_json=False, expect_ok=True):
     """
     Run 'audioctl' CLI as a subprocess.
@@ -1341,7 +1339,12 @@ def launch_gui():
         if sys.platform.startswith("win"):
             root.iconbitmap(resource_path("audio.ico"))
     except Exception:
-        pass
+        # If audio.ico can't be used (e.g., path/permissions), fall back
+        # to the EXE's icon so we don't get the generic Tk icon.
+        try:
+            root.iconbitmap("")
+        except Exception:
+            pass
     gui = AudioGUI(root)
     def _on_root_close():
         try:
