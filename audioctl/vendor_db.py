@@ -372,6 +372,20 @@ def _load_vendor_db_split(ini_path=None):
     _VENDOR_DB_CACHE["data"] = entries
     return entries
 
+def _vendor_db_has_main_entries(ini_path=None):
+    """
+    Fast check: return True if there is any MAIN vendor entry
+    (INI or code) for any device at all.
+    This lets callers skip heavy work when no INI is present and
+    there are no code vendors.
+    """
+    db = _load_vendor_db_split(ini_path)
+    main_entries = db.get("main") or []
+    if main_entries:
+        return True
+    # Also consider code vendors
+    return bool(_CODE_VENDOR_ENTRIES)
+
 def _endpoint_fx_key(device_id, flow):
     guid = _extract_endpoint_guid_from_device_id(device_id)
     if not guid:
@@ -963,15 +977,14 @@ Type exactly: I UNDERSTAND
 
 def _get_enhancements_status_any(device_id, flow):
     """
-    Best-effort read for display (GUI/labels), vendor-only:
-      1) INI vendors first (user-learned), then built-in code vendors
-      2) If no vendor applies -> None
-    Returns:
-      True  -> enhancements enabled
-      False -> enhancements disabled
-      None  -> unknown (no vendor key applies)
+    Best-effort read for display (GUI/labels), vendor-only.
+    Returns True/False if a vendor entry applies and can be read,
+    or None if no vendor applies or status cannot be determined.
     """
     try:
+        # If no vendor support at all, bail early
+        if not _enhancements_supported(device_id, flow):
+            return None
         vend = _find_first_vendor_entry(device_id, flow, ini_path=_vendor_ini_default_path())
         if vend:
             vs = _read_vendor_entry_state(vend, device_id, flow)
@@ -1324,6 +1337,10 @@ def _enhancements_supported(device_id, flow):
     Returns False otherwise. No Windows checks.
     """
     try:
+        # Fast path: if there are no main entries at all (INI or code),
+        # there is nothing to do for any device.
+        if not _vendor_db_has_main_entries(_vendor_ini_default_path()):
+            return False
         vend = _find_first_vendor_entry(device_id, flow, ini_path=_vendor_ini_default_path())
         return True if vend else False
     except Exception:
@@ -1356,4 +1373,3 @@ def _apply_fx(device_id, flow, fx_name, enable, ini_path=None):
     src = entry.get("source", "ini")
     verified_by = f"vendor-fx:{'code:' if src=='code' else ''}{entry.get('fx_name','')}"
     return ok, verified_by if ok else None, state
-
