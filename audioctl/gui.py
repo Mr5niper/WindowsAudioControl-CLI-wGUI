@@ -278,7 +278,7 @@ class AudioGUI:
         self.tree.bind("<Button-1>", self.on_left_click, add="+")
         self.tree.bind("<<TreeviewSelect>>", self.on_select_change)
         # Optional: auto-refresh when window regains focus
-        self.root.bind("<FocusIn>", self.on_focus_in)
+        # self.root.bind("<FocusIn>", self.on_focus_in)
         # Initial load
         self.refresh_devices()
         self.root.after_idle(self.adjust_layout_to_content)
