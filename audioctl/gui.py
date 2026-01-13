@@ -487,6 +487,28 @@ class AudioGUI:
         if not sel:
             return None
         return self.item_to_device.get(sel[0])
+    def _ensure_device_state_entry(self, dev_id, flow):
+        """
+        Return a mutable state dict for a device in device_state_cache.
+        If not present, create a minimal entry so we can update fields
+        (mute, listen, enhancements, FX) based on GUI actions.
+        """
+        st = self.device_state_cache.get(dev_id)
+        if not isinstance(st, dict):
+            st = {
+                "id": dev_id,
+                "flow": flow,
+                "volume": None,
+                "muted": None,
+                "listenEnabled": None,
+                "enhancementsEnabled": None,
+                "availableFX": [],
+            }
+            self.device_state_cache[dev_id] = st
+        # Ensure availableFX is a list
+        if not isinstance(st.get("availableFX"), list):
+            st["availableFX"] = []
+        return st
     def show_menu_for_item(self, event, iid=None):
         try:
             # Prevent overlapping menu builds caused by rapid clicks
@@ -719,8 +741,9 @@ class AudioGUI:
                     final = level
                 self.set_status(f"Volume set to {final}% for: {d['name']}")
                 _log(f"GUI action: set-volume success via CLI id={d['id']} name={d['name']} level={final}")
-                # NEW: refresh devices & state cache so context menus see new state
-                self.refresh_devices()
+                # Update cached volume for this device only
+                st = self._ensure_device_state_entry(d["id"], d["flow"])
+                st["volume"] = final
             else:
                 _log(f"GUI action: set-volume failed via CLI id={d['id']} name={d['name']} rc={rc} err={err}")
                 messagebox.showerror("Error", f"Failed to set volume/mute:\n{err or out}")
@@ -769,8 +792,9 @@ class AudioGUI:
                     final = (target_flag == "--mute")
                 self.set_status(f'{"Muted" if final else "Unmuted"}: {d["name"]}')
                 _log(f"GUI action: toggle-mute success via CLI id={d['id']} name={d['name']} final={final}")
-                # NEW
-                self.refresh_devices()
+                # Update cached mute state for this device
+                st = self._ensure_device_state_entry(d["id"], d["flow"])
+                st["muted"] = bool(final)
             else:
                 _log(f"GUI action: toggle-mute failed via CLI id={d['id']} name={d['name']} rc={rc} err={err}")
                 messagebox.showerror("Error", f"Failed to change mute state:\n{err or out}")
@@ -830,8 +854,9 @@ class AudioGUI:
                 state_txt = "enabled" if final else "disabled"
                 self.set_status(f"Listen {state_txt} for: {d['name']}")
                 _log(f"Listen toggle result via CLI for {d['name']} ({d['id']}): final={final}")
-                # NEW
-                self.refresh_devices()
+                # Update cached listenEnabled state for this device
+                st = self._ensure_device_state_entry(d["id"], d["flow"])
+                st["listenEnabled"] = bool(final)
             else:
                 _log(f"Listen toggle failed via CLI for {d['name']} ({d['id']}): rc={rc} err={err}")
                 messagebox.showerror("Error", f"Failed to toggle Listen:\n{err or out}")
@@ -894,8 +919,9 @@ class AudioGUI:
                 verified_by = enh.get("verifiedBy", "vendor")
                 _log(f"Enhancements toggle via CLI for {d['name']} ({d['id']}): final={state_txt} via {verified_by}")
                 self.set_status(f"Enhancements {state_txt} for: {d['name']}")
-                # NEW
-                self.refresh_devices()
+                # Update cached enhancementsEnabled for this device
+                st = self._ensure_device_state_entry(d["id"], d["flow"])
+                st["enhancementsEnabled"] = bool(state)
             else:
                 _log(f"Enhancements toggle via CLI unverified/failed id={d['id']} name={d['name']} data={data}")
                 messagebox.showwarning(
@@ -1381,8 +1407,14 @@ class AudioGUI:
                 state_txt = "enabled" if state else "disabled"
                 self.set_status(f"{fx_name} {state_txt} for: {d['name']}")
                 _log(f"GUI action: toggle-fx success via CLI id={d['id']} name={d['name']} fx={fx_name} final={state}")
-                # NEW
-                self.refresh_devices()
+                # Update cached FX state for this device
+                st = self._ensure_device_state_entry(d["id"], d["flow"])
+                fx_list = st.get("availableFX") or []
+                # Find matching fx_name in availableFX and update its state
+                for fx in fx_list:
+                    if (fx.get("fx_name") or "").strip().lower() == fx_name.strip().lower():
+                        fx["state"] = bool(state)
+                        break
             else:
                 messagebox.showwarning(
                     "FX Toggle Failed",
@@ -1450,4 +1482,3 @@ def launch_gui():
         _log_exc("MAINLOOP EXCEPTION")
     _log("launch_gui: mainloop exited")
     return 0
-
