@@ -736,6 +736,92 @@ def cmd_get_device_state(args):
     }
     print(json.dumps(result))
     return 0
+def cmd_get_device_state_fast(args):
+    """
+    Fast path: get state for a specific device by exact ID and flow.
+    Skips list_devices/find_devices_by_selector overhead.
+    Intended for GUI use.
+    """
+    dev_id = args.id
+    flow = args.flow
+    if not dev_id or not flow:
+        print("ERROR: --id and --flow are required", file=sys.stderr)
+        return 1
+    # Volume & mute
+    vol = get_endpoint_volume(dev_id)
+    muted = get_endpoint_mute(dev_id)
+    if muted is not None:
+        muted = bool(muted)
+    # Listen (capture only)
+    listen_enabled = None
+    if flow == "Capture":
+        try:
+            listen_enabled = _get_listen_to_device_status_ps(dev_id)
+            if listen_enabled is None:
+                verified, reg_state = _verify_listen_via_registry(
+                    dev_id, expected_enabled=True, timeout=0.0, interval=0.0
+                )
+                if reg_state is not None:
+                    listen_enabled = reg_state
+        except Exception:
+            listen_enabled = None
+    # Enhancements & FX via vendor_db
+    from .vendor_db import (
+        _get_enhancements_status_any,
+        _list_fx_for_device,
+        _read_vendor_entry_state,
+        _vendor_ini_default_path,
+        _enhancements_supported,
+    )
+    ini_path = getattr(args, "vendor_ini", None)
+    if not ini_path:
+        try:
+            ini_path = _vendor_ini_default_path()
+        except Exception:
+            ini_path = None
+    has_vendor = False
+    try:
+        has_vendor = _enhancements_supported(dev_id, flow)
+    except Exception:
+        has_vendor = False
+    enh_enabled = None
+    if has_vendor:
+        try:
+            enh_enabled = _get_enhancements_status_any(dev_id, flow)
+        except Exception:
+            enh_enabled = None
+    available_fx = []
+    if has_vendor:
+        try:
+            fx_list = _list_fx_for_device(dev_id, flow, ini_path=ini_path)
+            fx_list = sorted(fx_list, key=lambda x: (x.get("fx_name") or "").lower())
+            for fx in fx_list:
+                entry = fx.get("entry")
+                state = None
+                try:
+                    state = _read_vendor_entry_state(entry, dev_id, flow)
+                except Exception:
+                    state = None
+                available_fx.append({
+                    "fx_name": fx.get("fx_name"),
+                    "state": state,
+                    "source": entry.get("source", "ini"),
+                })
+        except Exception:
+            available_fx = []
+    # GUI already knows name; we do not re-fetch it here
+    result = {
+        "id": dev_id,
+        "name": None,
+        "flow": flow,
+        "volume": vol,
+        "muted": muted,
+        "listenEnabled": listen_enabled,
+        "enhancementsEnabled": enh_enabled,
+        "availableFX": available_fx,
+    }
+    print(json.dumps(result))
+    return 0
 def cmd_diag_sysfx(args):
     devices = list_devices(include_all=False)
     matches = find_devices_by_selector(devices, dev_id=args.id, name_substr=args.name, flow=args.flow, regex=args.regex)
@@ -966,6 +1052,15 @@ def build_parser():
     p_gds.add_argument("--regex", action="store_true")
     p_gds.add_argument("--vendor-ini", help="Optional vendor INI path for FX lookup")
     p_gds.set_defaults(func=cmd_get_device_state)
+    # Fast variant for GUI: requires exact id+flow, skips list_devices.
+    p_gds_fast = sub.add_parser(
+        "get-device-state-fast",
+        help=argparse.SUPPRESS
+    )
+    p_gds_fast.add_argument("--id", required=True)
+    p_gds_fast.add_argument("--flow", choices=["Render", "Capture"], required=True)
+    p_gds_fast.add_argument("--vendor-ini", help="Optional vendor INI path for FX lookup")
+    p_gds_fast.set_defaults(func=cmd_get_device_state_fast)
     p_dx = sub.add_parser(
         "diag-sysfx",
         help="Dump live Enhancements state (COM, PropertyStore, vendor toggles)"
