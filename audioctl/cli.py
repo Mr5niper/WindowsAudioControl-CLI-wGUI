@@ -190,8 +190,11 @@ def cmd_get_volume(args):
         target = ordered[args.index]
     else:
         target = ordered[0]
+
     vol = get_endpoint_volume(target["id"])
+    time.sleep(0.06)  # serialize reads to avoid COM/GC overlap
     muted = get_endpoint_mute(target["id"])
+
     # Normalize muted to a plain bool/null-like; don't let odd types leak
     if muted is not None:
         muted = bool(muted)
@@ -626,6 +629,7 @@ def cmd_get_device_state(args):
         ]
       }
     """
+    import time as _t
     devices = list_devices(include_all=False)
     matches = find_devices_by_selector(
         devices,
@@ -654,9 +658,11 @@ def cmd_get_device_state(args):
         target = ordered[0]
     dev_id = target["id"]
     flow   = target["flow"]
-    # Volume & mute
+    # Volume & mute (serialized)
     vol = get_endpoint_volume(dev_id)
+    _t.sleep(0.06)
     muted = get_endpoint_mute(dev_id)
+    _t.sleep(0.06)
     if muted is not None:
         muted = bool(muted)
     # Listen (only meaningful for capture)
@@ -664,6 +670,7 @@ def cmd_get_device_state(args):
     if flow == "Capture":
         try:
             listen_enabled = _get_listen_to_device_status_ps(dev_id)
+            _t.sleep(0.06)
             if listen_enabled is None:
                 # One quick registry read (timeout=0 -> single check)
                 verified, reg_state = _verify_listen_via_registry(dev_id, expected_enabled=True, timeout=0.0, interval=0.0)
@@ -687,14 +694,12 @@ def cmd_get_device_state(args):
         except Exception:
             ini_path = None
     # If no vendor toggle is known for this device yet, skip expensive lookups.
-    # This does NOT disable built-in vendors; _enhancements_supported already
-    # considers INI vendors and built-in code vendors.
     has_vendor = False
     try:
         has_vendor = _enhancements_supported(dev_id, flow)
     except Exception:
         has_vendor = False
-    # Enhancements (vendor-only). If vendor not supported, or anything fails, treat as unknown.
+    # Enhancements (vendor-only).
     if has_vendor:
         try:
             enh_enabled = _get_enhancements_status_any(dev_id, flow)
@@ -702,7 +707,8 @@ def cmd_get_device_state(args):
             enh_enabled = None
     else:
         enh_enabled = None
-    # FX list with states. Only query if vendor applies; errors must not break JSON.
+    _t.sleep(0.06)
+    # FX list with states.
     available_fx = []
     if has_vendor:
         try:
@@ -720,6 +726,7 @@ def cmd_get_device_state(args):
                     "state": state,
                     "source": entry.get("source", "ini"),
                 })
+                _t.sleep(0.02)
         except Exception:
             available_fx = []
     else:
@@ -727,92 +734,6 @@ def cmd_get_device_state(args):
     result = {
         "id": dev_id,
         "name": target["name"],
-        "flow": flow,
-        "volume": vol,
-        "muted": muted,
-        "listenEnabled": listen_enabled,
-        "enhancementsEnabled": enh_enabled,
-        "availableFX": available_fx,
-    }
-    print(json.dumps(result))
-    return 0
-def cmd_get_device_state_fast(args):
-    """
-    Fast path: get state for a specific device by exact ID and flow.
-    Skips list_devices/find_devices_by_selector overhead.
-    Intended for GUI use.
-    """
-    dev_id = args.id
-    flow = args.flow
-    if not dev_id or not flow:
-        print("ERROR: --id and --flow are required", file=sys.stderr)
-        return 1
-    # Volume & mute
-    vol = get_endpoint_volume(dev_id)
-    muted = get_endpoint_mute(dev_id)
-    if muted is not None:
-        muted = bool(muted)
-    # Listen (capture only)
-    listen_enabled = None
-    if flow == "Capture":
-        try:
-            listen_enabled = _get_listen_to_device_status_ps(dev_id)
-            if listen_enabled is None:
-                verified, reg_state = _verify_listen_via_registry(
-                    dev_id, expected_enabled=True, timeout=0.0, interval=0.0
-                )
-                if reg_state is not None:
-                    listen_enabled = reg_state
-        except Exception:
-            listen_enabled = None
-    # Enhancements & FX via vendor_db
-    from .vendor_db import (
-        _get_enhancements_status_any,
-        _list_fx_for_device,
-        _read_vendor_entry_state,
-        _vendor_ini_default_path,
-        _enhancements_supported,
-    )
-    ini_path = getattr(args, "vendor_ini", None)
-    if not ini_path:
-        try:
-            ini_path = _vendor_ini_default_path()
-        except Exception:
-            ini_path = None
-    has_vendor = False
-    try:
-        has_vendor = _enhancements_supported(dev_id, flow)
-    except Exception:
-        has_vendor = False
-    enh_enabled = None
-    if has_vendor:
-        try:
-            enh_enabled = _get_enhancements_status_any(dev_id, flow)
-        except Exception:
-            enh_enabled = None
-    available_fx = []
-    if has_vendor:
-        try:
-            fx_list = _list_fx_for_device(dev_id, flow, ini_path=ini_path)
-            fx_list = sorted(fx_list, key=lambda x: (x.get("fx_name") or "").lower())
-            for fx in fx_list:
-                entry = fx.get("entry")
-                state = None
-                try:
-                    state = _read_vendor_entry_state(entry, dev_id, flow)
-                except Exception:
-                    state = None
-                available_fx.append({
-                    "fx_name": fx.get("fx_name"),
-                    "state": state,
-                    "source": entry.get("source", "ini"),
-                })
-        except Exception:
-            available_fx = []
-    # GUI already knows name; we do not re-fetch it here
-    result = {
-        "id": dev_id,
-        "name": None,
         "flow": flow,
         "volume": vol,
         "muted": muted,
@@ -1052,15 +973,6 @@ def build_parser():
     p_gds.add_argument("--regex", action="store_true")
     p_gds.add_argument("--vendor-ini", help="Optional vendor INI path for FX lookup")
     p_gds.set_defaults(func=cmd_get_device_state)
-    # Fast variant for GUI: requires exact id+flow, skips list_devices.
-    p_gds_fast = sub.add_parser(
-        "get-device-state-fast",
-        help=argparse.SUPPRESS
-    )
-    p_gds_fast.add_argument("--id", required=True)
-    p_gds_fast.add_argument("--flow", choices=["Render", "Capture"], required=True)
-    p_gds_fast.add_argument("--vendor-ini", help="Optional vendor INI path for FX lookup")
-    p_gds_fast.set_defaults(func=cmd_get_device_state_fast)
     p_dx = sub.add_parser(
         "diag-sysfx",
         help="Dump live Enhancements state (COM, PropertyStore, vendor toggles)"
@@ -1193,26 +1105,16 @@ def main(argv=None):
             return launch_gui()
         except Exception as e:
             print(f"ERROR: GUI failed to start: {e}", file=sys.stderr)
-    try:
-        comtypes.CoInitialize()
-    except Exception:
-        pass
+    # NOTE: Do NOT call CoInitialize/CoUninitialize here anymore.
+    # Each low-level helper in devices.py performs its own COM init/cleanup.
     parser = build_parser()
     args = parser.parse_args(argv)
     if args.cmd == "listen":
         if args.enable and args.disable:
             print("ERROR: specify only one of --enable or --disable", file=sys.stderr)
-            try:
-                comtypes.CoUninitialize()
-            except Exception:
-                pass
             return 1
         if not args.enable and not args.disable:
             print("ERROR: specify --enable or --disable", file=sys.stderr)
-            try:
-                comtypes.CoUninitialize()
-            except Exception:
-                pass
             return 1
         args.enable = True if args.enable else False
     if args.cmd == "enhancements":
@@ -1227,33 +1129,16 @@ def main(argv=None):
         )
         if ops_count != 1:
             print("ERROR: specify exactly one of --enable, --disable, --learn, --learn-fx, --enable-fx, --disable-fx, or --list-fx", file=sys.stderr)
-            try:
-                comtypes.CoUninitialize()
-            except Exception:
-                pass
             return 1
     if args.cmd == "set-volume":
         if (args.mute or args.unmute) and args.level is not None:
             print("ERROR: Cannot specify both --level and --mute/--unmute", file=sys.stderr)
-            try:
-                comtypes.CoUninitialize()
-            except Exception:
-                pass
             return 1
         if not (args.mute or args.unmute or args.level is not None):
             print("ERROR: Must specify --level or --mute/--unmute", file=sys.stderr)
-            try:
-                comtypes.CoUninitialize()
-            except Exception:
-                pass
             return 1
     try:
         rc = args.func(args)
     except KeyboardInterrupt:
         rc = 130
-    finally:
-        try:
-            comtypes.CoUninitialize()
-        except Exception:
-            pass
     return rc
