@@ -11,7 +11,7 @@ from contextlib import redirect_stderr
 # Import compat BEFORE any comtypes usage
 from .compat import (
     E_RENDER, E_CAPTURE,
-    ROLES, DEVICE_STATE_ACTIVE, DEVICE_STATE_ALL, is_admin,
+    ROLES, is_admin,
 )
 from .logging_setup import _log, _log_exc
 from .devices import (
@@ -1143,3 +1143,4 @@ def main(argv=None):
     except KeyboardInterrupt:
         rc = 130
     return rc
+
