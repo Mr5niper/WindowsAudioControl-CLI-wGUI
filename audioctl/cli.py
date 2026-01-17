@@ -27,6 +27,7 @@ from .devices import (
     _generate_enh_discovery_report,
     _get_enhancements_status_propstore,
     _get_enhancements_status_com,
+    _read_listen_enable_fast,
 )
 from .vendor_db import (
     _vendor_ini_default_path,
@@ -38,6 +39,8 @@ from .vendor_db import (
     _read_vendor_entry_state,
     _list_fx_for_device,
     _learn_fx_and_write_ini,
+    _fast_get_enhancements_state,
+    _fast_read_vendor_entry_state,
 )
 def cmd_list(args):
     devices = list_devices(include_all=args.all)
@@ -185,9 +188,7 @@ def cmd_get_volume(args):
         target = ordered[args.index]
     else:
         target = ordered[0]
-    time.sleep(0.04)  # settle after list_devices selection before first COM call
     vol = get_endpoint_volume(target["id"])
-    time.sleep(0.06)
     muted = get_endpoint_mute(target["id"])
     # Normalize muted to a plain bool/null-like; don't let odd types leak
     if muted is not None:
@@ -304,16 +305,11 @@ def cmd_get_listen(args):
         target = ordered[args.index]
     else:
         target = ordered[0]
-    # Use low-level helper to get status (COM + registry logic)
-    time.sleep(0.04)  # settle after list_devices selection before first COM call
-    state = _get_listen_to_device_status_ps(target["id"])
-    time.sleep(0.06)
+    # FAST single probe via registry; no COM
+    state = _read_listen_enable_fast(target["id"])
     if state is None:
-        # Fallback to registry poll once
-        verified, reg_state = _verify_listen_via_registry(target["id"], expected_enabled=True, timeout=0.0, interval=0.0)
-        # Above call with timeout 0 won't loop, but reg_state may be last_state
-        if reg_state is not None:
-            state = reg_state
+        # Default-assume enabled when indicator absent/inconclusive
+        state = True
     print(json.dumps({
         "id": target["id"],
         "name": target["name"],
@@ -591,13 +587,19 @@ def cmd_get_enhancements(args):
         target = ordered[args.index]
     else:
         target = ordered[0]
-    time.sleep(0.04)  # settle after list_devices selection before first COM call
-    from .vendor_db import _get_enhancements_status_any
+    # FAST vendor-only read: only if INI vendor is known for this device
+    has_vendor = False
     try:
-        state = _get_enhancements_status_any(target["id"], target["flow"])
-        time.sleep(0.04)
+        has_vendor = _enhancements_supported(target["id"], target["flow"])
     except Exception:
+        has_vendor = False
+    if not has_vendor:
         state = None
+    else:
+        state = _fast_get_enhancements_state(target["id"], target["flow"])
+        if state is None:
+            # Default-assume enabled when indicators absent/inconclusive
+            state = True
     print(json.dumps({
         "id": target["id"],
         "name": target["name"],
@@ -655,32 +657,26 @@ def cmd_get_device_state(args):
         target = ordered[0]
     dev_id = target["id"]
     flow   = target["flow"]
-    # Volume & mute (serialized)
-    _t.sleep(0.04)  # settle after list_devices selection
+    # Volume & mute (no artificial sleeps, keep COM accuracy)
     vol = get_endpoint_volume(dev_id)
-    _t.sleep(0.06)
     muted = get_endpoint_mute(dev_id)
-    _t.sleep(0.06)
     if muted is not None:
         muted = bool(muted)
-    # Listen (only meaningful for capture)
+    # Listen (only meaningful for capture) – FAST registry probe
     listen_enabled = None
     if flow == "Capture":
         try:
-            listen_enabled = _get_listen_to_device_status_ps(dev_id)
-            _t.sleep(0.06)
-            if listen_enabled is None:
-                # One quick registry read (timeout=0 -> single check)
-                verified, reg_state = _verify_listen_via_registry(dev_id, expected_enabled=True, timeout=0.0, interval=0.0)
-                if reg_state is not None:
-                    listen_enabled = reg_state
+            listen_enabled = _read_listen_enable_fast(dev_id)
         except Exception:
             listen_enabled = None
-    # Enhancements (vendor-only) + FX using vendor_db helpers
+        if listen_enabled is None:
+            # Default-assume enabled when indicator absent/inconclusive
+            listen_enabled = True
+    # Enhancements (vendor-only) + FX using fast vendor_db helpers
     from .vendor_db import (
-        _get_enhancements_status_any,
+        _fast_get_enhancements_state,
         _list_fx_for_device,
-        _read_vendor_entry_state,
+        _fast_read_vendor_entry_state,
         _vendor_ini_default_path,
         _enhancements_supported,
     )
@@ -691,22 +687,24 @@ def cmd_get_device_state(args):
             ini_path = _vendor_ini_default_path()
         except Exception:
             ini_path = None
-    # If no vendor toggle is known for this device yet, skip expensive lookups.
+    # If no vendor toggle is known for this device yet, skip vendor lookups.
     has_vendor = False
     try:
         has_vendor = _enhancements_supported(dev_id, flow)
     except Exception:
         has_vendor = False
-    # Enhancements (vendor-only).
+    # Enhancements (vendor-only, fast)
     if has_vendor:
         try:
-            enh_enabled = _get_enhancements_status_any(dev_id, flow)
+            enh_enabled = _fast_get_enhancements_state(dev_id, flow)
         except Exception:
             enh_enabled = None
+        if enh_enabled is None:
+            # Default-assume enabled when indicator absent/inconclusive
+            enh_enabled = True
     else:
         enh_enabled = None
-    _t.sleep(0.06)
-    # FX list with states.
+    # FX list with fast states.
     available_fx = []
     if has_vendor:
         try:
@@ -716,15 +714,17 @@ def cmd_get_device_state(args):
                 entry = fx.get("entry")
                 state = None
                 try:
-                    state = _read_vendor_entry_state(entry, dev_id, flow)
+                    state = _fast_read_vendor_entry_state(entry, dev_id, flow)
                 except Exception:
                     state = None
+                if state is None:
+                    # Default-assume enabled when indicator absent/inconclusive
+                    state = True
                 available_fx.append({
                     "fx_name": fx.get("fx_name"),
                     "state": state,
                     "source": "ini",
                 })
-                _t.sleep(0.02)
         except Exception:
             available_fx = []
     else:
@@ -1140,6 +1140,3 @@ def main(argv=None):
     except KeyboardInterrupt:
         rc = 130
     return rc
-
-
-
