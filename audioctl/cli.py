@@ -5,12 +5,10 @@ import json
 import time
 import io
 import os
-import warnings
 import re
 from contextlib import redirect_stderr
 # Import compat BEFORE any comtypes usage
 from .compat import (
-    E_RENDER, E_CAPTURE,
     ROLES, is_admin,
 )
 from .logging_setup import _log, _log_exc
@@ -936,7 +934,7 @@ def build_parser():
     p_fx.add_argument("--index", type=int, help="GUI-order index among matches")
     p_fx.add_argument("--regex", action="store_true")
     p_fx.add_argument("--prefer-hklm", action="store_true",
-                      help="When falling back to the registry, try HKLM first (Admin required to write).")
+                      help="For learned INI toggles that write registry values, prefer HKLM ordering (Admin typically required).")
     p_fx.add_argument("--vendor-ini", help="Path to vendor_toggles.ini (default: next to the EXE).")
     p_fx.add_argument("--learn", action="store_true",
                       help="Manual learn (you toggle Windows UI). Captures A/B and writes vendor INI; no Windows fallback is used at runtime.")
@@ -1142,5 +1140,6 @@ def main(argv=None):
     except KeyboardInterrupt:
         rc = 130
     return rc
+
 
 
