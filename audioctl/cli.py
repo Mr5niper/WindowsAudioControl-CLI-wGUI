@@ -35,7 +35,6 @@ from .vendor_db import (
     _enhancements_supported,
     _apply_enhancements,
     _learn_vendor_from_discovery_and_write_ini,
-    _learn_vendor_and_write_ini,
     _build_vendor_ini_snippet,
     _find_first_vendor_entry,
     _read_vendor_entry_state,
@@ -1143,4 +1142,5 @@ def main(argv=None):
     except KeyboardInterrupt:
         rc = 130
     return rc
+
 
