@@ -13,12 +13,10 @@ from .compat import (
     E_RENDER, E_CAPTURE,
     ROLES, DEVICE_STATE_ACTIVE, DEVICE_STATE_ALL, is_admin,
 )
-import comtypes
 from .logging_setup import _log, _log_exc
 from .devices import (
     list_devices, find_devices_by_selector, _sort_and_tag_gui_indices,
-    enum_endpoints, get_default_ids,
-    _is_device_active, _pretty_matches_msg, _select_by_name_active_only,
+    _pretty_matches_msg, _select_by_name_active_only,
     set_default_endpoint,
     set_endpoint_mute, get_endpoint_mute,
     get_endpoint_volume, set_endpoint_volume,
@@ -41,8 +39,8 @@ from .vendor_db import (
     _build_vendor_ini_snippet,
     _find_first_vendor_entry,
     _read_vendor_entry_state,
-    _list_fx_for_device,          # ADDED
-    _learn_fx_and_write_ini       # ADDED
+    _list_fx_for_device,
+    _learn_fx_and_write_ini,
 )
 def cmd_list(args):
     devices = list_devices(include_all=args.all)
@@ -190,11 +188,10 @@ def cmd_get_volume(args):
         target = ordered[args.index]
     else:
         target = ordered[0]
-
+    time.sleep(0.04)  # settle after list_devices selection before first COM call
     vol = get_endpoint_volume(target["id"])
-    time.sleep(0.06)  # serialize reads to avoid COM/GC overlap
+    time.sleep(0.06)
     muted = get_endpoint_mute(target["id"])
-
     # Normalize muted to a plain bool/null-like; don't let odd types leak
     if muted is not None:
         muted = bool(muted)
@@ -311,7 +308,9 @@ def cmd_get_listen(args):
     else:
         target = ordered[0]
     # Use low-level helper to get status (COM + registry logic)
+    time.sleep(0.04)  # settle after list_devices selection before first COM call
     state = _get_listen_to_device_status_ps(target["id"])
+    time.sleep(0.06)
     if state is None:
         # Fallback to registry poll once
         verified, reg_state = _verify_listen_via_registry(target["id"], expected_enabled=True, timeout=0.0, interval=0.0)
@@ -370,7 +369,7 @@ def cmd_enhancements(args):
                 result["availableFX"].append({
                     "fx_name": fx.get("fx_name"),
                     "state": state,
-                    "source": entry.get("source", "ini")
+                    "source": "ini"
                 })
             print(json.dumps(result))
             return 0
@@ -386,7 +385,7 @@ def cmd_enhancements(args):
             except Exception:
                 st = None
             state_txt = "Enabled" if st is True else "Disabled" if st is False else "Unknown"
-            src = entry.get("source", "ini")
+            src = "ini"
             print(f"  - {fx.get('fx_name')}  [source={src}]  state={state_txt}")
         return 0
     if args.learn_fx:
@@ -455,8 +454,7 @@ def cmd_enhancements(args):
             print("Multiple FX matches found:")
             for i, fx in enumerate(matches_fx):
                 entry = fx.get("entry") or {}
-                src = entry.get("source", "ini")
-                print(f"  [{i}] {fx.get('fx_name')}  [source={src}]")
+                print(f"  [{i}] {fx.get('fx_name')}  [source=ini]")
             try:
                 sel = input(f"Select index (0..{len(matches_fx)-1}): ").strip()
                 idx = int(sel)
@@ -511,7 +509,7 @@ def cmd_enhancements(args):
                     "flow": target["flow"],
                     "vendor": vend_entry.get("name"),
                     "value_name": vend_entry.get("value_name"),
-                    "note": "Device can be controlled via vendor method (INI or built-in)."
+                    "note": "Device can be controlled via vendor method (INI)."
                 }
             }, indent=2))
             return 0
@@ -537,7 +535,7 @@ def cmd_enhancements(args):
                     "flow": target["flow"],
                     "vendor": vend_entry2.get("name"),
                     "value_name": vend_entry2.get("value_name"),
-                    "note": "Device can be controlled via vendor method (initialized by your toggles)."
+                    "note": "Device can be controlled via vendor method (initialized by your toggles; INI)."
                 }
             }, indent=2))
             return 0
@@ -596,9 +594,11 @@ def cmd_get_enhancements(args):
         target = ordered[args.index]
     else:
         target = ordered[0]
+    time.sleep(0.04)  # settle after list_devices selection before first COM call
     from .vendor_db import _get_enhancements_status_any
     try:
         state = _get_enhancements_status_any(target["id"], target["flow"])
+        time.sleep(0.04)
     except Exception:
         state = None
     print(json.dumps({
@@ -625,7 +625,7 @@ def cmd_get_device_state(args):
         "listenEnabled": bool or null,
         "enhancementsEnabled": bool or null,
         "availableFX": [
-          { "fx_name": "...", "state": true|false|null, "source": "ini"|"code" }
+          { "fx_name": "...", "state": true|false|null, "source": "ini" }
         ]
       }
     """
@@ -659,6 +659,7 @@ def cmd_get_device_state(args):
     dev_id = target["id"]
     flow   = target["flow"]
     # Volume & mute (serialized)
+    _t.sleep(0.04)  # settle after list_devices selection
     vol = get_endpoint_volume(dev_id)
     _t.sleep(0.06)
     muted = get_endpoint_mute(dev_id)
@@ -724,7 +725,7 @@ def cmd_get_device_state(args):
                 available_fx.append({
                     "fx_name": fx.get("fx_name"),
                     "state": state,
-                    "source": entry.get("source", "ini"),
+                    "source": "ini",
                 })
                 _t.sleep(0.02)
         except Exception:
