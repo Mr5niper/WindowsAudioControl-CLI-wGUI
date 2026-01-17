@@ -573,7 +573,7 @@ def _entries_identical_fx(a, b):
         def _wkey(w):
             return (
                 (w.get("hive") or "").upper(),
-                (w.get("subkey") or "").strip(),
+                (w.get("subkey") or "").strip().lower(),  # normalize case here
                 (w.get("name") or "").strip().lower(),
                 (w.get("type_enable") or "").upper(),
                 (w.get("type_disable") or "").upper(),
@@ -603,6 +603,42 @@ def _entries_identical_fx(a, b):
     ae, ad = _ed_pair(a)
     be, bd = _ed_pair(b)
     return (a_val == b_val) and (ae == be) and (ad == bd)
+
+import hashlib
+def _norm_write_item(w):
+    # Normalize a single write item for canonical identity
+    return (
+        (w.get("hive") or "").upper(),
+        (w.get("subkey") or "").strip().lower(),
+        (w.get("name") or "").strip().lower(),
+        (w.get("type_enable") or "").upper(),
+        (w.get("type_disable") or "").upper(),
+        str(w.get("enable") or ""),
+        str(w.get("disable") or ""),
+    )
+def _fx_canonical_key_from_writes(writes, decider_index, quorum_threshold):
+    # Build a canonical tuple for multi-write FX
+    nw = sorted((_norm_write_item(w) for w in (writes or [])))
+    try:
+        di = int(decider_index or 1)
+    except Exception:
+        di = 1
+    try:
+        qt = float(quorum_threshold or 0.60)
+    except Exception:
+        qt = 0.60
+    # freeze into a tuple
+    return ("fx-multi", tuple(nw), di, round(qt, 6))
+def _fx_canonical_key_single(value_name, enable, disable):
+    # Canonical tuple for legacy/single-DWORD FX
+    return ("fx-single",
+            (str(value_name or "").strip().lower(),),
+            int(enable), int(disable))
+def _canonical_section_name_from_key(key_tuple):
+    # Stable section name: fx_ + first 16 hex of sha1 over repr(key_tuple)
+    h = hashlib.sha1(repr(key_tuple).encode("utf-8", "replace")).hexdigest()[:16]
+    return f"fx_{h}"
+
 # --- FAST, SINGLE-PROBE READ HELPERS (no fallbacks, no COM) ---
 def _fast_read_one(hive_name: str, base_path: str, value_name: str):
     """
@@ -1320,7 +1356,6 @@ def _learn_fx_and_write_ini(target, fx_name, snapA, snapB, ini_path=None, prefer
     writes = _build_fx_multiwrite_from_stable_maps(target, stableA, stableB)
     safe_device_name = re.sub(r'[^A-Za-z0-9_\- ]+', '_', target["name"])
     safe_fx_name = re.sub(r'[^A-Za-z0-9_\-]+', '_', fx_name)
-    section_name = f"{safe_device_name}::{safe_fx_name}"
     notes = f"Learned FX '{fx_name}' for '{target['name']}' ({target['flow']}); A=enabled, B=disabled. (stability-filtered)"
     if writes:
         # Dedupe against existing multi_write entries
@@ -1343,6 +1378,8 @@ def _learn_fx_and_write_ini(target, fx_name, snapA, snapB, ini_path=None, prefer
                     "write_count": len(writes),
                 }
         try:
+            canon_key = _fx_canonical_key_from_writes(writes, 1, 0.60)
+            section_name = _canonical_section_name_from_key(canon_key)
             _append_fx_ini_entry_multi(
                 ini_path, section_name, fx_name, target["name"],
                 writes, notes=notes
@@ -1393,6 +1430,8 @@ def _learn_fx_and_write_ini(target, fx_name, snapA, snapB, ini_path=None, prefer
                 "dword_disable": dword_disable
             }
     try:
+        canon_key = _fx_canonical_key_single(value_name, dword_enable, dword_disable)
+        section_name = _canonical_section_name_from_key(canon_key)
         _append_fx_ini_entry(
             ini_path, section_name, fx_name, target["name"],
             value_name, dword_enable, dword_disable,
@@ -1511,5 +1550,3 @@ def _apply_fx(device_id, flow, fx_name, enable, ini_path=None):
                                      timeout=2.5, interval=0.2, consecutive=2)
     verified_by = f"vendor-fx:{entry.get('fx_name','')}"
     return ok, verified_by if ok else None, state
-
-
