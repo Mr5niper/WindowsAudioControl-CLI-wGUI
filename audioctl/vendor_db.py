@@ -1,4 +1,4 @@
-# audioctl/vendor_db.py
+# audioctl\vendor_db.py
 import os
 import re
 import configparser
@@ -603,7 +603,6 @@ def _entries_identical_fx(a, b):
     ae, ad = _ed_pair(a)
     be, bd = _ed_pair(b)
     return (a_val == b_val) and (ae == be) and (ad == bd)
-
 import hashlib
 def _norm_write_item(w):
     # Normalize a single write item for canonical identity
@@ -638,7 +637,6 @@ def _canonical_section_name_from_key(key_tuple):
     # Stable section name: fx_ + first 16 hex of sha1 over repr(key_tuple)
     h = hashlib.sha1(repr(key_tuple).encode("utf-8", "replace")).hexdigest()[:16]
     return f"fx_{h}"
-
 # --- FAST, SINGLE-PROBE READ HELPERS (no fallbacks, no COM) ---
 def _fast_read_one(hive_name: str, base_path: str, value_name: str):
     """
@@ -1011,9 +1009,13 @@ Critical rules during Learn:
 If you accept this and understand the risk, type exactly:
 I UNDERSTAND
 """
-    resp = input(warning + "\n> ").strip()
-    if resp != "I UNDERSTAND":
-        return False, "Learn aborted by user (confirmation not provided)."
+    confirmed = os.environ.get("AUDIOCTL_LEARN_CONFIRMED", "0") == "1"
+    if not confirmed:
+        resp = input(warning + "\n> ").strip()
+        if resp != "I UNDERSTAND":
+            return False, "Learn aborted by user (confirmation not provided)."
+    else:
+        print("INFO: Learn confirmation skipped via AUDIOCTL_LEARN_CONFIRMED=1")
     print(f"Manual learn target: {name} ({flow})")
     print("Step 1: In Windows Sound settings, set 'Audio Enhancements' to ENABLED for this device.")
     input("When ready, press Enter to capture snapshot A... ")
@@ -1087,9 +1089,13 @@ It will also try to toggle Windows paths programmatically during capture. Future
 Do NOT change any other audio settings or devices while this runs.
 Type exactly: I UNDERSTAND
 """
-    resp = input(warning + "\n> ").strip()
-    if resp != "I UNDERSTAND":
-        return False, "Learn-auto aborted by user (confirmation not provided)."
+    confirmed = os.environ.get("AUDIOCTL_LEARN_CONFIRMED", "0") == "1"
+    if not confirmed:
+        resp = input(warning + "\n> ").strip()
+        if resp != "I UNDERSTAND":
+            return False, "Learn-auto aborted by user (confirmation not provided)."
+    else:
+        print("INFO: Learn confirmation skipped via AUDIOCTL_LEARN_CONFIRMED=1")
     orig = _get_enhancements_status_propstore(dev_id)
     if orig is None:
         orig = _get_enhancements_status_com(dev_id)
