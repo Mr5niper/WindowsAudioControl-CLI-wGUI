@@ -573,7 +573,7 @@ def _entries_identical_fx(a, b):
         def _wkey(w):
             return (
                 (w.get("hive") or "").upper(),
-                (w.get("subkey") or "").strip().lower(),
+                (w.get("subkey") or "").strip(),
                 (w.get("name") or "").strip().lower(),
                 (w.get("type_enable") or "").upper(),
                 (w.get("type_disable") or "").upper(),
@@ -1511,4 +1511,5 @@ def _apply_fx(device_id, flow, fx_name, enable, ini_path=None):
                                      timeout=2.5, interval=0.2, consecutive=2)
     verified_by = f"vendor-fx:{entry.get('fx_name','')}"
     return ok, verified_by if ok else None, state
+
 
