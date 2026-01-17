@@ -16,6 +16,124 @@ from .compat import is_admin
 from .vendor_db import (
     _vendor_ini_default_path,
 )
+# --- BEGIN: Non-blocking Learn runner (main Enhancements) ---
+import threading
+def _build_cli_cmd(args_list):
+    # Same behavior as run_audioctl for building the command
+    if getattr(sys, "frozen", False):
+        return [sys.executable] + args_list
+    else:
+        return [sys.executable, "-m", "audioctl"] + args_list
+class LearnRunner:
+    PATTERN_CONFIRM = re.compile(r"I UNDERSTAND")  # literal appears in the prompt text
+    PATTERN_A = re.compile(r"When ready, press Enter to capture snapshot A", re.IGNORECASE)
+    PATTERN_B = re.compile(r"When ready, press Enter to capture snapshot B", re.IGNORECASE)
+    def __init__(self, args_list, on_output, on_state, confirmed=False):
+        self.args_list = args_list
+        self.on_output = on_output or (lambda _t: None)
+        self.on_state = on_state or (lambda _s: None)
+        self.confirmed = bool(confirmed)
+        self.proc = None
+        self._waiting_a = False
+        self._waiting_b = False
+        self._sent_confirm = False
+        self.collected_out = []
+        self.collected_err = []
+    def start(self):
+        env = os.environ.copy()
+        if self.confirmed:
+            env["AUDIOCTL_LEARN_CONFIRMED"] = "1"
+        cmd = _build_cli_cmd(self.args_list)
+        self.proc = subprocess.Popen(
+            cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=0,  # unbuffered -> we read char-wise
+            env=env,
+        )
+        self.on_state("started")
+        threading.Thread(target=self._read_stream, args=(self.proc.stdout, True), daemon=True).start()
+        threading.Thread(target=self._read_stream, args=(self.proc.stderr, False), daemon=True).start()
+        threading.Thread(target=self._waiter, daemon=True).start()
+    def _waiter(self):
+        rc = self.proc.wait()
+        self.on_state("done" if rc == 0 else "error")
+    def _read_stream(self, stream, is_stdout):
+        buf = ""
+        while True:
+            ch = stream.read(1)
+            if ch is None or ch == "":
+                break
+            buf += ch
+            # Emit whole lines as they complete
+            if "\n" in buf:
+                lines = buf.split("\n")
+                for ln in lines[:-1]:
+                    self._handle_text(ln + "\n", is_stdout)
+                buf = lines[-1]
+            else:
+                # still scan partial text for prompts that don't end with newline
+                self._scan_for_prompts(buf)
+        if buf:
+            self._handle_text(buf, is_stdout)
+    def _handle_text(self, text, is_stdout):
+        try:
+            if is_stdout:
+                self.collected_out.append(text)
+            else:
+                self.collected_err.append(text)
+        except Exception:
+            pass
+        self.on_output(text)
+        self._scan_for_prompts(text)
+    def _scan_for_prompts(self, text):
+        t = text if isinstance(text, str) else str(text or "")
+        # Auto-confirm (only on first attempt)
+        if (not self.confirmed) and (not self._sent_confirm) and self.PATTERN_CONFIRM.search(t):
+            try:
+                self.proc.stdin.write("I UNDERSTAND\n")
+                self.proc.stdin.flush()
+                self._sent_confirm = True
+            except Exception:
+                pass
+            return
+        # Snapshot A prompt
+        if self.PATTERN_A.search(t):
+            self._waiting_a = True
+            self.on_state("waiting_snapshot_a")
+            return
+        # Snapshot B prompt
+        if self.PATTERN_B.search(t):
+            self._waiting_b = True
+            self.on_state("waiting_snapshot_b")
+            return
+    def continue_snapshot_a(self):
+        if self._waiting_a and self.proc and self.proc.stdin:
+            try:
+                self.proc.stdin.write("\n")
+                self.proc.stdin.flush()
+            except Exception:
+                pass
+            self._waiting_a = False
+    def continue_snapshot_b(self):
+        if self._waiting_b and self.proc and self.proc.stdin:
+            try:
+                self.proc.stdin.write("\n")
+                self.proc.stdin.flush()
+            except Exception:
+                pass
+            self._waiting_b = False
+    def terminate(self):
+        try:
+            if self.proc and self.proc.poll() is None:
+                self.proc.terminate()
+        except Exception:
+            pass
+# --- END: Non-blocking Learn runner ---
 def run_audioctl(args_list, capture_json=False, expect_ok=True):
     """
     Run 'audioctl' CLI as a subprocess.
@@ -504,6 +622,69 @@ class AudioGUI:
         if not isinstance(st.get("availableFX"), list):
             st["availableFX"] = []
         return st
+    def _refresh_menu_state_async(self, d):
+        # d: device dict for the selection
+        def worker():
+            try:
+                st = run_audioctl(
+                    ["get-device-state", "--id", d["id"], "--flow", d["flow"]],
+                    capture_json=True,
+                    expect_ok=False,
+                )
+            except Exception:
+                st = None
+            if not isinstance(st, dict):
+                return
+            def apply_updates():
+                try:
+                    # Cache
+                    self.device_state_cache[d["id"]] = st
+                    # Listen label (Capture only)
+                    if d["flow"] == "Capture":
+                        ls = st.get("listenEnabled", None)
+                        listen_label = "Disable Listen" if ls is True else "Enable Listen" if ls is False else self.listen_menu_default_label
+                        self.menu.entryconfig(self.listen_menu_index, label=listen_label, state="normal")
+                    # Enhancements
+                    enh = st.get("enhancementsEnabled", None)
+                    if enh is True:
+                        self.menu.entryconfig(self.enh_menu_index, label="Disable Enhancements", state="normal")
+                        self._pending_enh = {"id": d["id"], "flow": d["flow"], "current": True, "supported": True}
+                    elif enh is False:
+                        self.menu.entryconfig(self.enh_menu_index, label="Enable Enhancements", state="normal")
+                        self._pending_enh = {"id": d["id"], "flow": d["flow"], "current": False, "supported": True}
+                    else:
+                        self.menu.entryconfig(self.enh_menu_index, label="Enhancements (no vendor toggle)", state="disabled")
+                        self._pending_enh = {"id": d["id"], "flow": d["flow"], "current": None, "supported": False}
+                    # FX submenu: rebuild with latest states
+                    try:
+                        self.fx_menu.delete(0, "end")
+                    except Exception:
+                        pass
+                    fx_list = st.get("availableFX") or []
+                    if fx_list:
+                        fx_list = sorted(fx_list, key=lambda x: (x.get("fx_name") or "").lower())
+                        for fx in fx_list:
+                            fx_name = fx.get("fx_name")
+                            state_fx = fx.get("state")
+                            if state_fx is True:
+                                label = f"Disable {fx_name}"
+                            elif state_fx is False:
+                                label = f"Enable {fx_name}"
+                            else:
+                                label = f"Toggle {fx_name}"
+                            def make_cmd(name, cur):
+                                def cmd():
+                                    self.on_toggle_fx_live(name, cur)
+                                return cmd
+                            self.fx_menu.add_command(label=label, command=make_cmd(fx_name, state_fx))
+                        self.menu.entryconfig(self.fx_cascade_index, state="normal")
+                    else:
+                        self.fx_menu.add_command(label="No effects available", state="disabled")
+                        self.menu.entryconfig(self.fx_cascade_index, state="disabled")
+                except Exception:
+                    pass
+            self.root.after(0, apply_updates)
+        threading.Thread(target=worker, daemon=True).start()
     def show_menu_for_item(self, event, iid=None):
         try:
             # Prevent overlapping menu builds caused by rapid clicks
@@ -626,6 +807,12 @@ class AudioGUI:
                 self.menu.entryconfig(self.fx_cascade_index, state="disabled")
     
             self.menu.tk_popup(event.x_root, event.y_root)
+            # Kick real-time refresh (labels may update a moment after opening)
+            try:
+                if d:
+                    self._refresh_menu_state_async(d)
+            except Exception:
+                pass
     
         except Exception as e:
             try:
@@ -1038,13 +1225,131 @@ class AudioGUI:
                 return
             
             if result["type"] == "main":
-                self._learn_main_toggle_via_cli(d)
+                self._open_main_learn_dialog(d)
             else:
                 self._learn_fx_toggle_via_cli(d, result["fx_name"])
         
         except Exception as e:
             messagebox.showerror("Error", f"Learn failed:\n{e}")
             self.set_status("Learn failed")
+    def _open_main_learn_dialog(self, d):
+        # Toplevel controller
+        top = tk.Toplevel(self.root)
+        top.title("Learn Enhancements (Non-blocking)")
+        top.transient(self.root)
+        top.grab_set()
+        top.resizable(True, True)
+        try:
+            if sys.platform.startswith("win"):
+                top.iconbitmap(resource_path("audio.ico"))
+        except Exception:
+            pass
+        frm = ttk.Frame(top, padding=10)
+        frm.pack(fill="both", expand=True)
+        # Log area
+        txt = tk.Text(frm, height=18, width=100, wrap="word")
+        txt.grid(row=0, column=0, columnspan=4, sticky="nsew", pady=(0, 8))
+        frm.rowconfigure(0, weight=1)
+        frm.columnconfigure(0, weight=1)
+        # Buttons
+        btn_a = ttk.Button(frm, text="Continue (A)", state="disabled")
+        btn_b = ttk.Button(frm, text="Continue (B)", state="disabled")
+        btn_cancel = ttk.Button(frm, text="Cancel")
+        btn_retry = ttk.Button(frm, text="Retry (skip confirmation)", state="disabled")
+        btn_a.grid(row=1, column=0, sticky="w", padx=(0, 6))
+        btn_b.grid(row=1, column=1, sticky="w", padx=(0, 6))
+        btn_cancel.grid(row=1, column=2, sticky="e", padx=(0, 6))
+        btn_retry.grid(row=1, column=3, sticky="e")
+        # Runner plumbing
+        args_list = ["enhancements", "--id", d["id"], "--flow", d["flow"], "--learn"]
+        def append_log(s):
+            # marshal back to Tk thread
+            self.root.after(0, lambda: (txt.insert("end", s), txt.see("end")))
+        def handle_state(st):
+            def _apply():
+                if st == "started":
+                    btn_a.configure(state="disabled")
+                    btn_b.configure(state="disabled")
+                    btn_retry.configure(state="disabled")
+                elif st == "waiting_snapshot_a":
+                    btn_a.configure(state="normal")
+                elif st == "waiting_snapshot_b":
+                    btn_b.configure(state="normal")
+                elif st in ("done", "error"):
+                    btn_a.configure(state="disabled")
+                    btn_b.configure(state="disabled")
+                    btn_retry.configure(state="normal" if st == "error" else "disabled")
+                    # Parse the final JSON at the end of stdout
+                    out_text = "".join(runner.collected_out)
+                    info = None
+                    try:
+                        lines = out_text.splitlines()
+                        for raw in reversed(lines):
+                            line = raw.strip()
+                            if not line or not line.startswith("{"):
+                                continue
+                            try:
+                                cand = json.loads(line)
+                            except Exception:
+                                continue
+                            if "vendorLearned" in cand or "vendorAvailable" in cand:
+                                info = cand
+                                break
+                    except Exception:
+                        info = None
+                    if st == "done" and isinstance(info, dict):
+                        # Success path, notify and refresh
+                        try:
+                            if "vendorLearned" in info:
+                                msg = info["vendorLearned"]
+                                messagebox.showinfo(
+                                    "Learn Enhancements",
+                                    f"Learned vendor toggle.\n\nSection: {msg.get('section')}\nINI: {msg.get('iniPath')}"
+                                )
+                            elif "vendorAvailable" in info:
+                                msg = info["vendorAvailable"]
+                                messagebox.showinfo(
+                                    "Learn Enhancements",
+                                    f"Vendor method available.\n\nVendor: {msg.get('vendor')}\nValue: {msg.get('value_name')}"
+                                )
+                        except Exception:
+                            pass
+                        self.refresh_devices()
+                    elif st == "error":
+                        # Leave log for user; they can hit Retry
+                        pass
+            self.root.after(0, _apply)
+        # First attempt: auto-confirm when we see the prompt
+        runner = LearnRunner(args_list, on_output=append_log, on_state=handle_state, confirmed=False)
+        btn_a.configure(command=runner.continue_snapshot_a)
+        btn_b.configure(command=runner.continue_snapshot_b)
+        def do_cancel():
+            try:
+                runner.terminate()
+            except Exception:
+                pass
+            top.destroy()
+        def do_retry():
+            # Retry with env skip (no confirmation prompt)
+            btn_retry.configure(state="disabled")
+            try:
+                runner.terminate()
+            except Exception:
+                pass
+            # New runner, confirmed=True -> sets AUDIOCTL_LEARN_CONFIRMED=1
+            new_runner = LearnRunner(args_list, on_output=append_log, on_state=handle_state, confirmed=True)
+            btn_a.configure(command=new_runner.continue_snapshot_a, state="disabled")
+            btn_b.configure(command=new_runner.continue_snapshot_b, state="disabled")
+            # Start on next loop tick
+            self.root.after(0, new_runner.start)
+            # Rebind closures
+            nonlocal runner
+            runner = new_runner
+        btn_cancel.configure(command=do_cancel)
+        btn_retry.configure(command=do_retry)
+        # kick off
+        runner.start()
+        top.protocol("WM_DELETE_WINDOW", do_cancel)
     def _learn_main_toggle_via_cli(self, d):
         """
         Delegate 'Learn Enhancements' for main switch to the existing CLI interactive flow:
@@ -1477,4 +1782,3 @@ def launch_gui():
         _log_exc("MAINLOOP EXCEPTION")
     _log("launch_gui: mainloop exited")
     return 0
-
