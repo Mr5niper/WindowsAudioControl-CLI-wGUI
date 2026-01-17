@@ -181,6 +181,31 @@ def run_audioctl(args_list, capture_json=False, expect_ok=True):
     if expect_ok and rc != 0:
         raise RuntimeError(f"audioctl failed with rc={rc}: {err or out}")
     return rc, out, err
+def run_audioctl_quick_json(args_list, timeout=0.75):
+    """
+    Fast one-shot CLI call with timeout. Returns parsed JSON or None on failure.
+    """
+    if getattr(sys, "frozen", False):
+        cmd = [sys.executable] + args_list
+    else:
+        cmd = [sys.executable, "-m", "audioctl"] + args_list
+    try:
+        p = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=float(timeout),
+        )
+    except Exception:
+        return None
+    if p.returncode != 0:
+        return None
+    try:
+        return json.loads(p.stdout or "{}")
+    except Exception:
+        return None
 def run_audioctl_interactive(args_list, prompt_patterns, expect_ok=True):
     """
     Run 'audioctl' CLI as a subprocess, line-by-line.
@@ -257,7 +282,7 @@ def run_audioctl_interactive(args_list, prompt_patterns, expect_ok=True):
 class AudioGUI:
     def __init__(self, root):
         self.root = root
-        self.root.title("Audio Control v1.4.6.2 01-16-2026")
+        self.root.title("Audio Control v1.4.6.3 01-17-2026")
         # Style and theme
         style = ttk.Style(self.root)
         try:
@@ -806,13 +831,61 @@ class AudioGUI:
                 self.fx_menu.add_command(label="No effects available", state="disabled")
                 self.menu.entryconfig(self.fx_cascade_index, state="disabled")
     
-            self.menu.tk_popup(event.x_root, event.y_root)
-            # Kick real-time refresh (labels may update a moment after opening)
+            # Refresh this device's state BEFORE posting the menu (single fast CLI call)
             try:
                 if d:
-                    self._refresh_menu_state_async(d)
+                    st = run_audioctl_quick_json(
+                        ["get-device-state", "--id", d["id"], "--flow", d["flow"]],
+                        timeout=0.75
+                    )
+                    if isinstance(st, dict):
+                        # cache it
+                        self.device_state_cache[d["id"]] = st
+                        # Listen label (Capture only)
+                        if d["flow"] == "Capture":
+                            ls = st.get("listenEnabled", None)
+                            listen_label = "Disable Listen" if ls is True else "Enable Listen" if ls is False else self.listen_menu_default_label
+                            self.menu.entryconfig(self.listen_menu_index, label=listen_label, state="normal")
+                        # Enhancements
+                        enh = st.get("enhancementsEnabled", None)
+                        if enh is True:
+                            self.menu.entryconfig(self.enh_menu_index, label="Disable Enhancements", state="normal")
+                            self._pending_enh = {"id": d["id"], "flow": d["flow"], "current": True, "supported": True}
+                        elif enh is False:
+                            self.menu.entryconfig(self.enh_menu_index, label="Enable Enhancements", state="normal")
+                            self._pending_enh = {"id": d["id"], "flow": d["flow"], "current": False, "supported": True}
+                        else:
+                            self.menu.entryconfig(self.enh_menu_index, label="Enhancements (no vendor toggle)", state="disabled")
+                            self._pending_enh = {"id": d["id"], "flow": d["flow"], "current": None, "supported": False}
+                        # FX submenu (rebuild)
+                        try:
+                            self.fx_menu.delete(0, "end")
+                        except Exception:
+                            pass
+                        fx_list = st.get("availableFX") or []
+                        if fx_list:
+                            fx_list = sorted(fx_list, key=lambda x: (x.get("fx_name") or "").lower())
+                            for fx in fx_list:
+                                fx_name = fx.get("fx_name")
+                                state_fx = fx.get("state")
+                                if state_fx is True:
+                                    label = f"Disable {fx_name}"
+                                elif state_fx is False:
+                                    label = f"Enable {fx_name}"
+                                else:
+                                    label = f"Toggle {fx_name}"
+                                def make_cmd(name, cur):
+                                    def cmd():
+                                        self.on_toggle_fx_live(name, cur)
+                                    return cmd
+                                self.fx_menu.add_command(label=label, command=make_cmd(fx_name, state_fx))
+                            self.menu.entryconfig(self.fx_cascade_index, state="normal")
+                        else:
+                            self.fx_menu.add_command(label="No effects available", state="disabled")
+                            self.menu.entryconfig(self.fx_cascade_index, state="disabled")
             except Exception:
                 pass
+            self.menu.tk_popup(event.x_root, event.y_root)
     
         except Exception as e:
             try:
@@ -1233,6 +1306,7 @@ class AudioGUI:
             messagebox.showerror("Error", f"Learn failed:\n{e}")
             self.set_status("Learn failed")
     def _open_main_learn_dialog(self, d):
+        self._in_modal_operation = True
         # Toplevel controller
         top = tk.Toplevel(self.root)
         top.title("Learn Enhancements (Non-blocking)")
@@ -1260,6 +1334,29 @@ class AudioGUI:
         btn_b.grid(row=1, column=1, sticky="w", padx=(0, 6))
         btn_cancel.grid(row=1, column=2, sticky="e", padx=(0, 6))
         btn_retry.grid(row=1, column=3, sticky="e")
+        # Single GUI confirmation (non-blocking design)
+        try:
+            ini_path = _vendor_ini_default_path()
+        except Exception:
+            ini_path = "<vendor_toggles.ini>"
+        warn_txt = (
+            "READ CAREFULLY\n\n"
+            "This Learn mode will capture two registry snapshots and write a vendor entry via the CLI into:\n"
+            f"  {ini_path}\n\n"
+            "From now on, future 'Enhancements' commands for this device WILL WRITE registry values.\n\n"
+            "During Learn:\n"
+            "- Do NOT change other audio settings.\n"
+            "- Do NOT switch devices.\n"
+            "- Only toggle 'Audio Enhancements' for THIS device when prompted.\n\n"
+            "Click OK to continue, or Cancel to abort."
+        )
+        if not messagebox.askokcancel("Warning – Learn writes registry (persistent)", warn_txt, parent=top):
+            self._in_modal_operation = False
+            try:
+                top.destroy()
+            except Exception:
+                pass
+            return
         # Runner plumbing
         args_list = ["enhancements", "--id", d["id"], "--flow", d["flow"], "--learn"]
         def append_log(s):
@@ -1276,10 +1373,11 @@ class AudioGUI:
                 elif st == "waiting_snapshot_b":
                     btn_b.configure(state="normal")
                 elif st in ("done", "error"):
+                    # No more steps
                     btn_a.configure(state="disabled")
                     btn_b.configure(state="disabled")
-                    btn_retry.configure(state="normal" if st == "error" else "disabled")
-                    # Parse the final JSON at the end of stdout
+                    btn_retry.configure(state="disabled")
+                    # Parse final JSON (if any)
                     out_text = "".join(runner.collected_out)
                     info = None
                     try:
@@ -1297,8 +1395,8 @@ class AudioGUI:
                                 break
                     except Exception:
                         info = None
+                    # Show the single final popup (success or failure)
                     if st == "done" and isinstance(info, dict):
-                        # Success path, notify and refresh
                         try:
                             if "vendorLearned" in info:
                                 msg = info["vendorLearned"]
@@ -1314,9 +1412,21 @@ class AudioGUI:
                                 )
                         except Exception:
                             pass
+                        # Refresh on success
                         self.refresh_devices()
-                    elif st == "error":
-                        # Leave log for user; they can hit Retry
+                    else:
+                        try:
+                            messagebox.showerror(
+                                "Learn Enhancements",
+                                "Learn failed or could not verify a vendor entry.\nSee the log text for details."
+                            )
+                        except Exception:
+                            pass
+                    # After the user dismisses the popup, close the controller window
+                    self._in_modal_operation = False
+                    try:
+                        top.destroy()
+                    except Exception:
                         pass
             self.root.after(0, _apply)
         # First attempt: auto-confirm when we see the prompt
@@ -1324,12 +1434,15 @@ class AudioGUI:
         btn_a.configure(command=runner.continue_snapshot_a)
         btn_b.configure(command=runner.continue_snapshot_b)
         def do_cancel():
+            # Clear modal flag and close
+            self._in_modal_operation = False
             try:
                 runner.terminate()
             except Exception:
                 pass
             top.destroy()
         def do_retry():
+            nonlocal runner  # move this up
             # Retry with env skip (no confirmation prompt)
             btn_retry.configure(state="disabled")
             try:
@@ -1343,7 +1456,6 @@ class AudioGUI:
             # Start on next loop tick
             self.root.after(0, new_runner.start)
             # Rebind closures
-            nonlocal runner
             runner = new_runner
         btn_cancel.configure(command=do_cancel)
         btn_retry.configure(command=do_retry)
