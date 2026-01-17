@@ -389,7 +389,7 @@ class AudioGUI:
         self.root.after(10, self._populate_next_device_state)
     def _populate_next_device_state(self):
         """
-        Process one device from the queue: call get-device-state-fast (or fallback)
+        Process one device from the queue: call get-device-state
         and cache it. Then reschedule itself until the queue is empty.
         """
         q = getattr(self, "_state_queue", None)
@@ -397,19 +397,14 @@ class AudioGUI:
             self._state_queue = []
             return
         dev_id, flow = q.pop(0)
-        # Try fast path first, fall back if not available or fails
-        try_cmd = ["get-device-state-fast", "--id", dev_id, "--flow", flow]
         try:
-            st = run_audioctl(try_cmd, capture_json=True, expect_ok=False)
+            st = run_audioctl(
+                ["get-device-state", "--id", dev_id, "--flow", flow],
+                capture_json=True,
+                expect_ok=False,
+            )
         except Exception:
-            try:
-                st = run_audioctl(
-                    ["get-device-state", "--id", dev_id, "--flow", flow],
-                    capture_json=True,
-                    expect_ok=False,
-                )
-            except Exception:
-                st = None
+            st = None
         if isinstance(st, dict):
             self.device_state_cache[dev_id] = st
         self.root.after(10, self._populate_next_device_state)
