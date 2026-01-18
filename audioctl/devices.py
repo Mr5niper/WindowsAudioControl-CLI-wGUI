@@ -328,6 +328,15 @@ def _get_listen_to_device_status_ps(device_id):
                 PropVariantClear(byref(pv))
             except Exception:
                 pass
+def _read_listen_enable_fast(device_id: str):
+    """
+    Compatibility helper used by CLI: COM-backed read first (exact PropertyStore),
+    then robust registry fallback. Returns True/False/None.
+    """
+    state = _get_listen_to_device_status_ps(device_id)
+    if state is None:
+        state = _read_listen_enable_from_registry(device_id)
+    return state
 def _read_listen_enable_from_registry(device_id: str):
     r"""
     Robustly read the 'Listen to this device' enable state from MMDevices.
@@ -1760,3 +1769,4 @@ def _verify_effect_only(device_id, flow, expected_enabled, timeout=2.5, interval
             ok_streak = 0
         _time.sleep(interval)
     return False, None, last_state
+
