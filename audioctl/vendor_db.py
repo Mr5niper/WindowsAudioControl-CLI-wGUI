@@ -275,7 +275,7 @@ def _load_vendor_db_split(ini_path=None):
                 if e["devices"]:
                     entries["fx"].append(e)
             else:
-                # MAIN entry (same behavior as before)
+                # MAIN entry (now supports optional subkey)
                 value_name = cfg.get(sec, "value_name").strip().lower()
                 en = int(cfg.get(sec, "dword_enable"))
                 di = int(cfg.get(sec, "dword_disable"))
@@ -285,6 +285,9 @@ def _load_vendor_db_split(ini_path=None):
                 flows = [x.strip().capitalize() for x in cfg.get(sec, "flows", fallback="Render,Capture").split(",") if x.strip()]
                 devices_text = cfg.get(sec, "devices", fallback="").strip()
                 devices = [x.strip().lower() for x in devices_text.split(",") if x.strip()]
+                # NEW: optional subkey; default FxProperties
+                subkey_txt = cfg.get(sec, "subkey", fallback="FxProperties").strip()
+                subkey_norm = "Properties" if subkey_txt.lower().startswith("prop") else "FxProperties"
                 entry = {
                     "name": sec,
                     "type": "main",
@@ -295,8 +298,8 @@ def _load_vendor_db_split(ini_path=None):
                     "flows": [f for f in flows if f in ("Render", "Capture")],
                     "devices": devices,
                     "notes": notes,
+                    "subkey": subkey_norm,  # NEW
                 }
-                # Only append entries that have at least one device GUID (legacy entries without devices are ignored)
                 if entry["devices"]:
                     entries["main"].append(entry)
         except Exception:
@@ -318,8 +321,9 @@ def _guid_of(device_id):
     return (g or "").strip().lower()
 def _vendor_entry_applies(entry, device_id, flow):
     """
-    Return True if entry.flow matches, device GUID is listed in devices,
+    Return True if entry.flow matches, device GUID is listed,
     and the configured value exists under any listed hive for this endpoint.
+    Honors MAIN entry 'subkey' if provided.
     """
     guid = _extract_endpoint_guid_from_device_id(device_id)
     if not guid:
@@ -330,34 +334,49 @@ def _vendor_entry_applies(entry, device_id, flow):
     flow_name = "Render" if str(flow).lower().startswith("r") else "Capture"
     if entry.get("flows") and flow_name not in entry["flows"]:
         return False
-    _f, key_path = _endpoint_fx_key(device_id, flow)
-    if not key_path:
+    # Determine subkeys to probe
+    subkeys = []
+    sk = (entry.get("subkey") or "").strip()
+    if sk:
+        subkeys = [sk]
+    else:
+        subkeys = ["FxProperties", "Properties"]
+    value_name = (entry.get("value_name") or "").strip().lower()
+    if not value_name:
         return False
-    for h in entry.get("hives", []):
-        hive = winreg.HKEY_LOCAL_MACHINE if h == "HKLM" else winreg.HKEY_CURRENT_USER
-        try:
-            with winreg.OpenKey(hive, key_path, 0, winreg.KEY_READ) as key:
-                try:
-                    _ = winreg.QueryValueEx(key, entry["value_name"])
-                    return True
-                except FileNotFoundError:
-                    continue
-        except OSError:
-            continue
+    # Probe listed hives (INI order), under desired subkey(s)
+    for h in (entry.get("hives") or ["HKCU", "HKLM"]):
+        hive = winreg.HKEY_LOCAL_MACHINE if h.upper() == "HKLM" else winreg.HKEY_CURRENT_USER
+        for sub in subkeys:
+            base = _endpoint_base_path(device_id, flow, sub)
+            if not base:
+                continue
+            try:
+                with winreg.OpenKey(hive, base, 0, winreg.KEY_READ) as key:
+                    try:
+                        _ = winreg.QueryValueEx(key, value_name)
+                        return True
+                    except FileNotFoundError:
+                        continue
+            except OSError:
+                continue
     return False
 def _set_vendor_entry_state(entry, device_id, flow, enable):
     """
-    Write vendor entry DWORD to desired value across its configured hives. Returns True if any write succeeded.
+    Write vendor entry DWORD to desired value across its configured hives.
+    Respects MAIN entry 'subkey' if provided (FxProperties|Properties).
+    Returns True if any write succeeded.
     """
-    _f, key_path = _endpoint_fx_key(device_id, flow)
-    if not key_path:
+    subkey = (entry.get("subkey") or "FxProperties").strip()
+    base = _endpoint_base_path(device_id, flow, subkey)
+    if not base:
         return False
     desired = entry["enable"] if enable else entry["disable"]
     ok = False
-    for h in entry.get("hives", []):
-        hive = winreg.HKEY_LOCAL_MACHINE if h == "HKLM" else winreg.HKEY_CURRENT_USER
+    for h in (entry.get("hives") or ["HKCU", "HKLM"]):
+        hive = winreg.HKEY_LOCAL_MACHINE if h.upper() == "HKLM" else winreg.HKEY_CURRENT_USER
         try:
-            with winreg.OpenKey(hive, key_path, 0, winreg.KEY_SET_VALUE) as key:
+            with winreg.OpenKey(hive, base, 0, winreg.KEY_SET_VALUE) as key:
                 winreg.SetValueEx(key, entry["value_name"], 0, winreg.REG_DWORD, int(desired))
                 ok = True or ok
         except OSError:
@@ -680,53 +699,50 @@ def _value_equals(expected, expected_type_name, actual_val, actual_typ):
 def _fast_read_vendor_entry_state(entry, device_id, flow):
     """
     FAST state read (True/False/None) for a single vendor entry.
-    - MAIN / single-DWORD FX: probe only the first hive in entry['hives'] (default HKCU),
-      FxProperties only, single value_name.
-    - FX multi-write: probe only decider write (decider_index; default 1) at its recorded hive/subkey/name.
-    Returns True/False if matched; None if missing/inconclusive.
+    MAIN / single-DWORD FX:
+      - Probe HKCU only (per your environment)
+      - Use entry['subkey'] if provided; otherwise try FxProperties then Properties
+      - Single QueryValueEx on entry['value_name']; no enumeration
+    FX multi-write: not read here.
     """
     try:
-        # Multi-write FX: use decider only
         if entry.get("type") == "fx" and entry.get("multi_write"):
-            writes = entry.get("writes") or []
-            if not writes:
-                return None
-            idx = max(1, int(entry.get("decider_index", 1)))
-            if idx > len(writes):
-                idx = 1
-            w = writes[idx - 1]
-            hive_name = (w.get("hive") or "HKCU").upper()
-            subkey = (w.get("subkey") or "FxProperties").strip()
-            val_name = (w.get("name") or "").strip().lower()
-            base = _endpoint_base_path(device_id, flow, subkey)
-            actual_val, actual_typ = _fast_read_one(hive_name, base, val_name)
-            if actual_val is None:
-                return None
-            # Compare against enable and disable variants
-            t_en = w.get("type_enable") or ""
-            t_di = w.get("type_disable") or ""
-            if _value_equals(w.get("enable"), t_en, actual_val, actual_typ):
-                return True
-            if _value_equals(w.get("disable"), t_di, actual_val, actual_typ):
-                return False
             return None
-        # MAIN or legacy single-DWORD FX: single DWORD probe
-        hive_order = entry.get("hives") or []
-        hive_name = (hive_order[0] if hive_order else "HKCU").upper()
-        subkey = "FxProperties"  # fast path only; do not probe 'Properties'
         val_name = (entry.get("value_name") or "").strip().lower()
-        base = _endpoint_base_path(device_id, flow, subkey)
-        actual_val, actual_typ = _fast_read_one(hive_name, base, val_name)
-        if actual_val is None or actual_typ != winreg.REG_DWORD:
+        if not val_name:
             return None
+        # Extract enable/disable values
         try:
-            v = int(actual_val)
+            en_val = int(entry.get("enable"))
+            di_val = int(entry.get("disable"))
         except Exception:
-            return None
-        if v == int(entry.get("enable", -999)):
-            return True
-        if v == int(entry.get("disable", -998)):
-            return False
+            try:
+                en_val = int(entry.get("dword_enable"))
+                di_val = int(entry.get("dword_disable"))
+            except Exception:
+                return None
+        # Subkey preference
+        subkeys = []
+        sk = (entry.get("subkey") or "").strip()
+        if sk:
+            subkeys = [sk]
+        else:
+            subkeys = ["FxProperties", "Properties"]
+        for subkey in subkeys:
+            base = _endpoint_base_path(device_id, flow, subkey)
+            if not base:
+                continue
+            actual_val, actual_typ = _fast_read_one("HKCU", base, val_name)
+            if actual_val is None or actual_typ != winreg.REG_DWORD:
+                continue
+            try:
+                v = int(actual_val)
+            except Exception:
+                continue
+            if v == en_val:
+                return True
+            if v == di_val:
+                return False
         return None
     except Exception:
         return None
