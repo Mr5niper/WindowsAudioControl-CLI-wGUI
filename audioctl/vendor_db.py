@@ -321,45 +321,40 @@ def _guid_of(device_id):
     return (g or "").strip().lower()
 def _vendor_entry_applies(entry, device_id, flow):
     """
-    Return True if entry.flow matches, device GUID is listed,
-    and the configured value exists under any listed hive for this endpoint.
-    Honors MAIN entry 'subkey' if provided.
+    Return True if this MAIN entry applies to this endpoint AND the configured value
+    exists under HKCU for the endpoint (FxProperties or Properties).
+    - Checks devices membership and flows
+    - HKCU only (per your environment)
+    - Probes both FxProperties and Properties for value_name
     """
     guid = _extract_endpoint_guid_from_device_id(device_id)
     if not guid:
         return False
+    # Device membership
     devs = set((entry.get("devices") or []))
     if not devs or guid.lower() not in {d.lower() for d in devs}:
         return False
+    # Flow membership
     flow_name = "Render" if str(flow).lower().startswith("r") else "Capture"
     if entry.get("flows") and flow_name not in entry["flows"]:
         return False
-    # Determine subkeys to probe
-    subkeys = []
-    sk = (entry.get("subkey") or "").strip()
-    if sk:
-        subkeys = [sk]
-    else:
-        subkeys = ["FxProperties", "Properties"]
     value_name = (entry.get("value_name") or "").strip().lower()
     if not value_name:
         return False
-    # Probe listed hives (INI order), under desired subkey(s)
-    for h in (entry.get("hives") or ["HKCU", "HKLM"]):
-        hive = winreg.HKEY_LOCAL_MACHINE if h.upper() == "HKLM" else winreg.HKEY_CURRENT_USER
-        for sub in subkeys:
-            base = _endpoint_base_path(device_id, flow, sub)
-            if not base:
-                continue
-            try:
-                with winreg.OpenKey(hive, base, 0, winreg.KEY_READ) as key:
-                    try:
-                        _ = winreg.QueryValueEx(key, value_name)
-                        return True
-                    except FileNotFoundError:
-                        continue
-            except OSError:
-                continue
+    # HKCU only; try FxProperties, then Properties
+    for sub in ("FxProperties", "Properties"):
+        base = _endpoint_base_path(device_id, flow, sub)
+        if not base:
+            continue
+        try:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, base, 0, winreg.KEY_READ) as key:
+                try:
+                    _ = winreg.QueryValueEx(key, value_name)
+                    return True
+                except FileNotFoundError:
+                    pass
+        except OSError:
+            pass
     return False
 def _set_vendor_entry_state(entry, device_id, flow, enable):
     """
@@ -566,19 +561,27 @@ def _try_vendor_first(device_id, flow, enable, ini_path=None):
     return False, None, None
 def _find_first_vendor_entry(device_id, flow, ini_path=None):
     """
-    Read-only: return the first MAIN vendor entry that applies to this endpoint.
-    FX entries are intentionally ignored here.
+    Return the first MAIN vendor entry that BOTH lists this endpoint (devices membership)
+    AND actually exists under HKCU for this endpoint (FxProperties/Properties).
+    If none exist (rare), fall back to first membership-only entry.
     """
     db = _load_vendor_db_split(ini_path)
     guid = _extract_endpoint_guid_from_device_id(device_id)
     if not guid:
         return None
     main_entries = db.get("main") or []
+    flow_name = "Render" if str(flow).lower().startswith("r") else "Capture"
+    # 1) Prefer entries that actually exist in registry for this endpoint
+    for entry in main_entries:
+        if _vendor_entry_applies(entry, device_id, flow_name):
+            return entry
+    # 2) Fallback: first membership-only match (old behavior)
     for entry in main_entries:
         try:
             devs = set((entry.get("devices") or []))
             if devs and guid.lower() in {d.lower() for d in devs}:
-                return entry
+                if not entry.get("flows") or flow_name in entry["flows"]:
+                    return entry
         except Exception:
             continue
     return None
@@ -699,19 +702,20 @@ def _value_equals(expected, expected_type_name, actual_val, actual_typ):
 def _fast_read_vendor_entry_state(entry, device_id, flow):
     """
     FAST state read (True/False/None) for a single vendor entry.
-    MAIN / single-DWORD FX:
-      - Probe HKCU only (per your environment)
-      - Use entry['subkey'] if provided; otherwise try FxProperties then Properties
+    MAIN / legacy single-DWORD FX:
+      - HKCU only (per your environment)
+      - Probe FxProperties, then Properties
       - Single QueryValueEx on entry['value_name']; no enumeration
-    FX multi-write: not read here.
+    FX multi-write: not read here; handled via decider/quorum elsewhere.
     """
     try:
+        # Multi-write FX: leave to _read_decider_state
         if entry.get("type") == "fx" and entry.get("multi_write"):
             return None
         val_name = (entry.get("value_name") or "").strip().lower()
         if not val_name:
             return None
-        # Extract enable/disable values
+        # Extract enable/disable integer values
         try:
             en_val = int(entry.get("enable"))
             di_val = int(entry.get("disable"))
@@ -721,14 +725,8 @@ def _fast_read_vendor_entry_state(entry, device_id, flow):
                 di_val = int(entry.get("dword_disable"))
             except Exception:
                 return None
-        # Subkey preference
-        subkeys = []
-        sk = (entry.get("subkey") or "").strip()
-        if sk:
-            subkeys = [sk]
-        else:
-            subkeys = ["FxProperties", "Properties"]
-        for subkey in subkeys:
+        # Try FxProperties then Properties under HKCU
+        for subkey in ("FxProperties", "Properties"):
             base = _endpoint_base_path(device_id, flow, subkey)
             if not base:
                 continue
