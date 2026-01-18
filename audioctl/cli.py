@@ -305,7 +305,7 @@ def cmd_get_listen(args):
         target = ordered[args.index]
     else:
         target = ordered[0]
-    # FAST single probe via registry; no COM
+    # FAST single probe via registry; no COM; no defaulting
     state = _read_listen_enable_fast(target["id"])
     print(json.dumps({
         "id": target["id"],
