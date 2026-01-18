@@ -468,30 +468,45 @@ def _append_fx_ini_entry_multi(ini_path, section_name, fx_name, device_name, wri
         lines.append(f"notes = {notes}")
     lines.append("devices = ")
     with open(ini_path, "a", encoding="utf-8", errors="replace") as f:
+        f.write("\n".join(lines) + "\n")
 def _read_vendor_entry_state(entry, device_id, flow):
     """
     Return True if current state equals 'enable' value, False if equals 'disable', None otherwise.
     Behavior:
       - For FX entries with multi_write=True: uses _read_decider_state (unchanged).
-      - For MAIN/legacy single-DWORD: read exactly the learned scope for THIS endpoint:
-        HKCU\...\{entry['subkey']}\{entry['value_name']} (no guessing).
-        Fallback to HKLM only if HKCU is absent.
+      - For MAIN entries and legacy single-DWORD FX entries:
+          Read exactly the learned scope:
+            HKCU\...\{FxProperties|Properties}\value_name for THIS endpoint,
+          fallback to HKLM only if HKCU read is not present.
     """
-    # FX multi-write: unchanged
+    # Multi-write FX: use decider logic + quorum (unchanged)
     if entry.get("type") == "fx" and entry.get("multi_write"):
         return _read_decider_state(entry, device_id, flow)
-
-    # MAIN / legacy single-DWORD (read WHERE IT CAME FROM)
+    # MAIN (enhancements) or legacy single-DWORD FX
     val_name = (entry.get("value_name") or "").strip().lower()
     if not val_name:
         return None
-
+    # Where it came from (learned)
     subkey = (entry.get("subkey") or "FxProperties").strip()
     base = _endpoint_base_path(device_id, flow, subkey)
     if not base:
         return None
-
-    # Enable/disable pair (accept either naming)
+    # Prefer HKCU, then HKLM if HKCU missing
+    hive_order = []
+    configured = entry.get("hives") or []
+    if configured:
+        seen = set()
+        for h in configured:
+            h_up = h.strip().upper()
+            if h_up in ("HKCU", "HKLM") and h_up not in seen:
+                hive_order.append(h_up); seen.add(h_up)
+    if not hive_order:
+        hive_order = ["HKCU", "HKLM"]
+    hive_map = {
+        "HKCU": winreg.HKEY_CURRENT_USER,
+        "HKLM": winreg.HKEY_LOCAL_MACHINE,
+    }
+    # Accept either key naming for enable/disable
     try:
         en = int(entry.get("enable"))
         di = int(entry.get("disable"))
@@ -501,22 +516,6 @@ def _read_vendor_entry_state(entry, device_id, flow):
             di = int(entry.get("dword_disable"))
         except Exception:
             return None
-
-    # Prefer HKCU, optional HKLM fallback if configured
-    configured = entry.get("hives") or []
-    hive_order = []
-    if configured:
-        seen = set()
-        for h in configured:
-            h_up = (h or "").strip().upper()
-            if h_up in ("HKCU", "HKLM") and h_up not in seen:
-                hive_order.append(h_up)
-                seen.add(h_up)
-    if not hive_order:
-        hive_order = ["HKCU", "HKLM"]
-
-    hive_map = {"HKCU": winreg.HKEY_CURRENT_USER, "HKLM": winreg.HKEY_LOCAL_MACHINE}
-
     for hname in hive_order:
         hive = hive_map.get(hname)
         if hive is None:
@@ -529,19 +528,16 @@ def _read_vendor_entry_state(entry, device_id, flow):
                     continue
         except OSError:
             continue
-
         if typ != winreg.REG_DWORD:
             continue
         try:
             v = int(val)
         except Exception:
             continue
-
         if v == en:
             return True
         if v == di:
             return False
-
     return None
 def _verify_vendor_entry(entry, device_id, flow, expected_enabled, timeout=2.5, interval=0.2, consecutive=2):
     """
@@ -1615,4 +1611,3 @@ def _apply_fx(device_id, flow, fx_name, enable, ini_path=None):
                                      timeout=2.5, interval=0.2, consecutive=2)
     verified_by = f"vendor-fx:{entry.get('fx_name','')}"
     return ok, verified_by if ok else None, state
-
