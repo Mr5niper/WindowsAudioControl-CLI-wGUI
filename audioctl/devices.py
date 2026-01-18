@@ -324,62 +324,57 @@ def _get_listen_to_device_status_ps(device_id):
                 PropVariantClear(byref(pv))
             except Exception:
                 pass
+# audioctl/devices.py
+
 def _read_listen_enable_fast(device_id: str):
     """
     FAST non-COM read for 'Listen to this device' that matches the setter:
       HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Capture\{guid}\Properties
       value: {24dbb0fc-9311-4b3d-9cf0-18ff155639d4},1
-    If not present there, try FxProperties for robustness. Returns True/False/None.
+
+    Returns True/False/None.
     """
     guid = _extract_endpoint_guid_from_device_id(device_id)
     if not guid:
         return None
-    value_name = "{24dbb0fc-9311-4b3d-9cf0-18ff155639d4},1"
-    def _parse_bool(val, typ):
-        # REG_DWORD: 0/1
-        if typ == winreg.REG_DWORD:
-            try:
-                return bool(int(val))
-            except Exception:
-                return None
-        # REG_BINARY: PROPVARIANT (VT_BOOL or VT_UI4)
-        if typ == winreg.REG_BINARY:
-            try:
-                b = bytes(val)
-                if len(b) >= 10:
-                    vt = int.from_bytes(b[0:2], "little", signed=False)
-                    if vt == 0x000B:  # VT_BOOL
-                        return int.from_bytes(b[8:10], "little", signed=True) != 0
-                    if len(b) >= 12 and vt == 0x0013:  # VT_UI4 (rare)
-                        return int.from_bytes(b[8:12], "little", signed=False) != 0
-            except Exception:
-                return None
-        # REG_SZ: "1"/"0"/true/false
-        if typ == winreg.REG_SZ:
-            s = str(val).strip().lower()
-            if s in ("1", "true", "yes", "on"):
-                return True
-            if s in ("0", "false", "no", "off"):
-                return False
-        return None
-    # First: Properties (this is what the setter writes through normal IPropertyStore)
+
     key_path = rf"SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Capture\{guid}\Properties"
+    value_name = "{24dbb0fc-9311-4b3d-9cf0-18ff155639d4},1"
+
     try:
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_READ) as key:
             val, typ = winreg.QueryValueEx(key, value_name)
-        parsed = _parse_bool(val, typ)
-        if parsed is not None:
-            return parsed
-    except OSError:
-        pass
-    # Fallback: FxProperties (some systems reflect it here)
-    key_path_fx = rf"SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Capture\{guid}\FxProperties"
-    try:
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path_fx, 0, winreg.KEY_READ) as key:
-            val, typ = winreg.QueryValueEx(key, value_name)
-        return _parse_bool(val, typ)
     except OSError:
         return None
+
+    # Interpret known encodings
+    if typ == winreg.REG_DWORD:
+        try:
+            return bool(int(val))
+        except Exception:
+            return None
+
+    if typ == winreg.REG_BINARY:
+        try:
+            b = bytes(val)
+            if len(b) >= 10:
+                vt = int.from_bytes(b[0:2], "little", signed=False)
+                # VT_BOOL
+                if vt == 0x000B and len(b) >= 10:
+                    return int.from_bytes(b[8:10], "little", signed=True) != 0
+                # VT_UI4 (rare)
+                if vt == 0x0013 and len(b) >= 12:
+                    return int.from_bytes(b[8:12], "little", signed=False) != 0
+        except Exception:
+            return None
+
+    if typ == winreg.REG_SZ:
+        s = str(val).strip().lower()
+        if s in ("1", "true", "yes", "on"):
+            return True
+        if s in ("0", "false", "no", "off"):
+            return False
+    return None
 def _read_listen_enable_from_registry(device_id: str):
     r"""
     Robustly read the 'Listen to this device' enable state from MMDevices.
@@ -1812,3 +1807,4 @@ def _verify_effect_only(device_id, flow, expected_enabled, timeout=2.5, interval
             ok_streak = 0
         _time.sleep(interval)
     return False, None, last_state
+
