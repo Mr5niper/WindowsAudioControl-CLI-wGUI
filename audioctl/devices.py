@@ -326,41 +326,52 @@ def _get_listen_to_device_status_ps(device_id):
                 pass
 def _read_listen_enable_fast(device_id: str):
     """
-    FAST read for 'Listen to this device' (single probe).
-    HKCU\\...\\FxProperties\\{24dbb0fc-9311-4b3d-9cf0-18ff155639d4},1 only.
-    Returns True/False/None (None = absent/inconclusive). No COM, no alternates.
+    FAST read for 'Listen to this device' (single-probe, no COM).
+    Read the same property the toggle writes (PKEY {24dbb0fc-..., pid 1),
+    as mirrored by Windows under HKCU for the endpoint.
+    Probe in order:
+      - ...\Capture\{guid}\FxProperties\{24dbb0fc-9311-4b3d-9cf0-18ff155639d4},1
+      - ...\Capture\{guid}\Properties\{24dbb0fc-9311-4b3d-9cf0-18ff155639d4},1
+    Returns True/False/None.
     """
     guid = _extract_endpoint_guid_from_device_id(device_id)
     if not guid:
         return None
-    key_path = rf"SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Capture\{guid}\FxProperties"
     value_name = "{24dbb0fc-9311-4b3d-9cf0-18ff155639d4},1"
-    try:
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_READ) as key:
-            val, typ = winreg.QueryValueEx(key, value_name)
-    except OSError:
+    def _parse_bool(val, typ):
+        if typ == winreg.REG_DWORD:
+            try:
+                return bool(int(val))
+            except Exception:
+                return None
+        if typ == winreg.REG_BINARY:
+            try:
+                b = bytes(val)
+                if len(b) >= 10:
+                    vt = int.from_bytes(b[0:2], "little", signed=False)
+                    if vt == 0x000B:  # VT_BOOL
+                        return int.from_bytes(b[8:10], "little", signed=True) != 0
+                    if len(b) >= 12 and vt == 0x0013:  # VT_UI4 (rare)
+                        return int.from_bytes(b[8:12], "little", signed=False) != 0
+            except Exception:
+                return None
+        if typ == winreg.REG_SZ:
+            s = str(val).strip().lower()
+            if s in ("1", "true", "yes", "on"):
+                return True
+            if s in ("0", "false", "no", "off"):
+                return False
         return None
-    # Interpret as BOOL (DWORD preferred, also accept REG_BINARY/REG_SZ if present)
-    if typ == winreg.REG_DWORD:
+    for subkey in ("FxProperties", "Properties"):
+        key_path = rf"SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Capture\{guid}\{subkey}"
         try:
-            return bool(int(val))
-        except Exception:
-            return None
-    if typ == winreg.REG_BINARY:
-        try:
-            b = bytes(val)
-            if len(b) >= 10:
-                vt = int.from_bytes(b[0:2], "little", signed=False)
-                if vt == 0x000B:  # VT_BOOL
-                    return int.from_bytes(b[8:10], "little", signed=True) != 0
-        except Exception:
-            return None
-    if typ == winreg.REG_SZ:
-        s = str(val).strip().lower()
-        if s in ("1", "true", "yes", "on"):
-            return True
-        if s in ("0", "false", "no", "off"):
-            return False
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_READ) as key:
+                val, typ = winreg.QueryValueEx(key, value_name)
+            parsed = _parse_bool(val, typ)
+            if parsed is not None:
+                return parsed
+        except OSError:
+            pass
     return None
 def _read_listen_enable_from_registry(device_id: str):
     r"""
