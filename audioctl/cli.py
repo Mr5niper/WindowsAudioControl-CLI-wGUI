@@ -704,30 +704,27 @@ def cmd_get_device_state(args):
             enh_enabled = True
     else:
         enh_enabled = None
-    # FX list with fast states.
+    # FX list with fast states (ALWAYS list FX if present in INI; do not depend on MAIN support)
     available_fx = []
-    if has_vendor:
-        try:
-            fx_list = _list_fx_for_device(dev_id, flow, ini_path=ini_path)
-            fx_list = sorted(fx_list, key=lambda x: (x.get("fx_name") or "").lower())
-            for fx in fx_list:
-                entry = fx.get("entry")
+    try:
+        fx_list = _list_fx_for_device(dev_id, flow, ini_path=ini_path)
+        fx_list = sorted(fx_list, key=lambda x: (x.get("fx_name") or "").lower())
+        for fx in fx_list:
+            entry = fx.get("entry")
+            state = None
+            try:
+                state = _fast_read_vendor_entry_state(entry, dev_id, flow)
+            except Exception:
                 state = None
-                try:
-                    state = _fast_read_vendor_entry_state(entry, dev_id, flow)
-                except Exception:
-                    state = None
-                if state is None:
-                    # Default-assume enabled when indicator absent/inconclusive
-                    state = True
-                available_fx.append({
-                    "fx_name": fx.get("fx_name"),
-                    "state": state,
-                    "source": "ini",
-                })
-        except Exception:
-            available_fx = []
-    else:
+            if state is None:
+                # Default-assume enabled when indicator absent/inconclusive
+                state = True
+            available_fx.append({
+                "fx_name": fx.get("fx_name"),
+                "state": state,
+                "source": "ini",
+            })
+    except Exception:
         available_fx = []
     result = {
         "id": dev_id,
