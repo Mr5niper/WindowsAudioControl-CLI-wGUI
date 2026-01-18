@@ -691,6 +691,22 @@ def _fast_read_one(hive_name: str, base_path: str, value_name: str):
             return (val, typ)
     except OSError:
         return (None, None)
+def _fast_key_lastwrite(hive_name: str, base_path: str):
+    """
+    Return the registry key last-write time (as an integer) for the given hive/base.
+    None if the key cannot be opened. The integer is a FILETIME-scale value; we
+    only compare magnitudes between hives, no conversion needed.
+    """
+    hive = winreg.HKEY_LOCAL_MACHINE if (hive_name or "").upper() == "HKLM" else winreg.HKEY_CURRENT_USER
+    try:
+        with winreg.OpenKey(hive, base_path, 0, winreg.KEY_READ) as key:
+            _, _, last = winreg.QueryInfoKey(key)
+            try:
+                return int(last)
+            except Exception:
+                return None
+    except OSError:
+        return None
 def _value_equals(expected, expected_type_name, actual_val, actual_typ):
     """
     Type-aware equality check for single-probe comparisons.
@@ -719,12 +735,15 @@ def _value_equals(expected, expected_type_name, actual_val, actual_typ):
 def _fast_read_vendor_entry_state(entry, device_id, flow):
     """
     FAST state read (True/False/None) driven by learned scope.
-    - MAIN: read exactly value_name at HKCU\...\{subkey} for THIS endpoint.
-    - FX multi-write: read only the decider write (first reliable change).
+    - MAIN: read exactly value_name at learned subkey for THIS endpoint,
+            probing both HKCU and HKLM if allowed by entry.hives. If both
+            exist and disagree, prefer the hive whose containing key has the
+            newer last-write time; if timestamps tie/missing, prefer HKCU.
+    - FX multi-write: unchanged (decider-only quick read).
     """
     try:
+        # FX multi-write (unchanged)
         if entry.get("type") == "fx" and entry.get("multi_write"):
-            # Read only the decider write (first reliable change)
             writes = entry.get("writes") or []
             if not writes:
                 return None
@@ -738,25 +757,32 @@ def _fast_read_vendor_entry_state(entry, device_id, flow):
             base = _endpoint_base_path(device_id, flow, subkey)
             if not base:
                 return None
-            actual_val, actual_typ = _fast_read_one(hive_name, base, val_name)
-            if actual_val is None:
-                return None
-            # Compare using recorded enable/disable types/values
-            try:
-                t_en = _reg_name_to_type(w.get("type_enable"))
-                t_di = _reg_name_to_type(w.get("type_disable"))
-            except Exception:
-                return None
-            if _value_equals(w.get("enable"), w.get("type_enable"), actual_val, actual_typ):
-                return True
-            if _value_equals(w.get("disable"), w.get("type_disable"), actual_val, actual_typ):
-                return False
+            # Try recorded hive first, then the alternate as a fast fallback
+            order_fx = [hive_name, "HKLM" if hive_name == "HKCU" else "HKCU"]
+            seen = set()
+            for hn in order_fx:
+                if hn in seen:
+                    continue
+                seen.add(hn)
+                actual_val, actual_typ = _fast_read_one(hn, base, val_name)
+                if actual_val is None:
+                    continue
+                try:
+                    t_en = _reg_name_to_type(w.get("type_enable"))
+                    t_di = _reg_name_to_type(w.get("type_disable"))
+                except Exception:
+                    continue
+                if _value_equals(w.get("enable"), w.get("type_enable"), actual_val, actual_typ):
+                    return True
+                if _value_equals(w.get("disable"), w.get("type_disable"), actual_val, actual_typ):
+                    return False
             return None
-        # MAIN / legacy single-DWORD
+        # MAIN / legacy single-DWORD (heuristic: compare hives, use newer key)
         val_name = (entry.get("value_name") or "").strip().lower()
         subkey = (entry.get("subkey") or "FxProperties").strip()
         if not val_name:
             return None
+        # Enable/disable values (support legacy keys)
         try:
             en_val = int(entry.get("enable"))
             di_val = int(entry.get("disable"))
@@ -769,14 +795,62 @@ def _fast_read_vendor_entry_state(entry, device_id, flow):
         base = _endpoint_base_path(device_id, flow, subkey)
         if not base:
             return None
-        actual_val, actual_typ = _fast_read_one("HKCU", base, val_name)
-        if actual_val is None or actual_typ != winreg.REG_DWORD:
-            return None
-        v = int(actual_val)
-        if v == en_val:
-            return True
-        if v == di_val:
-            return False
+        # Allowed hives filter (default to both)
+        configured = entry.get("hives") or []
+        allowed = {str(h).strip().upper() for h in configured if isinstance(h, str)}
+        if not allowed:
+            allowed = {"HKCU", "HKLM"}
+        # Read both (subject to allowed)
+        state = {}      # hive -> True/False/None
+        lastw = {}      # hive -> int or None
+        for hname in ("HKCU", "HKLM"):
+            if hname not in allowed:
+                state[hname] = None
+                lastw[hname] = None
+                continue
+            val, typ = _fast_read_one(hname, base, val_name)
+            if val is None or typ != winreg.REG_DWORD:
+                state[hname] = None
+            else:
+                try:
+                    v = int(val)
+                    if v == en_val:
+                        state[hname] = True
+                    elif v == di_val:
+                        state[hname] = False
+                    else:
+                        state[hname] = None
+                except Exception:
+                    state[hname] = None
+            lastw[hname] = _fast_key_lastwrite(hname, base)
+        # Resolve according to availability/conflict
+        cu = state.get("HKCU")
+        lm = state.get("HKLM")
+        # If only one is known, use it
+        if cu is not None and lm is None:
+            return cu
+        if lm is not None and cu is None:
+            return lm
+        # If both known and equal, return it
+        if cu is not None and lm is not None and cu == lm:
+            return cu
+        # If both known and disagree, use newer key's last-write; tie -> prefer HKCU
+        if cu is not None and lm is not None and cu != lm:
+            tcu = lastw.get("HKCU")
+            tlm = lastw.get("HKLM")
+            try:
+                if isinstance(tcu, int) and isinstance(tlm, int):
+                    if tlm > tcu:
+                        return lm
+                    elif tcu > tlm:
+                        return cu
+                    else:
+                        return cu  # tie -> prefer HKCU
+            except Exception:
+                pass
+            # If timestamps missing/unusable, prefer HKCU
+            return cu
+        # Neither hive has a definitive value
         return None
     except Exception:
         return None
