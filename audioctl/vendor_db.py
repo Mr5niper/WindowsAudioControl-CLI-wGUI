@@ -275,7 +275,7 @@ def _load_vendor_db_split(ini_path=None):
                 if e["devices"]:
                     entries["fx"].append(e)
             else:
-                # MAIN entry (now supports optional subkey)
+                # MAIN entry (supports optional subkey)
                 value_name = cfg.get(sec, "value_name").strip().lower()
                 en = int(cfg.get(sec, "dword_enable"))
                 di = int(cfg.get(sec, "dword_disable"))
@@ -285,7 +285,6 @@ def _load_vendor_db_split(ini_path=None):
                 flows = [x.strip().capitalize() for x in cfg.get(sec, "flows", fallback="Render,Capture").split(",") if x.strip()]
                 devices_text = cfg.get(sec, "devices", fallback="").strip()
                 devices = [x.strip().lower() for x in devices_text.split(",") if x.strip()]
-                # NEW: optional subkey; default FxProperties
                 subkey_txt = cfg.get(sec, "subkey", fallback="FxProperties").strip()
                 subkey_norm = "Properties" if subkey_txt.lower().startswith("prop") else "FxProperties"
                 entry = {
@@ -298,7 +297,7 @@ def _load_vendor_db_split(ini_path=None):
                     "flows": [f for f in flows if f in ("Render", "Capture")],
                     "devices": devices,
                     "notes": notes,
-                    "subkey": subkey_norm,  # NEW
+                    "subkey": subkey_norm,
                 }
                 if entry["devices"]:
                     entries["main"].append(entry)
@@ -358,9 +357,8 @@ def _vendor_entry_applies(entry, device_id, flow):
     return False
 def _set_vendor_entry_state(entry, device_id, flow, enable):
     """
-    Write vendor entry DWORD to desired value across its configured hives.
-    Respects MAIN entry 'subkey' if provided (FxProperties|Properties).
-    Returns True if any write succeeded.
+    Write vendor entry DWORD to desired value across configured hives.
+    Uses MAIN 'subkey' (where it came from) exactly.
     """
     subkey = (entry.get("subkey") or "FxProperties").strip()
     base = _endpoint_base_path(device_id, flow, subkey)
@@ -475,52 +473,84 @@ def _read_vendor_entry_state(entry, device_id, flow):
     """
     Return True if current state equals 'enable' value, False if equals 'disable', None otherwise.
     Behavior:
-      - For FX entries with multi_write=True:
-          Uses _read_decider_state(), which:
-            * Reads all recorded writes (HKCU/HKLM fallback)
-            * Uses quorum_threshold (default 0.60, min 0.50 max 0.95)
-            * Falls back to decider_index and then a 'best' write heuristic
+      - For FX entries with multi_write=True: uses _read_decider_state (unchanged).
       - For MAIN entries and legacy single-DWORD FX entries:
-          Reads the configured DWORD under FxProperties (per hives) and
-          compares to entry["enable"]/entry["disable"].
+          Read exactly the learned scope:
+            HKCU\...\{FxProperties|Properties}\value_name for THIS endpoint,
+          fallback to HKLM only if HKCU read is not present (keeps old behavior harmlessly).
     """
-    # Multi-write FX: use decider logic + quorum
+    # Multi-write FX: use decider logic + quorum (unchanged)
     if entry.get("type") == "fx" and entry.get("multi_write"):
         return _read_decider_state(entry, device_id, flow)
+
     # MAIN (enhancements) or legacy single-DWORD FX
-    _f, key_path = _endpoint_fx_key(device_id, flow)
-    if not key_path:
+    val_name = (entry.get("value_name") or "").strip().lower()
+    if not val_name:
         return None
+
+    # Learned subkey (where it came from); default FxProperties if missing
+    subkey = (entry.get("subkey") or "FxProperties").strip()
+    base = _endpoint_base_path(device_id, flow, subkey)
+    if not base:
+        return None
+
+    # Hive order: prefer HKCU, then HKLM (minimal, no enumeration)
+    hive_order = []
     configured = entry.get("hives") or []
-    # Prefer HKCU then HKLM unless caller provided a different order
-    read_order = [h for h in ("HKCU", "HKLM") if h in configured] or configured
+    if configured:
+        # preserve INI order but make sure HKCU is first if present
+        seen = set()
+        for h in configured:
+            h_up = h.strip().upper()
+            if h_up in ("HKCU", "HKLM") and h_up not in seen:
+                hive_order.append(h_up); seen.add(h_up)
+    if not hive_order:
+        hive_order = ["HKCU", "HKLM"]
+
     hive_map = {
         "HKCU": winreg.HKEY_CURRENT_USER,
         "HKLM": winreg.HKEY_LOCAL_MACHINE,
     }
-    for hname in read_order:
+
+    for hname in hive_order:
         hive = hive_map.get(hname)
         if hive is None:
             continue
         try:
-            with winreg.OpenKey(hive, key_path, 0, winreg.KEY_READ) as key:
+            with winreg.OpenKey(hive, base, 0, winreg.KEY_READ) as key:
                 try:
-                    val, typ = winreg.QueryValueEx(key, entry["value_name"])
+                    val, typ = winreg.QueryValueEx(key, val_name)
                 except FileNotFoundError:
                     continue
         except OSError:
             continue
-        # Only REG_DWORD is meaningful for these entries
+
+        # Only REG_DWORD is meaningful here
         if typ != winreg.REG_DWORD:
             continue
         try:
             v = int(val)
         except Exception:
             continue
-        if v == entry.get("enable"):
+
+        # Accept either naming in entry
+        en = entry.get("enable")
+        di = entry.get("disable")
+        if en is None or di is None:
+            try:
+                en = int(entry.get("dword_enable"))
+                di = int(entry.get("dword_disable"))
+            except Exception:
+                en = di = None
+
+        if en is None or di is None:
+            return None
+
+        if v == int(en):
             return True
-        if v == entry.get("disable"):
+        if v == int(di):
             return False
+
     return None
 def _verify_vendor_entry(entry, device_id, flow, expected_enabled, timeout=2.5, interval=0.2, consecutive=2):
     """
@@ -701,21 +731,45 @@ def _value_equals(expected, expected_type_name, actual_val, actual_typ):
     return False
 def _fast_read_vendor_entry_state(entry, device_id, flow):
     """
-    FAST state read (True/False/None) for a single vendor entry.
-    MAIN / legacy single-DWORD FX:
-      - HKCU only (per your environment)
-      - Probe FxProperties, then Properties
-      - Single QueryValueEx on entry['value_name']; no enumeration
-    FX multi-write: not read here; handled via decider/quorum elsewhere.
+    FAST state read (True/False/None) driven by learned scope.
+    - MAIN: read exactly value_name at HKCU\...\{subkey} for THIS endpoint.
+    - FX multi-write: read only the decider write (first reliable change).
     """
     try:
-        # Multi-write FX: leave to _read_decider_state
         if entry.get("type") == "fx" and entry.get("multi_write"):
+            # Read only the decider write (first reliable change)
+            writes = entry.get("writes") or []
+            if not writes:
+                return None
+            idx = max(1, int(entry.get("decider_index", 1)))
+            if idx > len(writes):
+                idx = 1
+            w = writes[idx - 1]
+            hive_name = (w.get("hive") or "HKCU").upper()
+            subkey = (w.get("subkey") or "FxProperties").strip()
+            val_name = (w.get("name") or "").strip().lower()
+            base = _endpoint_base_path(device_id, flow, subkey)
+            if not base:
+                return None
+            actual_val, actual_typ = _fast_read_one(hive_name, base, val_name)
+            if actual_val is None:
+                return None
+            # Compare using recorded enable/disable types/values
+            try:
+                t_en = _reg_name_to_type(w.get("type_enable"))
+                t_di = _reg_name_to_type(w.get("type_disable"))
+            except Exception:
+                return None
+            if _value_equals(w.get("enable"), w.get("type_enable"), actual_val, actual_typ):
+                return True
+            if _value_equals(w.get("disable"), w.get("type_disable"), actual_val, actual_typ):
+                return False
             return None
+        # MAIN / legacy single-DWORD
         val_name = (entry.get("value_name") or "").strip().lower()
+        subkey = (entry.get("subkey") or "FxProperties").strip()
         if not val_name:
             return None
-        # Extract enable/disable integer values
         try:
             en_val = int(entry.get("enable"))
             di_val = int(entry.get("disable"))
@@ -725,22 +779,17 @@ def _fast_read_vendor_entry_state(entry, device_id, flow):
                 di_val = int(entry.get("dword_disable"))
             except Exception:
                 return None
-        # Try FxProperties then Properties under HKCU
-        for subkey in ("FxProperties", "Properties"):
-            base = _endpoint_base_path(device_id, flow, subkey)
-            if not base:
-                continue
-            actual_val, actual_typ = _fast_read_one("HKCU", base, val_name)
-            if actual_val is None or actual_typ != winreg.REG_DWORD:
-                continue
-            try:
-                v = int(actual_val)
-            except Exception:
-                continue
-            if v == en_val:
-                return True
-            if v == di_val:
-                return False
+        base = _endpoint_base_path(device_id, flow, subkey)
+        if not base:
+            return None
+        actual_val, actual_typ = _fast_read_one("HKCU", base, val_name)
+        if actual_val is None or actual_typ != winreg.REG_DWORD:
+            return None
+        v = int(actual_val)
+        if v == en_val:
+            return True
+        if v == di_val:
+            return False
         return None
     except Exception:
         return None
@@ -825,9 +874,10 @@ def _sanitize_ini_section_name(value_name: str):
     base = re.sub(r'[^A-Za-z0-9_,\-{}]+', "_", value_name)
     return f"vendor_{base}"
 def _append_vendor_ini_entry_if_missing(ini_path, section_name, value_name, dword_enable, dword_disable,
-                                        flows="Render,Capture", hives="HKCU,HKLM", notes=""):
+                                        flows="Render,Capture", hives="HKCU,HKLM", notes="", subkey="FxProperties"):
     """
     Append a vendor INI section to ini_path only if it does not already exist.
+    Records 'subkey' so fast reads/writes hit the exact learned spot.
     """
     cfg = configparser.ConfigParser()
     try:
@@ -843,6 +893,7 @@ def _append_vendor_ini_entry_if_missing(ini_path, section_name, value_name, dwor
             os.makedirs(ini_dir, exist_ok=True)
     except Exception:
         pass
+    subkey_norm = "Properties" if str(subkey or "").strip().lower().startswith("prop") else "FxProperties"
     lines = []
     lines.append("")
     lines.append(f"[{section_name}]")
@@ -851,6 +902,7 @@ def _append_vendor_ini_entry_if_missing(ini_path, section_name, value_name, dwor
     lines.append(f"dword_disable = {int(dword_disable)}")
     lines.append(f"hives = {hives}")
     lines.append(f"flows = {flows}")
+    lines.append(f"subkey = {subkey_norm}")  # record learned scope
     if notes:
         lines.append(f"notes = {notes}")
     lines.append("devices = ")
@@ -861,6 +913,7 @@ def _append_vendor_ini_entry_if_missing(ini_path, section_name, value_name, dwor
 def _build_vendor_ini_snippet(target, snapA, snapB, diffs, section_name=None):
     """
     Build a suggested vendor INI section based on DWORD flips observed.
+    Records the actual subkey (FxProperties or Properties) where the flip occurred.
     """
     cands = []
     for f in diffs.get("dword_flips", []):
@@ -869,8 +922,7 @@ def _build_vendor_ini_snippet(target, snapA, snapB, diffs, section_name=None):
         hive = str(f.get("hive",""))
         if not (name.startswith("{") and "}" in name and "," in name):
             continue
-        if subkey != "FxProperties":
-            continue
+        # Keep both FxProperties and Properties; pick the first reliable change
         before = int(f.get("before"))
         after  = int(f.get("after"))
         cands.append({
@@ -879,23 +931,24 @@ def _build_vendor_ini_snippet(target, snapA, snapB, diffs, section_name=None):
         })
     if not cands:
         return None, None
-    cands.sort(key=lambda x: (0 if x["hive"]=="HKLM" else 1))
+    # Prefer HKCU candidates; keep original order otherwise (first reliable)
+    cands.sort(key=lambda x: (0 if x["hive"] == "HKCU" else 1))
     pick = cands[0]
-    dword_enable = pick["before"]
-    dword_disable = pick["after"]
+    dword_enable  = int(pick["before"])
+    dword_disable = int(pick["after"])
+    picked_subkey = pick.get("subkey") if pick.get("subkey") in ("FxProperties", "Properties") else "FxProperties"
     if not section_name:
         base = re.sub(r'[^A-Za-z0-9_,\-{}]+', "_", pick["name"])
         section_name = f"vendor_{base}"
-    flows_all = "Render,Capture"
-    hives = "HKCU,HKLM"
-    notes = f"Auto-learned from discovery on device '{target.get('name')}' ({target.get('flow')}). A=enabled,B=disabled."
+    notes = f"Auto-learned (manual UI) on '{target.get('name')}' ({target.get('flow')}). A=enabled,B=disabled."
     snippet = []
     snippet.append(f"[{section_name}]")
     snippet.append(f"value_name = {pick['name']}")
-    snippet.append(f"dword_enable = {int(dword_enable)}")
-    snippet.append(f"dword_disable = {int(dword_disable)}")
-    snippet.append(f"hives = {hives}")
-    snippet.append(f"flows = {flows_all}")
+    snippet.append(f"dword_enable = {dword_enable}")
+    snippet.append(f"dword_disable = {dword_disable}")
+    snippet.append("hives = HKCU,HKLM")
+    snippet.append("flows = Render,Capture")
+    snippet.append(f"subkey = {picked_subkey}")  # where it came from
     snippet.append(f"notes = {notes}")
     snippet.append("devices = ")
     return "\n".join(snippet) + "\n", pick
@@ -1070,7 +1123,8 @@ I UNDERSTAND
         res = _append_vendor_ini_entry_if_missing(
             ini_path, section_name, value_name,
             dword_enable, dword_disable,
-            flows="Render,Capture", hives=hives, notes=notes
+            flows="Render,Capture", hives=hives, notes=notes,
+            subkey=(picked.get("subkey") if picked else "FxProperties")  # pass learned subkey
         )
         # Ensure devices list exists and contains this GUID
         _append_guid_to_section(ini_path, section_name, guid_lc)
