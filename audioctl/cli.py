@@ -307,9 +307,6 @@ def cmd_get_listen(args):
         target = ordered[0]
     # FAST single probe via registry; no COM
     state = _read_listen_enable_fast(target["id"])
-    if state is None:
-        # Default-assume enabled when indicator absent/inconclusive
-        state = True
     print(json.dumps({
         "id": target["id"],
         "name": target["name"],
@@ -669,9 +666,6 @@ def cmd_get_device_state(args):
             listen_enabled = _read_listen_enable_fast(dev_id)
         except Exception:
             listen_enabled = None
-        if listen_enabled is None:
-            # Default-assume enabled when indicator absent/inconclusive
-            listen_enabled = True
     # Enhancements (vendor-only) + FX using fast vendor_db helpers
     from .vendor_db import (
         _fast_get_enhancements_state,
