@@ -280,10 +280,12 @@ def _get_listen_to_device_status_ps(device_id):
         VT_BOOL = interfaces["VT_BOOL"]
         HRESULT_T = interfaces["HRESULT_T"]
         VARIANT_FALSE = interfaces["VARIANT_FALSE"]
+
         ole32 = ctypes.OleDLL("ole32.dll")
         PropVariantClear = ole32.PropVariantClear
         PropVariantClear.restype = HRESULT_T
         PropVariantClear.argtypes = (POINTER(PROPVARIANT),)
+
         PKEY_LISTEN_ENABLE = PROPERTYKEY(GUID("{24dbb0fc-9311-4b3d-9cf0-18ff155639d4}"), 1)
         pv = PROPVARIANT()
         try:
@@ -303,7 +305,8 @@ def _get_listen_to_device_status_ps(device_id):
                     ps_iface = ctypes.cast(ctypes.c_void_p(ps_ptr_val), PIPS)
                     hr = ps_iface.contents.lpVtbl.contents.GetValue(ps_iface, byref(PKEY_LISTEN_ENABLE), byref(pv))
                     if hr != 0:
-                        result = False
+                        # allow caller to fall back to registry
+                        result = None
                     else:
                         if getattr(pv, "vt", 0) == VT_BOOL:
                             try:
@@ -311,7 +314,8 @@ def _get_listen_to_device_status_ps(device_id):
                             except Exception:
                                 result = None
                         else:
-                            result = False
+                            # unexpected VT -> let caller fall back
+                            result = None
             finally:
                 if gc_was_enabled:
                     gc.enable()
@@ -324,57 +328,6 @@ def _get_listen_to_device_status_ps(device_id):
                 PropVariantClear(byref(pv))
             except Exception:
                 pass
-# audioctl/devices.py
-
-def _read_listen_enable_fast(device_id: str):
-    """
-    FAST non-COM read for 'Listen to this device' that matches the setter:
-      HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Capture\{guid}\Properties
-      value: {24dbb0fc-9311-4b3d-9cf0-18ff155639d4},1
-
-    Returns True/False/None.
-    """
-    guid = _extract_endpoint_guid_from_device_id(device_id)
-    if not guid:
-        return None
-
-    key_path = rf"SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Capture\{guid}\Properties"
-    value_name = "{24dbb0fc-9311-4b3d-9cf0-18ff155639d4},1"
-
-    try:
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_READ) as key:
-            val, typ = winreg.QueryValueEx(key, value_name)
-    except OSError:
-        return None
-
-    # Interpret known encodings
-    if typ == winreg.REG_DWORD:
-        try:
-            return bool(int(val))
-        except Exception:
-            return None
-
-    if typ == winreg.REG_BINARY:
-        try:
-            b = bytes(val)
-            if len(b) >= 10:
-                vt = int.from_bytes(b[0:2], "little", signed=False)
-                # VT_BOOL
-                if vt == 0x000B and len(b) >= 10:
-                    return int.from_bytes(b[8:10], "little", signed=True) != 0
-                # VT_UI4 (rare)
-                if vt == 0x0013 and len(b) >= 12:
-                    return int.from_bytes(b[8:12], "little", signed=False) != 0
-        except Exception:
-            return None
-
-    if typ == winreg.REG_SZ:
-        s = str(val).strip().lower()
-        if s in ("1", "true", "yes", "on"):
-            return True
-        if s in ("0", "false", "no", "off"):
-            return False
-    return None
 def _read_listen_enable_from_registry(device_id: str):
     r"""
     Robustly read the 'Listen to this device' enable state from MMDevices.
@@ -1807,4 +1760,3 @@ def _verify_effect_only(device_id, flow, expected_enabled, timeout=2.5, interval
             ok_streak = 0
         _time.sleep(interval)
     return False, None, last_state
-
