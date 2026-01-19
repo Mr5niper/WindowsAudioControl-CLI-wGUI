@@ -379,28 +379,52 @@ def cmd_enhancements(args):
             print(f"  - {fx.get('fx_name')}  [source={src}]  state={state_txt}")
         return 0
     if args.learn_fx:
+        # inside cmd_enhancements, under: if args.learn_fx:
         fx_name = args.learn_fx.strip()
         if not fx_name:
             print("ERROR: FX name cannot be empty", file=sys.stderr)
             return 1
-        # CLI prompts and snapshot capture; then pure logic
         print(f"Learning FX '{fx_name}' for: {target['name']} ({target['flow']})")
+        # Settling delay before each snapshot; override with AUDIOCTL_LEARN_FX_SETTLE (seconds)
+        try:
+            FX_SETTLE = float(os.environ.get("AUDIOCTL_LEARN_FX_SETTLE", "0.35"))
+        except Exception:
+            FX_SETTLE = 0.35
+        # First pass (A/B) – used only to "prime" the driver
         print(f"Set the '{fx_name}' effect to ENABLED for this device.")
         input("When ready, press Enter to capture snapshot A... ")
         captured_stderr = io.StringIO()
         with redirect_stderr(captured_stderr):
+            time.sleep(FX_SETTLE)
             snapA = _collect_sysfx_snapshot(target["id"])
         _reemit_non_error_stderr(captured_stderr.getvalue())
         print(f"Now set the '{fx_name}' effect to DISABLED for the same device.")
         input("When ready, press Enter to capture snapshot B... ")
         captured_stderr = io.StringIO()
         with redirect_stderr(captured_stderr):
+            time.sleep(FX_SETTLE)
             snapB = _collect_sysfx_snapshot(target["id"])
+        _reemit_non_error_stderr(captured_stderr.getvalue())
+        # Second pass (A2/B2) – this pair is what we will record in the INI
+        print(f"Enable the '{fx_name}' effect again (second pass).")
+        input("When ready, press Enter to capture snapshot A2... ")
+        captured_stderr = io.StringIO()
+        with redirect_stderr(captured_stderr):
+            time.sleep(FX_SETTLE)
+            snapA2 = _collect_sysfx_snapshot(target["id"])
+        _reemit_non_error_stderr(captured_stderr.getvalue())
+        print(f"Disable the '{fx_name}' effect again (second pass).")
+        input("When ready, press Enter to capture snapshot B2... ")
+        captured_stderr = io.StringIO()
+        with redirect_stderr(captured_stderr):
+            time.sleep(FX_SETTLE)
+            snapB2 = _collect_sysfx_snapshot(target["id"])
         _reemit_non_error_stderr(captured_stderr.getvalue())
         ok, info = _learn_fx_and_write_ini(
             target, fx_name, snapA, snapB,
             ini_path=getattr(args, "vendor_ini", None) or _vendor_ini_default_path(),
-            prefer_hkcu=not args.prefer_hklm
+            prefer_hkcu=not args.prefer_hklm,
+            snapA2=snapA2, snapB2=snapB2
         )
         if ok:
             print(json.dumps({"fxLearned": {
