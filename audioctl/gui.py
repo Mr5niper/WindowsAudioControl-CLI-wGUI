@@ -1298,7 +1298,7 @@ class AudioGUI:
                 return
             
             if result["type"] == "main":
-                self._open_main_learn_dialog(d)
+                self._learn_main_toggle_via_cli(d)
             else:
                 self._learn_fx_toggle_via_cli(d, result["fx_name"])
         
@@ -1464,9 +1464,10 @@ class AudioGUI:
         top.protocol("WM_DELETE_WINDOW", do_cancel)
     def _learn_main_toggle_via_cli(self, d):
         """
-        Delegate 'Learn Enhancements' for main switch to the existing CLI interactive flow:
-          audioctl enhancements --id "<id>" --flow "<flow>" --learn
-        GUI hosts the CLI prompts via run_audioctl_interactive and then parses the final JSON.
+        Delegate 'Learn Enhancements' (main) to the CLI interactive flow:
+          audioctl enhancements --id "<id>" --flow <Flow> --learn
+        Use popup prompts (like FX) and handle repeat passes automatically.
+        Skip CLI confirmation by setting AUDIOCTL_LEARN_CONFIRMED=1 (GUI shows its own warning).
         """
         from .logging_setup import _log
         try:
@@ -1477,44 +1478,32 @@ class AudioGUI:
                 ini_path = "<vendor_toggles.ini>"
             warn_txt = (
                 "READ CAREFULLY\n\n"
-                "This Learn mode will capture two registry snapshots and write a vendor entry via the CLI into:\n"
+                "This Learn mode will capture registry snapshots and write a vendor entry via the CLI into:\n"
                 f"  {ini_path}\n\n"
                 "From now on, future 'Enhancements' commands for this device WILL WRITE registry values.\n\n"
                 "During Learn:\n"
                 "- Do NOT change other audio settings.\n"
                 "- Do NOT switch devices.\n"
-                "- Only toggle 'Audio Enhancements' for THIS device when prompted by the CLI.\n\n"
+                "- Only toggle 'Audio Enhancements' for THIS device when prompted.\n\n"
                 "Click OK to continue, or Cancel to abort."
             )
             if not messagebox.askokcancel("Warning – Learn writes registry (persistent)", warn_txt):
                 self.set_status("Learn Enhancements: aborted by user")
                 _log(f"GUI action: learn-main cancelled id={d['id']} name={d['name']}")
                 return
-            cli_preview = f'audioctl enhancements --id "{d["id"]}" --flow {d["flow"]} --learn'
-            self.maybe_print_cli(cli_preview)
-            _log(f"GUI action: learn-main start via CLI id={d['id']} name={d['name']} flow={d['flow']}")
-            # Patterns for the main interactive CLI prompts.
-            # We don't try to parse the huge warning; we already showed our own.
+            # Prompt patterns (repeats are naturally handled: same substrings will reappear)
             prompt_patterns = [
-                # Step 1: ENABLED for A
                 (
                     "set 'Audio Enhancements' to ENABLED",
                     "Learn Enhancements – Step 1",
                     "In Windows Sound settings, set 'Audio Enhancements' to ENABLED for this device.\n\n"
-                    "Click OK to capture snapshot A.",
+                    "Click OK to continue."
                 ),
-                # Step 2: DISABLED for B
                 (
                     "set 'Audio Enhancements' to DISABLED",
                     "Learn Enhancements – Step 2",
                     "In Windows Sound settings, set 'Audio Enhancements' to DISABLED for this device.\n\n"
-                    "Click OK to capture snapshot B.",
-                ),
-                # Generic "When ready, press Enter" prompts (optional).
-                (
-                    "When ready, press Enter",
-                    "Learn Enhancements",
-                    None,  # use CLI's line as-is if you want to show it
+                    "Click OK to continue."
                 ),
             ]
             args = [
@@ -1523,28 +1512,54 @@ class AudioGUI:
                 "--flow", d["flow"],
                 "--learn",
             ]
+            # Temporarily set the env flag so CLI skips its own "I UNDERSTAND" input
+            prev = os.environ.get("AUDIOCTL_LEARN_CONFIRMED")
+            os.environ["AUDIOCTL_LEARN_CONFIRMED"] = "1"
             try:
                 rc, out, err = run_audioctl_interactive(args, prompt_patterns, expect_ok=False)
-            except Exception as e:
-                messagebox.showerror("Error", f"Learn failed via CLI interactive flow:\n{e}")
-                self.set_status("Learn Enhancements: CLI interactive failed")
-                _log(f"GUI action: learn-main interactive error id={d['id']} name={d['name']} err={e}")
-                return
-            # Try to parse the final JSON object (vendorLearned/vendorAvailable)
-            data = None
-            try:
-                lines = (out or "").splitlines()
-                for raw in reversed(lines):
-                    line = raw.strip()
-                    if not line or not line.startswith("{"):
-                        continue
+            finally:
+                if prev is None:
                     try:
-                        data = json.loads(line)
+                        del os.environ["AUDIOCTL_LEARN_CONFIRMED"]
                     except Exception:
-                        continue
-                    break
-            except Exception:
-                data = None
+                        pass
+                else:
+                    os.environ["AUDIOCTL_LEARN_CONFIRMED"] = prev
+# Parse final JSON: vendorLearned or vendorAvailable (robust even if prompt text and JSON share a line)
+            def _extract_last_vendor_json(text: str):
+                s = text or ""
+                i = len(s) - 1
+                while i >= 0:
+                    # find a closing brace
+                    while i >= 0 and s[i] != "}":
+                        i -= 1
+                    if i < 0:
+                        break
+                    end = i
+                    depth = 1
+                    i -= 1
+                    # walk backwards to find matching opening brace
+                    while i >= 0 and depth > 0:
+                        ch = s[i]
+                        if ch == "}":
+                            depth += 1
+                        elif ch == "{":
+                            depth -= 1
+                        i -= 1
+                    if depth == 0:
+                        start = i + 1
+                        chunk = s[start:end + 1]
+                        try:
+                            obj = json.loads(chunk)
+                            if isinstance(obj, dict) and ("vendorLearned" in obj or "vendorAvailable" in obj):
+                                return obj
+                        except Exception:
+                            pass
+                    # continue scanning earlier content
+                    i = end - 1
+                return None
+
+            data = _extract_last_vendor_json(out)
             if not isinstance(data, dict):
                 messagebox.showwarning(
                     "Learn Enhancements",
@@ -1566,9 +1581,7 @@ class AudioGUI:
                 messagebox.showinfo("Learn Enhancements", msg)
                 self.set_status("Learn Enhancements: vendor learned via CLI")
                 _log(f"GUI action: learn-main success via CLI interactive id={d['id']} name={d['name']} info={info}")
-                # NEW
                 self.refresh_devices()
-                return
             elif "vendorAvailable" in data:
                 info = data["vendorAvailable"]
                 msg = (
@@ -1580,9 +1593,7 @@ class AudioGUI:
                 messagebox.showinfo("Learn Enhancements", msg)
                 self.set_status("Learn Enhancements: vendor already available (CLI)")
                 _log(f"GUI action: learn-main vendor-available via CLI interactive id={d['id']} name={d['name']} info={info}")
-                # NEW
                 self.refresh_devices()
-                return
             else:
                 messagebox.showwarning(
                     "Learn Enhancements",
@@ -1599,6 +1610,7 @@ class AudioGUI:
           audioctl enhancements --learn-fx "<FX_NAME>" ...
         GUI reads prompts from stdout and shows them in messageboxes,
         then sends Enter to stdin.
+        Now handles second A/B pass (A2/B2) prompts as well.
         """
         from .logging_setup import _log
         try:
@@ -1623,22 +1635,33 @@ class AudioGUI:
                 self.set_status(f"Learn FX '{fx_name}': aborted by user")
                 _log(f"GUI action: learn-fx cancelled id={d['id']} name={d['name']} fx={fx_name}")
                 return
-            # Prompts we expect from the CLI learn-fx flow, mapped to clearer A/B messages
+            # Prompts reordered and tightened so that second pass (A2/B2) is matched first
             prompt_patterns = [
-                # Step A: enable FX
+                # Second pass first (most specific) – instruction lines only
+                (
+                    "Enable the",
+                    f"Learn FX '{fx_name}' - Step 3",
+                    f"Enable the '{fx_name}' effect again (second pass), then click OK to continue."
+                ),
+                (
+                    "Disable the",
+                    f"Learn FX '{fx_name}' - Step 4",
+                    f"Disable the '{fx_name}' effect again (second pass), then click OK to continue."
+                ),
+
+                # First pass (instruction lines only)
                 (
                     "effect to ENABLED for this device.",
                     f"Learn FX '{fx_name}' - Step 1",
                     f"ENABLE the '{fx_name}' effect for this device.\n"
                     "(Do NOT toggle the main 'Audio Enhancements' switch.)\n\n"
-                    "Click OK to capture snapshot A."
+                    "Click OK, then the GUI will continue."
                 ),
-                # Step B: disable FX
                 (
                     "to DISABLED for the same device.",
                     f"Learn FX '{fx_name}' - Step 2",
                     f"DISABLE the '{fx_name}' effect for this device.\n\n"
-                    "Click OK to capture snapshot B."
+                    "Click OK, then the GUI will continue."
                 ),
             ]
             args = [
@@ -1647,23 +1670,16 @@ class AudioGUI:
                 "--flow", d["flow"],
                 "--learn-fx", fx_name,
             ]
-            try:
-                rc, out, err = run_audioctl_interactive(args, prompt_patterns, expect_ok=False)
-            except Exception as e:
-                messagebox.showerror("Error", f"FX learn failed via CLI interactive flow:\n{e}")
-                self.set_status(f"Learn FX '{fx_name}': CLI interactive failed")
-                _log(f"GUI action: learn-fx interactive error id={d['id']} name={d['name']} fx={fx_name} err={e}")
-                return
-            # Try to parse final fxLearned JSON if present (robust extraction even if concatenated with prompt text)
+            # Run interactive; it will pop dialog for each matched line and press Enter afterwards
+            rc, out, err = run_audioctl_interactive(args, prompt_patterns, expect_ok=False)
+            # Parse final fxLearned JSON if present (robust extraction even if concatenated with prompt text)
             fx_info = None
             try:
                 lines = (out or "").splitlines()
                 for raw in reversed(lines):
                     line = raw.strip()
-                    # Only consider lines that contain the fxLearned key
                     if '"fxLearned"' not in line:
                         continue
-                    # Extract JSON substring from first '{' to last '}' in the line
                     start = line.find("{")
                     end = line.rfind("}")
                     if start == -1 or end == -1 or end <= start:
@@ -1685,14 +1701,12 @@ class AudioGUI:
                     f"Section: {fx_info.get('section')}\n"
                     f"FX:      {fx_info.get('fx_name')}\n"
                     f"INI:     {fx_info.get('iniPath')}\n\n"
-                    "The effect will now appear in the context menu."
+                    "The effect will now appear (or be updated) in the context menu."
                 )
                 messagebox.showinfo(f"Learn FX '{fx_name}'", msg)
                 self.set_status(f"Learn FX '{fx_name}': vendor INI updated")
                 _log(f"GUI action: learn-fx success via CLI interactive id={d['id']} name={d['name']} fx={fx_name} info={fx_info}")
-                # NEW
                 self.refresh_devices()
-                return
             else:
                 messagebox.showwarning(
                     f"Learn FX '{fx_name}'",
@@ -1894,4 +1908,3 @@ def launch_gui():
         _log_exc("MAINLOOP EXCEPTION")
     _log("launch_gui: mainloop exited")
     return 0
-
