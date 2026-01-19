@@ -1,5 +1,5 @@
 # Windows Audio Control CLI + GUI
-## audioctl.exe (pycaw-based)
+## audioctl.exe (pycaw/comtypes-based)
 [List devices](#list-devices)
 <BR>
 [Set default endpoints](#set-default-devices-cli)
