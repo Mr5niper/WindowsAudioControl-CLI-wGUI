@@ -25,11 +25,11 @@ Additional quick links:
 ---
 
 # Why audioctl (CLI‑first)
-Audio that actually obeys you. audioctl puts industrial‑grade Windows audio control behind a clean, scriptable CLI—then layers a friendly GUI on top. You can:
+Audio that actually obeys you. audioctl puts industrial‑grade Windows audio control behind a clean, scriptable CLI, then layers a friendly GUI on top. You can:
 - Script everything: list devices, set defaults, set volume/mute, flip “Listen,” and toggle Enhancements—reliably and repeatably.
 - Teach your driver new tricks: our “Learn Enhancements” and “Learn FX” capture exactly what your device changes in the registry so audioctl can reproduce it, every time.
 - Control effects precisely: once learned, per‑effect toggles (FX) like BassBoost or Loudness can be enabled/disabled on demand—even if your driver doesn’t expose a native API.
-- Trust it in automation: fast read‑only commands give you state (volume, mute, listen, enhancements, per‑effect) without side effects—perfect for status bars, hotkeys, and scripts.
+- Trust it in automation: fast read‑only commands give you state (volume, mute, listen, enhancements, per‑effect) without side effects—perfect for validation, automated testing, hotkeys, and scripts.
 - Enjoy a better GUI: right‑click a device and you’ll see context‑aware actions with live state (including FX). Learn flows are guided, non‑blocking, and safe—while the engine remains CLI‑first.
 
 Bottom line: audioctl is CLI‑first for power and reliability. The GUI is a great assistant; the CLI is the authority.
