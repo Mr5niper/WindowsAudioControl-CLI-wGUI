@@ -1525,7 +1525,7 @@ class AudioGUI:
                         pass
                 else:
                     os.environ["AUDIOCTL_LEARN_CONFIRMED"] = prev
-# Parse final JSON: vendorLearned or vendorAvailable (robust even if prompt text and JSON share a line)
+            # Parse final JSON: vendorLearned or vendorAvailable (robust even if prompt text and JSON share a line)
             def _extract_last_vendor_json(text: str):
                 s = text or ""
                 i = len(s) - 1
@@ -1908,3 +1908,4 @@ def launch_gui():
         _log_exc("MAINLOOP EXCEPTION")
     _log("launch_gui: mainloop exited")
     return 0
+
