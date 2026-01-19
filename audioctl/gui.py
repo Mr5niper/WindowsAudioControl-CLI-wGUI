@@ -15,6 +15,7 @@ from .compat import is_admin
 # GUI uses only CLI commands; it does not import low-level device helpers directly.
 from .vendor_db import (
     _vendor_ini_default_path,
+    _load_vendor_db_split,  # NEW
 )
 # --- BEGIN: Non-blocking Learn runner (main Enhancements) ---
 import threading
@@ -331,11 +332,13 @@ class AudioGUI:
             variable=self.include_all,
             command=self.refresh_devices
         ).pack(side="left", padx=(10, 0))
-        ttk.Checkbutton(
+        self.chk_print_cmd = ttk.Checkbutton(
             self.topbar,
             text="Print CLI commands",
             variable=self.print_cmd
-        ).pack(side="left", padx=(10, 0))
+        )
+        self.chk_print_cmd.pack(side="left", padx=(10, 0))
+        self._suppress_cli_prints = False
         if not is_admin():
             admin_lbl = ttk.Label(self.topbar, text="Note: Some actions may require Administrator", foreground="#CC6600")
             admin_lbl.pack(side="right")
@@ -615,11 +618,45 @@ class AudioGUI:
         self.root.geometry(f"{int(w)}x{int(h)}")
         self.root.minsize(int(min(w, scr_w - margin)), int(min(h, scr_h - margin)))
     def maybe_print_cli(self, cmd_str: str):
+        # Hard suppression: never print while a learn flow is running
+        if getattr(self, "_suppress_cli_prints", False):
+            return
         if self.print_cmd.get():
             try:
                 print(cmd_str)
             except Exception:
                 pass
+    def _suspend_print_cli_and_disable_checkbox(self):
+        # Save current checkbox value
+        try:
+            self._prev_print_cmd_val = bool(self.print_cmd.get())
+        except Exception:
+            self._prev_print_cmd_val = False
+        # Force printing OFF and disable the checkbox
+        try:
+            self.print_cmd.set(False)
+        except Exception:
+            pass
+        try:
+            if hasattr(self, "chk_print_cmd") and self.chk_print_cmd:
+                self.chk_print_cmd.configure(state="disabled")
+        except Exception:
+            pass
+        # HARD suppression (blocks any attempt to print via maybe_print_cli)
+        self._suppress_cli_prints = True
+    def _restore_print_cli_checkbox(self):
+        # Restore checkbox and printing state
+        try:
+            self.print_cmd.set(bool(getattr(self, "_prev_print_cmd_val", False)))
+        except Exception:
+            pass
+        try:
+            if hasattr(self, "chk_print_cmd") and self.chk_print_cmd:
+                self.chk_print_cmd.configure(state="normal")
+        except Exception:
+            pass
+        # Lift hard suppression
+        self._suppress_cli_prints = False
     def get_selected_device(self):
         sel = self.tree.selection()
         if not sel:
@@ -1252,9 +1289,21 @@ class AudioGUI:
             fx_name_frame.pack(anchor="w", padx=(30, 0), pady=(5, 15))
             
             ttk.Label(fx_name_frame, text="Effect name:").pack(side="left", padx=(0, 5))
-            fx_entry_widget = ttk.Entry(fx_name_frame, textvariable=fx_name_var, width=25)
+            fx_entry_widget = ttk.Combobox(
+                fx_name_frame,
+                textvariable=fx_name_var,
+                width=30,
+                state="disabled",  # becomes "normal" when FX is selected
+                values=self._load_fx_names_for_combo()
+            )
             fx_entry_widget.pack(side="left")
-            fx_entry_widget.config(state="disabled")
+            # Refresh the list each time the dropdown is opened
+            try:
+                fx_entry_widget.configure(postcommand=lambda: fx_entry_widget.configure(values=self._load_fx_names_for_combo()))
+            except Exception:
+                pass
+            # Enable simple type-to-autofill
+            self._setup_combobox_autocomplete(fx_entry_widget)
             
             result = {"proceed": False, "type": None, "fx_name": None}
             
@@ -1472,6 +1521,7 @@ class AudioGUI:
         from .logging_setup import _log
         try:
             self._in_modal_operation = True
+            self._suspend_print_cli_and_disable_checkbox()
             try:
                 ini_path = _vendor_ini_default_path()
             except Exception:
@@ -1558,7 +1608,6 @@ class AudioGUI:
                     # continue scanning earlier content
                     i = end - 1
                 return None
-
             data = _extract_last_vendor_json(out)
             if not isinstance(data, dict):
                 messagebox.showwarning(
@@ -1603,6 +1652,7 @@ class AudioGUI:
                 self.set_status("Learn Enhancements: CLI did not learn entry")
                 _log(f"GUI action: learn-main unknown-json via CLI interactive id={d['id']} name={d['name']} data={data}")
         finally:
+            self._restore_print_cli_checkbox()
             self._in_modal_operation = False
     def _learn_fx_toggle_via_cli(self, d, fx_name):
         """
@@ -1615,6 +1665,7 @@ class AudioGUI:
         from .logging_setup import _log
         try:
             self._in_modal_operation = True
+            self._suspend_print_cli_and_disable_checkbox()
             try:
                 ini_path = _vendor_ini_default_path()
             except Exception:
@@ -1648,7 +1699,6 @@ class AudioGUI:
                     f"Learn FX '{fx_name}' - Step 4",
                     f"Disable the '{fx_name}' effect again (second pass), then click OK to continue."
                 ),
-
                 # First pass (instruction lines only)
                 (
                     "effect to ENABLED for this device.",
@@ -1716,6 +1766,7 @@ class AudioGUI:
                 self.set_status(f"Learn FX '{fx_name}': no fxLearned JSON detected")
                 _log(f"GUI action: learn-fx no-json id={d['id']} name={d['name']} fx={fx_name} out={out!r} err={err!r}")
         finally:
+            self._restore_print_cli_checkbox()
             self._in_modal_operation = False
     def open_volume_dialog(self, device_id, device_name):
         top = tk.Toplevel(self.root)
@@ -1859,6 +1910,36 @@ class AudioGUI:
             messagebox.showerror("Error", f"Failed to toggle {fx_name}:\n{e}")
             self.set_status(f"Error toggling {fx_name}")
             _log(f"GUI action: toggle-fx via CLI exception id={d['id']} name={d['name']} fx={fx_name} err={e}")
+    def _load_fx_names_for_combo(self):
+        # Returns a sorted list of unique FX names from vendor_toggles.ini
+        try:
+            ini_path = _vendor_ini_default_path()
+            db = _load_vendor_db_split(ini_path)
+            names = sorted({(e.get("fx_name") or "").strip()
+                            for e in (db.get("fx") or [])
+                            if (e.get("fx_name") or "").strip()})
+            return names
+        except Exception:
+            return []
+    def _setup_combobox_autocomplete(self, combo: ttk.Combobox):
+        # Simple "starts with" autofill on typing
+        def on_keyrelease(ev):
+            text = combo.get()
+            if not text:
+                return
+            vals = list(combo.cget("values") or [])
+            low = text.lower()
+            for v in vals:
+                s = (v or "")
+                if s.lower().startswith(low):
+                    combo.set(s)
+                    try:
+                        combo.icursor(len(text))
+                        combo.select_range(len(text), tk.END)
+                    except Exception:
+                        pass
+                    break
+        combo.bind("<KeyRelease>", on_keyrelease, add="+")
 def launch_gui():
     _log("launch_gui: creating Tk root")
     root = tk.Tk()
@@ -1908,5 +1989,3 @@ def launch_gui():
         _log_exc("MAINLOOP EXCEPTION")
     _log("launch_gui: mainloop exited")
     return 0
-
-
