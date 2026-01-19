@@ -318,7 +318,8 @@ def cmd_enhancements(args):
     # Validation: exactly one operation
     ops = [
         bool(args.enable), bool(args.disable), bool(args.learn),
-        bool(args.learn_fx), bool(args.enable_fx), bool(args.disable_fx), bool(args.list_fx)
+        bool(args.learn_fx), bool(args.enable_fx), bool(args.disable_fx), bool(args.list_fx),
+        bool(getattr(args, "delete_fx", None)),
     ]
     if sum(ops) != 1:
         print("ERROR: specify exactly one of --enable, --disable, --learn, --learn-fx, --enable-fx, --disable-fx, or --list-fx", file=sys.stderr)
@@ -500,6 +501,63 @@ def cmd_enhancements(args):
             return 0
         else:
             print(f"ERROR: FX '{chosen_name}' toggle failed for this device", file=sys.stderr)
+            return 1
+    if args.delete_fx:
+        desired = (args.delete_fx or "").strip()
+        if not desired:
+            print("ERROR: FX name cannot be empty", file=sys.stderr)
+            return 1
+        fx_all = _list_fx_for_device(target["id"], target["flow"], ini_path=getattr(args, "vendor_ini", None))
+        # Build matches by name using substring or regex, case-insensitive (same as enable/disable-fx)
+        matches_fx = []
+        if args.regex:
+            try:
+                pat = re.compile(desired, re.IGNORECASE)
+            except re.error as e:
+                print(f"ERROR: invalid regex for FX name: {e}", file=sys.stderr)
+                return 1
+            for fx in fx_all:
+                if pat.search(fx.get("fx_name") or ""):
+                    matches_fx.append(fx)
+        else:
+            for fx in fx_all:
+                if desired.lower() in (fx.get("fx_name") or "").lower():
+                    matches_fx.append(fx)
+        if not matches_fx:
+            print(f"ERROR: FX '{desired}' not found on this device. Use --list-fx to see available effects.", file=sys.stderr)
+            return 1
+        # If multiple matches, prompt user to choose (same style as enable-fx)
+        if len(matches_fx) > 1:
+            print("Multiple FX matches found:")
+            for i, fx in enumerate(matches_fx):
+                print(f"  [{i}] {fx.get('fx_name')}")
+            try:
+                sel = input(f"Select index (0..{len(matches_fx)-1}): ").strip()
+                idx = int(sel)
+                if idx < 0 or idx >= len(matches_fx):
+                    print("ERROR: selection out of range.", file=sys.stderr)
+                    return 4
+            except Exception:
+                print("ERROR: invalid selection.", file=sys.stderr)
+                return 4
+            chosen_name = matches_fx[idx].get("fx_name") or desired
+        else:
+            chosen_name = matches_fx[0].get("fx_name") or desired
+        from .vendor_db import _delete_fx_for_guid
+        ok, info = _delete_fx_for_guid(chosen_name, target["id"], ini_path=getattr(args, "vendor_ini", None))
+        if ok:
+            print(json.dumps({
+                "fxDeleted": {
+                    "id": target["id"],
+                    "name": target["name"],
+                    "fx_name": chosen_name,
+                    **(info or {})
+                }
+            }))
+            return 0
+        else:
+            msg = info if isinstance(info, str) else (info.get("reason") if isinstance(info, dict) else "unknown")
+            print(f"ERROR: delete-fx failed: {msg}", file=sys.stderr)
             return 1
     # === EXISTING: Main toggle operations (MODIFIED: learn fallback) ===
     if args.learn:
@@ -964,6 +1022,8 @@ def build_parser():
                       help="List all learned effects for this device")
     p_fx.add_argument("--json", action="store_true",
                       help="For --list-fx: output JSON instead of human-readable text")
+    p_fx.add_argument("--delete-fx", metavar="FX_NAME",
+                      help="Delete a learned audio effect for this device")
     p_fx.set_defaults(func=cmd_enhancements)
     p_ge = sub.add_parser(
         "get-enhancements",
@@ -1138,7 +1198,8 @@ def main(argv=None):
             int(bool(getattr(args, "learn_fx", None))) +
             int(bool(getattr(args, "enable_fx", None))) +
             int(bool(getattr(args, "disable_fx", None))) +
-            int(bool(getattr(args, "list_fx", False)))
+            int(bool(getattr(args, "list_fx", False))) +
+            int(bool(getattr(args, "delete_fx", None)))
         )
         if ops_count != 1:
             print("ERROR: specify exactly one of --enable, --disable, --learn, --learn-fx, --enable-fx, --disable-fx, or --list-fx", file=sys.stderr)
