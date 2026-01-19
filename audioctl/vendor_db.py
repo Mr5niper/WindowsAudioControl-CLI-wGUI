@@ -242,6 +242,16 @@ def _load_vendor_db_split(ini_path=None):
                         t_di = cfg.get(sec, f"write{i}_type_disable").strip().upper()
                         v_en = cfg.get(sec, f"write{i}_enable").strip()
                         v_di = cfg.get(sec, f"write{i}_disable").strip()
+                        # NEW: optional per-toggle devices list
+                        raw_devices = cfg.get(sec, f"write{i}_devices", fallback=None)
+                        if raw_devices is None:
+                            devs = None            # universal (applies to all)
+                        else:
+                            raw_devices = raw_devices.strip()
+                            if not raw_devices:
+                                devs = []          # explicit: applies to nobody
+                            else:
+                                devs = [x.strip().lower() for x in raw_devices.split(",") if x.strip()]
                         writes.append({
                             "hive": hive,
                             "subkey": subk,
@@ -250,6 +260,7 @@ def _load_vendor_db_split(ini_path=None):
                             "type_disable": t_di,
                             "enable": v_en,
                             "disable": v_di,
+                            "devices": devs,  # None=universal, []=none, list=[guids]
                         })
                     e["multi_write"] = True
                     e["writes"] = writes
@@ -464,6 +475,8 @@ def _append_fx_ini_entry_multi(ini_path, section_name, fx_name, device_name, wri
         lines.append(f"write{i}_type_disable = {w['type_disable']}")
         lines.append(f"write{i}_enable = {w['enable']}")
         lines.append(f"write{i}_disable = {w['disable']}")
+        if "devices" in w and isinstance(w["devices"], list):
+            lines.append(f"write{i}_devices = {','.join(sorted(set(x.lower() for x in w['devices'])))}")
     if notes:
         lines.append(f"notes = {notes}")
     lines.append("devices = ")
@@ -676,6 +689,23 @@ def _canonical_section_name_from_key(key_tuple):
     # Stable section name: fx_ + first 16 hex of sha1 over repr(key_tuple)
     h = hashlib.sha1(repr(key_tuple).encode("utf-8", "replace")).hexdigest()[:16]
     return f"fx_{h}"
+def _write_applies_to_guid(w, guid_lc: str) -> bool:
+    """
+    True if this toggle applies to guid_lc.
+    devices is interpreted as:
+      - None  => universal (applies to all)
+      - []    => applies to nobody
+      - list  => applies only to listed GUIDs
+    """
+    devs = w.get("devices", None)
+    if devs is None:
+        return True
+    if isinstance(devs, list) and len(devs) == 0:
+        return False
+    try:
+        return guid_lc in {x.strip().lower() for x in devs}
+    except Exception:
+        return False
 # --- FAST, SINGLE-PROBE READ HELPERS (no fallbacks, no COM) ---
 def _fast_read_one(hive_name: str, base_path: str, value_name: str):
     """
@@ -735,25 +765,36 @@ def _value_equals(expected, expected_type_name, actual_val, actual_typ):
 def _fast_read_vendor_entry_state(entry, device_id, flow):
     """
     FAST state read (True/False/None) driven by learned scope.
-    - MAIN: read exactly value_name at learned subkey for THIS endpoint,
-            probing both HKCU and HKLM if allowed by entry.hives. If both
-            exist and disagree, prefer the hive whose containing key has the
-            newer last-write time; if timestamps tie/missing, prefer HKCU.
-    - FX multi-write: use the decider write; probe recorded hive first and the
-            alternate hive as well. If both exist and disagree, prefer the hive
-            whose containing key has the newer last-write time; tie -> prefer
-            the recorded hive. Keeps the method fast (single value in up to 2 hives).
+    - MAIN: unchanged from your version (HKCU/HKLM with newer-key tie-break)
+    - FX multi-write: pick the best applicable toggle (filtered by write{i}_devices),
+      probe recorded hive then alternate; newer-key tie-break if both disagree.
     """
     try:
-        # FX multi-write (decider-only quick read with heuristic)
+        # FX multi-write (decider-only quick read with heuristic, filtered by GUID)
         if entry.get("type") == "fx" and entry.get("multi_write"):
-            writes = entry.get("writes") or []
+            all_writes = entry.get("writes") or []
+            if not all_writes:
+                return None
+            guid_lc = _guid_of(device_id)
+            writes = [w for w in all_writes if _write_applies_to_guid(w, guid_lc)]
             if not writes:
                 return None
-            idx = max(1, int(entry.get("decider_index", 1)))
-            if idx > len(writes):
-                idx = 1
-            w = writes[idx - 1]
+            # Score: prefer FxProperties, then REG_DWORD (0/1), else others
+            def _score(w):
+                s = 0
+                if str((w.get("subkey") or "")).strip().startswith("FxProperties"):
+                    s += 10
+                t_en = (w.get("type_enable") or "").upper()
+                t_di = (w.get("type_disable") or "").upper()
+                if t_en == "REG_DWORD" and t_di == "REG_DWORD":
+                    s += 5
+                    try:
+                        if {int(w.get("enable")), int(w.get("disable"))} == {0, 1}:
+                            s += 2
+                    except Exception:
+                        pass
+                return s
+            w = sorted(writes, key=_score, reverse=True)[0]
             rec_hive = (w.get("hive") or "HKCU").upper()
             alt_hive = "HKCU" if rec_hive == "HKLM" else "HKLM"
             subkey = (w.get("subkey") or "FxProperties").strip()
@@ -761,21 +802,19 @@ def _fast_read_vendor_entry_state(entry, device_id, flow):
             base = _endpoint_base_path(device_id, flow, subkey)
             if not base:
                 return None
-            # Read both hives (recorded first), capture state and last-write
-            states = {}
-            times  = {}
+            states, times = {}, {}
             for hn in (rec_hive, alt_hive):
                 val, typ = _fast_read_one(hn, base, val_name)
                 if val is None:
                     states[hn] = None
-                    times[hn]  = _fast_key_lastwrite(hn, base)
+                    times[hn] = _fast_key_lastwrite(hn, base)
                     continue
                 try:
                     t_en = _reg_name_to_type(w.get("type_enable"))
                     t_di = _reg_name_to_type(w.get("type_disable"))
                 except Exception:
                     states[hn] = None
-                    times[hn]  = _fast_key_lastwrite(hn, base)
+                    times[hn] = _fast_key_lastwrite(hn, base)
                     continue
                 if _value_equals(w.get("enable"), w.get("type_enable"), val, typ):
                     states[hn] = True
@@ -784,9 +823,7 @@ def _fast_read_vendor_entry_state(entry, device_id, flow):
                 else:
                     states[hn] = None
                 times[hn] = _fast_key_lastwrite(hn, base)
-            s_rec = states.get(rec_hive)
-            s_alt = states.get(alt_hive)
-            # Resolve
+            s_rec, s_alt = states.get(rec_hive), states.get(alt_hive)
             if s_rec is not None and s_alt is None:
                 return s_rec
             if s_alt is not None and s_rec is None:
@@ -794,17 +831,12 @@ def _fast_read_vendor_entry_state(entry, device_id, flow):
             if s_rec is not None and s_alt is not None:
                 if s_rec == s_alt:
                     return s_rec
-                # Disagree: pick newer by key last-write; tie -> prefer recorded hive
-                t_rec = times.get(rec_hive)
-                t_alt = times.get(alt_hive)
+                t_rec = times.get(rec_hive); t_alt = times.get(alt_hive)
                 try:
                     if isinstance(t_rec, int) and isinstance(t_alt, int):
-                        if t_alt > t_rec:
-                            return s_alt
-                        elif t_rec > t_alt:
-                            return s_rec
-                        else:
-                            return s_rec  # tie: recorded hive wins
+                        if t_alt > t_rec: return s_alt
+                        if t_rec > t_alt: return s_rec
+                        return s_rec
                 except Exception:
                     pass
                 return s_rec
@@ -956,6 +988,150 @@ def _append_guid_to_section(ini_path, section_name, guid_lc):
                 lines.insert(insert_at, new_line)
     with open(ini_path, "w", encoding="utf-8", errors="replace") as f:
         f.writelines(lines)
+def _append_guid_to_write_devices(ini_path, section_name, write_index, guid_lc):
+    """
+    Ensure write{write_index}_devices contains guid_lc.
+    If missing, create it. If empty, add guid_lc. Keeps list unique and sorted.
+    """
+    try:
+        with open(ini_path, "r", encoding="utf-8", errors="replace") as f:
+            lines = f.read().splitlines(keepends=True)
+    except FileNotFoundError:
+        return
+    sec_hdr = f"[{section_name}]"
+    sec_start = None
+    sec_end = len(lines)
+    for i, line in enumerate(lines):
+        s = line.strip()
+        if s.startswith("[") and s.endswith("]"):
+            if sec_start is None:
+                if s.lower() == sec_hdr.lower():
+                    sec_start = i
+            else:
+                sec_end = i
+                break
+    if sec_start is None:
+        return
+    key_pat = re.compile(rf"^\s*write{write_index}_devices\s*=\s*(.*)$", re.IGNORECASE)
+    devices_idx = None
+    existing = None  # None means no line present
+    for i in range(sec_start + 1, sec_end):
+        m = key_pat.match(lines[i])
+        if m:
+            devices_idx = i
+            txt = m.group(1).strip()
+            if not txt:
+                existing = []  # explicit none
+            else:
+                existing = [x.strip().lower() for x in txt.split(",") if x.strip()]
+            break
+    if existing is None:
+        new_val = guid_lc.lower()
+        new_line = f"write{write_index}_devices = {new_val}\n"
+        insert_at = sec_end
+        if insert_at > 0 and not lines[insert_at - 1].endswith(("\n", "\r")):
+            lines.insert(insert_at, "\n"); insert_at += 1
+        lines.insert(insert_at, new_line)
+    else:
+        if guid_lc.lower() not in existing:
+            existing.append(guid_lc.lower())
+            new_line = f"write{write_index}_devices = {','.join(sorted(set(existing)))}\n"
+            if devices_idx is not None:
+                lines[devices_idx] = new_line
+    with open(ini_path, "w", encoding="utf-8", errors="replace") as f:
+        f.writelines(lines)
+def _remove_guid_from_write_devices(ini_path, section_name, write_index, guid_lc):
+    """
+    Remove guid_lc from write{write_index}_devices.
+    If the devices line becomes empty, keep it as an empty list (applies to nobody).
+    (We do NOT delete the line; empty means 'no devices', not 'universal'.)
+    """
+    try:
+        with open(ini_path, "r", encoding="utf-8", errors="replace") as f:
+            lines = f.read().splitlines(keepends=True)
+    except FileNotFoundError:
+        return
+    sec_hdr = f"[{section_name}]"
+    sec_start = None
+    sec_end = len(lines)
+    for i, line in enumerate(lines):
+        s = line.strip()
+        if s.startswith("[") and s.endswith("]"):
+            if sec_start is None:
+                if s.lower() == sec_hdr.lower():
+                    sec_start = i
+            else:
+                sec_end = i
+                break
+    if sec_start is None:
+        return
+    key_pat = re.compile(rf"^\s*write{write_index}_devices\s*=\s*(.*)$", re.IGNORECASE)
+    for i in range(sec_start + 1, sec_end):
+        m = key_pat.match(lines[i])
+        if not m:
+            continue
+        txt = m.group(1).strip()
+        cur = [x.strip().lower() for x in txt.split(",") if x.strip()] if txt else []
+        cur = [x for x in cur if x != guid_lc.lower()]
+        # Keep the line; empty means 'applies to nobody'
+        new_line = f"write{write_index}_devices = {','.join(cur)}\n" if cur else f"write{write_index}_devices = \n"
+        lines[i] = new_line
+        break
+    with open(ini_path, "w", encoding="utf-8", errors="replace") as f:
+        f.writelines(lines)
+def _find_write_index_by_payload(ini_path, section_name, w):
+    """
+    Find write{i} index in section by full identity+payload match.
+    Returns i or None.
+    """
+    db = _load_vendor_db_split(ini_path)
+    target = None
+    for e in (db.get("fx") or []):
+        if e.get("name") == section_name:
+            target = e
+            break
+    if not target:
+        return None
+    def _same(a, b):
+        return (
+            (a.get("hive","").upper() == b.get("hive","").upper()) and
+            (str(a.get("subkey","")).strip().lower() == str(b.get("subkey","")).strip().lower()) and
+            (str(a.get("name","")).strip().lower() == str(b.get("name","")).strip().lower()) and
+            (str(a.get("type_enable","")).upper() == str(b.get("type_enable","")).upper()) and
+            (str(a.get("type_disable","")).upper() == str(b.get("type_disable","")).upper()) and
+            (str(a.get("enable","")).strip() == str(b.get("enable","")).strip()) and
+            (str(a.get("disable","")).strip() == str(b.get("disable","")).strip())
+        )
+    for idx, cw in enumerate(target.get("writes") or [], start=1):
+        if _same(cw, w):
+            return idx
+    return None
+def _cleanup_conflicting_toggles(ini_path, section_name, guid_lc, keep_idx, keep_write):
+    """
+    Ensure guid_lc is NOT listed on any other toggle in this bucket that has
+    the same identity (hive/subkey/name) but different payload than keep_write.
+    keep_idx is the index of the write we want to keep for this GUID.
+    """
+    db = _load_vendor_db_split(ini_path)
+    target = None
+    for e in (db.get("fx") or []):
+        if e.get("name") == section_name:
+            target = e
+            break
+    if not target:
+        return
+    def _same_identity(a, b):
+        return (
+            (a.get("hive","").upper() == b.get("hive","").upper()) and
+            (str(a.get("subkey","")).strip().lower() == str(b.get("subkey","")).strip().lower()) and
+            (str(a.get("name","")).strip().lower() == str(b.get("name","")).strip().lower())
+        )
+    for idx, cw in enumerate(target.get("writes") or [], start=1):
+        if idx == keep_idx:
+            continue
+        if _same_identity(cw, keep_write):
+            # remove guid from this conflicting toggle
+            _remove_guid_from_write_devices(ini_path, section_name, idx, guid_lc)
 def _sanitize_ini_section_name(value_name: str):
     # e.g. "{1da5d803-...},5" -> "vendor_{1da5d803-...},5"
     base = re.sub(r'[^A-Za-z0-9_,\-{}]+', "_", value_name)
@@ -1330,28 +1506,29 @@ def _endpoint_base_path(device_id, flow, subkey):
     return rf"SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\{flow_name}\{guid}\{subkey}"
 def _perform_multi_writes(entry, device_id, flow, enable):
     """
-    Write all configured values for enable/disable.
-    Returns True if ALL writes succeeded; False otherwise.
+    Write all applicable toggles (universal + for this GUID).
+    Returns True if ALL applicable writes succeeded; False otherwise.
     """
+    guid_lc = _guid_of(device_id)
     ok_all = True
     for w in entry.get("writes") or []:
-        hive_name = w["hive"].upper()
+        if not _write_applies_to_guid(w, guid_lc):
+            continue
+        hive_name = (w.get("hive") or "").upper()
         hive = winreg.HKEY_LOCAL_MACHINE if hive_name == "HKLM" else winreg.HKEY_CURRENT_USER
-        subk = w["subkey"]
-        name = w["name"]
+        subk = (w.get("subkey") or "").strip()
+        name = (w.get("name") or "").strip().lower()
         base = _endpoint_base_path(device_id, flow, subk)
         if not base:
             ok_all = False
             continue
-        # Choose per-side type and value
-        tname = w["type_enable"] if enable else w["type_disable"]
+        tname = w.get("type_enable") if enable else w.get("type_disable")
         try:
             typ = _reg_name_to_type(tname)
         except Exception:
             ok_all = False
             continue
-        val_text = w["enable"] if enable else w["disable"]
-        # Parse value to native Python type
+        val_text = w.get("enable") if enable else w.get("disable")
         try:
             if typ == winreg.REG_DWORD:
                 data = int(val_text)
@@ -1376,18 +1553,13 @@ def _perform_multi_writes(entry, device_id, flow, enable):
             continue
     return ok_all
 def _read_decider_state(entry, device_id, flow):
-    """
-    Read current FX state based on the configured decider write item.
-    Returns True (enabled) / False (disabled) / None (unknown).
-    Uses:
-      - quorum_threshold across all writes (default 0.60)
-      - recorded decider_index
-      - fallback 'best' write heuristic
-    """
-    # Multi-write only
     if not entry.get("multi_write"):
         return None
-    writes = entry.get("writes") or []
+    all_writes = entry.get("writes") or []
+    if not all_writes:
+        return None
+    guid_lc = _guid_of(device_id)
+    writes = [w for w in all_writes if _write_applies_to_guid(w, guid_lc)]
     if not writes:
         return None
     quorum_threshold = float(entry.get("quorum_threshold", 0.60))
@@ -1427,10 +1599,7 @@ def _read_decider_state(entry, device_id, flow):
         if _eq_expected(val, typ, w.get("disable"), t_di):
             return False
         return None
-    # 1) Quorum voting across all writes (recorded hive, then alternate)
-    votes_true = 0
-    votes_false = 0
-    votes_total = 0
+    votes_true = votes_false = votes_total = 0
     for w in writes:
         rec_hive = (w.get("hive") or "").upper()
         alt_hive = "HKCU" if rec_hive == "HKLM" else "HKLM"
@@ -1438,61 +1607,122 @@ def _read_decider_state(entry, device_id, flow):
         if s is None:
             s = _try_read_one(w, alt_hive)
         if s is True:
-            votes_true += 1
-            votes_total += 1
+            votes_true += 1; votes_total += 1
         elif s is False:
-            votes_false += 1
-            votes_total += 1
+            votes_false += 1; votes_total += 1
     if votes_total > 0:
-        frac_true = votes_true / float(votes_total)
-        frac_false = votes_false / float(votes_total)
-        if frac_true >= quorum_threshold and frac_false < quorum_threshold:
+        if votes_true / votes_total >= quorum_threshold and votes_false / votes_total < quorum_threshold:
             return True
-        if frac_false >= quorum_threshold and frac_true < quorum_threshold:
+        if votes_false / votes_total >= quorum_threshold and votes_true / votes_total < quorum_threshold:
             return False
-    # 2) Decider index fallback
-    def _score_write_for_decider(w):
-        score = 0
+    def _score(w):
+        s = 0
         if str((w.get("subkey") or "").strip()).startswith("FxProperties"):
-            score += 10
+            s += 10
         t_en = (w.get("type_enable") or "").upper()
         t_di = (w.get("type_disable") or "").upper()
         if t_en == "REG_DWORD" and t_di == "REG_DWORD":
-            score += 5
+            s += 5
             try:
-                en_v = int(w.get("enable"))
-                di_v = int(w.get("disable"))
-                if {en_v, di_v} == {0, 1}:
-                    score += 2
+                if {int(w.get("enable")), int(w.get("disable"))} == {0, 1}:
+                    s += 2
             except Exception:
                 pass
-        return score
-    idx = max(1, int(entry.get("decider_index", 1)))
-    if idx > len(writes):
-        idx = 1
-    decider = writes[idx - 1]
-    rec_hive = (decider.get("hive") or "").upper()
-    alt_hive = "HKCU" if rec_hive == "HKLM" else "HKLM"
-    state = _try_read_one(decider, rec_hive)
-    if state is not None:
-        return state
-    state = _try_read_one(decider, alt_hive)
-    if state is not None:
-        return state
-    # 3) Best-scoring write fallback
-    for w in sorted(writes, key=_score_write_for_decider, reverse=True):
+        return s
+    for w in sorted(writes, key=_score, reverse=True):
         rec_hive = (w.get("hive") or "").upper()
         alt_hive = "HKCU" if rec_hive == "HKLM" else "HKLM"
-        state = _try_read_one(w, rec_hive)
-        if state is not None:
-            return state
-        state = _try_read_one(w, alt_hive)
-        if state is not None:
-            return state
+        s = _try_read_one(w, rec_hive)
+        if s is not None:
+            return s
+        s = _try_read_one(w, alt_hive)
+        if s is not None:
+            return s
     return None
 def _dump_mmdevices_all_values_for_fx_learn(device_id):
     # Deprecated in favor of _dump_mmdevices_all_values from devices.py
     return _dump_mmdevices_all_values(device_id)
+def _find_fx_bucket_section_name(ini_path, fx_name):
+    cfg = configparser.ConfigParser()
+    try:
+        if os.path.exists(ini_path):
+            cfg.read(ini_path, encoding="utf-8")
+    except Exception:
+        return None
+    target = (fx_name or "").strip().lower()
+    for sec in cfg.sections():
+        try:
+            if cfg.get(sec, "type", fallback="").strip().lower() != "fx":
+                continue
+            if cfg.get(sec, "fx_name", fallback="").strip().lower() == target:
+                return sec
+        except Exception:
+            continue
+    return None
+def _canonical_fx_bucket_name(fx_name):
+    import hashlib
+    key = (fx_name or "").strip().lower()
+    h = hashlib.sha1(key.encode("utf-8", "replace")).hexdigest()[:16]
+    return f"fx_{h}"
+def _append_new_write_to_section(ini_path, section_name, write_dict, guid_lc):
+    """
+    Append a new write{i}_* block (with write{i}_devices = {guid}) and bump write_count.
+    write_dict keys: hive, subkey, name, type_enable, type_disable, enable, disable
+    """
+    try:
+        with open(ini_path, "r", encoding="utf-8", errors="replace") as f:
+            lines = f.read().splitlines(keepends=True)
+    except FileNotFoundError:
+        return
+    sec_hdr = f"[{section_name}]"
+    sec_start = None
+    sec_end = len(lines)
+    for i, line in enumerate(lines):
+        s = line.strip()
+        if s.startswith("[") and s.endswith("]"):
+            if sec_start is None:
+                if s.lower() == sec_hdr.lower():
+                    sec_start = i
+            else:
+                sec_end = i
+                break
+    if sec_start is None:
+        return
+    wc_idx = None
+    write_count = 0
+    wc_pat = re.compile(r"^\s*write_count\s*=\s*(\d+)\s*$", re.IGNORECASE)
+    for i in range(sec_start + 1, sec_end):
+        m = wc_pat.match(lines[i])
+        if m:
+            wc_idx = i
+            try:
+                write_count = int(m.group(1))
+            except Exception:
+                write_count = 0
+            break
+    new_idx = write_count + 1 if write_count > 0 else 1
+    insert_at = sec_end
+    if insert_at > 0 and not lines[insert_at - 1].endswith(("\n", "\r")):
+        lines.insert(insert_at, "\n"); insert_at += 1
+    w = write_dict
+    block = [
+        f"write{new_idx}_hive = {w.get('hive')}\n",
+        f"write{new_idx}_subkey = {w.get('subkey')}\n",
+        f"write{new_idx}_name = {w.get('name')}\n",
+        f"write{new_idx}_type_enable = {w.get('type_enable')}\n",
+        f"write{new_idx}_type_disable = {w.get('type_disable')}\n",
+        f"write{new_idx}_enable = {w.get('enable')}\n",
+        f"write{new_idx}_disable = {w.get('disable')}\n",
+        f"write{new_idx}_devices = {guid_lc}\n",
+    ]
+    for line in block:
+        lines.insert(insert_at, line); insert_at += 1
+    if wc_idx is not None:
+        lines[wc_idx] = f"write_count = {new_idx}\n"
+    else:
+        lines.insert(sec_start + 1, f"write_count = {new_idx}\n")
+    with open(ini_path, "w", encoding="utf-8", errors="replace") as f:
+        f.writelines(lines)
 def _learn_fx_and_write_ini(target, fx_name, snapA, snapB, ini_path=None, prefer_hkcu=True, snapA2=None, snapB2=None):
     """
     Learn an FX toggle from captured snapshots.
@@ -1525,32 +1755,29 @@ def _learn_fx_and_write_ini(target, fx_name, snapA, snapB, ini_path=None, prefer
     safe_device_name = re.sub(r'[^A-Za-z0-9_\- ]+', '_', target["name"])
     notes = f"Learned FX '{fx_name}' for '{target['name']}' ({target['flow']}); second A/B pass; stability-filtered"
     if writes:
-        # Dedupe against existing multi_write entries (identical content) – previous behavior
-        db = _load_vendor_db_split(ini_path)
-        candidate = {
-            "type": "fx",
-            "multi_write": True,
-            "writes": writes,
-            "decider_index": 1,
-            "quorum_threshold": 0.60,
-        }
-        for e in (db.get("fx") or []):
-            if e.get("multi_write") and _entries_identical_fx(e, candidate):
-                _append_guid_to_section(ini_path, e.get("name"), guid_lc)
-                return True, {
-                    "iniPath": ini_path,
-                    "section": e.get("name"),
-                    "fx_name": fx_name,
-                    "multi_write": True,
-                    "write_count": len(writes),
-                }
-        # Create canonical section; if section exists, append GUID (previous behavior)
-        try:
-            canon_key = _fx_canonical_key_from_writes(writes, 1, 0.60)
-            section_name = _canonical_section_name_from_key(canon_key)
+        # Find or create the bucket for this fx_name
+        bucket = _find_fx_bucket_section_name(ini_path, fx_name)
+        if bucket is None:
+            # First device for this fx_name: create bucket named by fx_name (stable)
+            for w in writes:
+                w.setdefault("devices", None)  # allow universal later if you want
+            section_name = _canonical_fx_bucket_name(fx_name)
+            # seed writes with write{i}_devices = this guid
+            seed = []
+            for w in writes:
+                seed.append({
+                    "hive": w.get("hive"),
+                    "subkey": w.get("subkey"),
+                    "name": w.get("name"),
+                    "type_enable": w.get("type_enable"),
+                    "type_disable": w.get("type_disable"),
+                    "enable": w.get("enable"),
+                    "disable": w.get("disable"),
+                    "devices": [guid_lc],
+                })
             _append_fx_ini_entry_multi(
                 ini_path, section_name, fx_name, target["name"],
-                writes, notes=notes
+                seed, notes=notes
             )
             _append_guid_to_section(ini_path, section_name, guid_lc)
             return True, {
@@ -1558,25 +1785,60 @@ def _learn_fx_and_write_ini(target, fx_name, snapA, snapB, ini_path=None, prefer
                 "section": section_name,
                 "fx_name": fx_name,
                 "multi_write": True,
-                "write_count": len(writes),
+                "write_count": len(seed),
             }
-        except ValueError as e:
-            msg = str(e or "").lower()
-            if "already exists" in msg:
-                try:
-                    _append_guid_to_section(ini_path, section_name, guid_lc)
-                    return True, {
-                        "iniPath": ini_path,
-                        "section": section_name,
-                        "fx_name": fx_name,
-                        "multi_write": True,
-                        "write_count": len(writes),
-                    }
-                except Exception as e2:
-                    return False, f"Failed to append device to existing section '{section_name}': {e2}"
-            return False, str(e)
-        except Exception as e:
-            return False, f"Failed to write INI: {e}"
+        # Merge into existing bucket
+        db = _load_vendor_db_split(ini_path)
+        current = None
+        for e in (db.get("fx") or []):
+            if e.get("name") == bucket:
+                current = e
+                break
+        if current is None:
+            return False, f"Bucket '{bucket}' not found."
+        def _same_identity_payload(a, b):
+            return (
+                (a.get("hive","").upper() == b.get("hive","").upper()) and
+                (str(a.get("subkey","")).strip().lower() == str(b.get("subkey","")).strip().lower()) and
+                (str(a.get("name","")).strip().lower() == str(b.get("name","")).strip().lower()) and
+                (str(a.get("type_enable","")).upper() == str(b.get("type_enable","")).upper()) and
+                (str(a.get("type_disable","")).upper() == str(b.get("type_disable","")).upper()) and
+                (str(a.get("enable","")).strip() == str(b.get("enable","")).strip()) and
+                (str(a.get("disable","")).strip() == str(b.get("disable","")).strip())
+            )
+        # Add/append each learned toggle to the bucket and clean conflicts
+        for lw in writes:
+            idx_match = None
+            for idx, cw in enumerate(current.get("writes") or [], start=1):
+                if _same_identity_payload(lw, cw):
+                    idx_match = idx
+                    break
+            if idx_match is not None:
+                _append_guid_to_write_devices(ini_path, bucket, idx_match, guid_lc)
+                _cleanup_conflicting_toggles(ini_path, bucket, guid_lc, idx_match, lw)
+            else:
+                new_w = {
+                    "hive": lw.get("hive"),
+                    "subkey": lw.get("subkey"),
+                    "name": lw.get("name"),
+                    "type_enable": lw.get("type_enable"),
+                    "type_disable": lw.get("type_disable"),
+                    "enable": lw.get("enable"),
+                    "disable": lw.get("disable"),
+                }
+                _append_new_write_to_section(ini_path, bucket, new_w, guid_lc)
+                new_idx = _find_write_index_by_payload(ini_path, bucket, new_w)
+                if new_idx is not None:
+                    _cleanup_conflicting_toggles(ini_path, bucket, guid_lc, new_idx, new_w)
+        # Ensure bucket devices includes this GUID (for discovery)
+        _append_guid_to_section(ini_path, bucket, guid_lc)
+        return True, {
+            "iniPath": ini_path,
+            "section": bucket,
+            "fx_name": fx_name,
+            "multi_write": True,
+            "write_count": None
+        }
     # Fallback to legacy DWORD flip (previous behavior)
     try:
         diffs = _diff_mmdevices_lists((useA.get("registry") or []), (useB.get("registry") or []))
