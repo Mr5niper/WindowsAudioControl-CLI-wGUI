@@ -282,7 +282,7 @@ def run_audioctl_interactive(args_list, prompt_patterns, expect_ok=True):
 class AudioGUI:
     def __init__(self, root):
         self.root = root
-        self.root.title("Audio Control v1.4.6.4 01-18-2026")
+        self.root.title("Audio Control v1.4.7.0 01-18-2026")
         # Style and theme
         style = ttk.Style(self.root)
         try:
@@ -1908,4 +1908,5 @@ def launch_gui():
         _log_exc("MAINLOOP EXCEPTION")
     _log("launch_gui: mainloop exited")
     return 0
+
 
