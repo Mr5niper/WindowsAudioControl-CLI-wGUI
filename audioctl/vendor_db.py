@@ -739,10 +739,13 @@ def _fast_read_vendor_entry_state(entry, device_id, flow):
             probing both HKCU and HKLM if allowed by entry.hives. If both
             exist and disagree, prefer the hive whose containing key has the
             newer last-write time; if timestamps tie/missing, prefer HKCU.
-    - FX multi-write: unchanged (decider-only quick read).
+    - FX multi-write: use the decider write; probe recorded hive first and the
+            alternate hive as well. If both exist and disagree, prefer the hive
+            whose containing key has the newer last-write time; tie -> prefer
+            the recorded hive. Keeps the method fast (single value in up to 2 hives).
     """
     try:
-        # FX multi-write (unchanged)
+        # FX multi-write (decider-only quick read with heuristic)
         if entry.get("type") == "fx" and entry.get("multi_write"):
             writes = entry.get("writes") or []
             if not writes:
@@ -751,31 +754,60 @@ def _fast_read_vendor_entry_state(entry, device_id, flow):
             if idx > len(writes):
                 idx = 1
             w = writes[idx - 1]
-            hive_name = (w.get("hive") or "HKCU").upper()
+            rec_hive = (w.get("hive") or "HKCU").upper()
+            alt_hive = "HKCU" if rec_hive == "HKLM" else "HKLM"
             subkey = (w.get("subkey") or "FxProperties").strip()
             val_name = (w.get("name") or "").strip().lower()
             base = _endpoint_base_path(device_id, flow, subkey)
             if not base:
                 return None
-            # Try recorded hive first, then the alternate as a fast fallback
-            order_fx = [hive_name, "HKLM" if hive_name == "HKCU" else "HKCU"]
-            seen = set()
-            for hn in order_fx:
-                if hn in seen:
-                    continue
-                seen.add(hn)
-                actual_val, actual_typ = _fast_read_one(hn, base, val_name)
-                if actual_val is None:
+            # Read both hives (recorded first), capture state and last-write
+            states = {}
+            times  = {}
+            for hn in (rec_hive, alt_hive):
+                val, typ = _fast_read_one(hn, base, val_name)
+                if val is None:
+                    states[hn] = None
+                    times[hn]  = _fast_key_lastwrite(hn, base)
                     continue
                 try:
                     t_en = _reg_name_to_type(w.get("type_enable"))
                     t_di = _reg_name_to_type(w.get("type_disable"))
                 except Exception:
+                    states[hn] = None
+                    times[hn]  = _fast_key_lastwrite(hn, base)
                     continue
-                if _value_equals(w.get("enable"), w.get("type_enable"), actual_val, actual_typ):
-                    return True
-                if _value_equals(w.get("disable"), w.get("type_disable"), actual_val, actual_typ):
-                    return False
+                if _value_equals(w.get("enable"), w.get("type_enable"), val, typ):
+                    states[hn] = True
+                elif _value_equals(w.get("disable"), w.get("type_disable"), val, typ):
+                    states[hn] = False
+                else:
+                    states[hn] = None
+                times[hn] = _fast_key_lastwrite(hn, base)
+            s_rec = states.get(rec_hive)
+            s_alt = states.get(alt_hive)
+            # Resolve
+            if s_rec is not None and s_alt is None:
+                return s_rec
+            if s_alt is not None and s_rec is None:
+                return s_alt
+            if s_rec is not None and s_alt is not None:
+                if s_rec == s_alt:
+                    return s_rec
+                # Disagree: pick newer by key last-write; tie -> prefer recorded hive
+                t_rec = times.get(rec_hive)
+                t_alt = times.get(alt_hive)
+                try:
+                    if isinstance(t_rec, int) and isinstance(t_alt, int):
+                        if t_alt > t_rec:
+                            return s_alt
+                        elif t_rec > t_alt:
+                            return s_rec
+                        else:
+                            return s_rec  # tie: recorded hive wins
+                except Exception:
+                    pass
+                return s_rec
             return None
         # MAIN / legacy single-DWORD (heuristic: compare hives, use newer key)
         val_name = (entry.get("value_name") or "").strip().lower()
@@ -823,18 +855,14 @@ def _fast_read_vendor_entry_state(entry, device_id, flow):
                 except Exception:
                     state[hname] = None
             lastw[hname] = _fast_key_lastwrite(hname, base)
-        # Resolve according to availability/conflict
         cu = state.get("HKCU")
         lm = state.get("HKLM")
-        # If only one is known, use it
         if cu is not None and lm is None:
             return cu
         if lm is not None and cu is None:
             return lm
-        # If both known and equal, return it
         if cu is not None and lm is not None and cu == lm:
             return cu
-        # If both known and disagree, use newer key's last-write; tie -> prefer HKCU
         if cu is not None and lm is not None and cu != lm:
             tcu = lastw.get("HKCU")
             tlm = lastw.get("HKLM")
@@ -845,12 +873,10 @@ def _fast_read_vendor_entry_state(entry, device_id, flow):
                     elif tcu > tlm:
                         return cu
                     else:
-                        return cu  # tie -> prefer HKCU
+                        return cu  # tie -> HKCU
             except Exception:
                 pass
-            # If timestamps missing/unusable, prefer HKCU
             return cu
-        # Neither hive has a definitive value
         return None
     except Exception:
         return None
@@ -1467,33 +1493,39 @@ def _read_decider_state(entry, device_id, flow):
 def _dump_mmdevices_all_values_for_fx_learn(device_id):
     # Deprecated in favor of _dump_mmdevices_all_values from devices.py
     return _dump_mmdevices_all_values(device_id)
-def _learn_fx_and_write_ini(target, fx_name, snapA, snapB, ini_path=None, prefer_hkcu=True):
+def _learn_fx_and_write_ini(target, fx_name, snapA, snapB, ini_path=None, prefer_hkcu=True, snapA2=None, snapB2=None):
     """
-    Pure logic: Learn an FX toggle from two pre-captured snapshots.
-    A = enabled, B = disabled.
-    Writes a multi_write FX section capturing ALL changed values across Properties and FxProperties.
-    Falls back to single-DWORD flip if nothing else changes.
+    Learn an FX toggle from captured snapshots.
+    Change here: if a second A/B pass (snapA2/snapB2) is provided, use that
+    pair as the authoritative input for building the write set (the first
+    A/B is only for priming/initializing driver state). Otherwise, behave
+    exactly as before.
     """
     import re
     ini_path = ini_path or _vendor_ini_default_path()
     guid_lc = _guid_of(target["id"])
-    # Build stability-filtered maps
+    # Choose which pair to use for building the write set
+    useA = snapA2 if isinstance(snapA2, dict) else snapA
+    useB = snapB2 if isinstance(snapB2, dict) else snapB
+    # Build stability-filtered maps EXACTLY like before, just with the chosen pair.
+    # A side: single snapshot stability map (previous behavior)
     try:
-        stableA = _stable_registry_map([snapA.get("registry") or []])
+        stableA = _stable_registry_map([useA.get("registry") or []])
     except Exception as e:
         return False, f"Failed to process snapshot A: {e}"
+    # B side: B snapshot + a couple of quick samples (previous behavior)
     try:
         samplesB = _collect_registry_samples(target["id"], repeats=3, delay=0.18)
-        samplesB.insert(0, snapB.get("registry") or [])
+        samplesB.insert(0, useB.get("registry") or [])
         stableB = _stable_registry_map(samplesB)
     except Exception as e:
         return False, f"Failed to process snapshot B: {e}"
+    # Compute diff-based multi-write set (previous behavior)
     writes = _build_fx_multiwrite_from_stable_maps(target, stableA, stableB)
     safe_device_name = re.sub(r'[^A-Za-z0-9_\- ]+', '_', target["name"])
-    safe_fx_name = re.sub(r'[^A-Za-z0-9_\-]+', '_', fx_name)
-    notes = f"Learned FX '{fx_name}' for '{target['name']}' ({target['flow']}); A=enabled, B=disabled. (stability-filtered)"
+    notes = f"Learned FX '{fx_name}' for '{target['name']}' ({target['flow']}); second A/B pass; stability-filtered"
     if writes:
-        # Dedupe against existing multi_write entries
+        # Dedupe against existing multi_write entries (identical content) – previous behavior
         db = _load_vendor_db_split(ini_path)
         candidate = {
             "type": "fx",
@@ -1512,6 +1544,7 @@ def _learn_fx_and_write_ini(target, fx_name, snapA, snapB, ini_path=None, prefer
                     "multi_write": True,
                     "write_count": len(writes),
                 }
+        # Create canonical section; if section exists, append GUID (previous behavior)
         try:
             canon_key = _fx_canonical_key_from_writes(writes, 1, 0.60)
             section_name = _canonical_section_name_from_key(canon_key)
@@ -1528,15 +1561,28 @@ def _learn_fx_and_write_ini(target, fx_name, snapA, snapB, ini_path=None, prefer
                 "write_count": len(writes),
             }
         except ValueError as e:
+            msg = str(e or "").lower()
+            if "already exists" in msg:
+                try:
+                    _append_guid_to_section(ini_path, section_name, guid_lc)
+                    return True, {
+                        "iniPath": ini_path,
+                        "section": section_name,
+                        "fx_name": fx_name,
+                        "multi_write": True,
+                        "write_count": len(writes),
+                    }
+                except Exception as e2:
+                    return False, f"Failed to append device to existing section '{section_name}': {e2}"
             return False, str(e)
         except Exception as e:
             return False, f"Failed to write INI: {e}"
     # Fallback to legacy DWORD flip (previous behavior)
     try:
-        diffs = _diff_mmdevices_lists(snapA.get("registry") or [], snapB.get("registry") or [])
+        diffs = _diff_mmdevices_lists((useA.get("registry") or []), (useB.get("registry") or []))
     except Exception as e:
         return False, f"Diff failed: {e}"
-    snippet, picked = _build_vendor_ini_snippet(target, snapA, snapB, diffs)
+    snippet, picked = _build_vendor_ini_snippet(target, useA, useB, diffs)
     if not picked:
         return False, "No suitable registry differences found to learn."
     value_name = picked["name"]
@@ -1544,7 +1590,6 @@ def _learn_fx_and_write_ini(target, fx_name, snapA, snapB, ini_path=None, prefer
     dword_disable = int(picked["after"])
     notes2 = notes + " (single DWORD)"
     hives = "HKCU,HKLM" if prefer_hkcu else "HKLM,HKCU"
-    # Try to dedupe into an identical single-DWORD FX section
     db = _load_vendor_db_split(ini_path)
     candidate = {
         "type": "fx",
@@ -1574,6 +1619,20 @@ def _learn_fx_and_write_ini(target, fx_name, snapA, snapB, ini_path=None, prefer
         )
         _append_guid_to_section(ini_path, section_name, guid_lc)
     except ValueError as e:
+        msg = str(e or "").lower()
+        if "already exists" in msg:
+            try:
+                _append_guid_to_section(ini_path, section_name, guid_lc)
+                return True, {
+                    "iniPath": ini_path,
+                    "section": section_name,
+                    "fx_name": fx_name,
+                    "value_name": value_name,
+                    "dword_enable": dword_enable,
+                    "dword_disable": dword_disable
+                }
+            except Exception as e2:
+                return False, f"Failed to append device to existing section '{section_name}': {e2}"
         return False, str(e)
     except Exception as e:
         return False, f"Failed to write INI: {e}"
