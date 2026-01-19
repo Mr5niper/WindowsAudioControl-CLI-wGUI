@@ -1,30 +1,143 @@
 # audioctl/devices.py
 import re
-import io
-import json
 import time
 import warnings
 import ctypes
 import winreg
-from contextlib import redirect_stderr
 from ctypes import POINTER, byref, wintypes
-from comtypes import CLSCTX_ALL, CoCreateInstance, GUID, IUnknown, COMMETHOD, HRESULT, CoInitialize, CoUninitialize
-from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume, IMMDeviceEnumerator
-from pycaw.constants import CLSID_MMDeviceEnumerator
+# Import compat BEFORE comtypes/pycaw
 from .compat import (
     E_RENDER, E_CAPTURE,
     E_CONSOLE, E_MULTIMEDIA, E_COMMUNICATIONS,
     ROLES, DEVICE_STATE_ACTIVE, DEVICE_STATE_ALL, DEVICE_STATES,
-    STGM_READ, STGM_WRITE, is_admin, _guid_from_parts,
+    STGM_READ, STGM_WRITE, _guid_from_parts,
 )
+from comtypes import CLSCTX_ALL, CoCreateInstance, GUID, IUnknown, COMMETHOD, HRESULT
+from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume, IMMDeviceEnumerator
+from pycaw.constants import CLSID_MMDeviceEnumerator
 from .logging_setup import _log, _log_exc, _dbg
 # Removed: from .vendor_db import ...
 import comtypes.automation as automation
 import copy
-
+import threading
+import comtypes
+_com_tls = threading.local()
+def _com_enter():
+    try:
+        cnt = getattr(_com_tls, "count", 0)
+        if cnt == 0:
+            comtypes.CoInitialize()
+        _com_tls.count = cnt + 1
+    except Exception:
+        pass
+def _com_exit():
+    try:
+        cnt = getattr(_com_tls, "count", 0) - 1
+        if cnt <= 0:
+            _com_tls.count = 0
+            try:
+                comtypes.CoUninitialize()
+            except Exception:
+                pass
+        else:
+            _com_tls.count = cnt
+    except Exception:
+        pass
+from contextlib import contextmanager
+@contextmanager
+def _com_context():
+    _com_enter()
+    try:
+        yield
+    finally:
+        _com_exit()
+# --- Cached PolicyConfigFx interface definitions (define once at import time) ---
+_POLICY_CONFIG_FX_DEFS = None
+def _init_policyconfig_fx_defs_once():
+    global _POLICY_CONFIG_FX_DEFS
+    if _POLICY_CONFIG_FX_DEFS is not None:
+        return
+    class PROPERTYKEY(ctypes.Structure):
+        _fields_ = (("fmtid", GUID), ("pid", wintypes.DWORD))
+    # Prefer comtypes.automation PROPVARIANT, with a small fallback
+    try:
+        PROPVARIANT = getattr(automation, "PROPVARIANT", getattr(automation, "tagPROPVARIANT"))
+    except Exception:
+        class _PVU(ctypes.Union):
+            _fields_ = [
+                ("boolVal", ctypes.c_short),
+                ("uiVal", ctypes.c_ushort),
+                ("ulVal", ctypes.c_ulong),
+                ("pwszVal", ctypes.c_wchar_p),
+            ]
+        class PROPVARIANT(ctypes.Structure):
+            _anonymous_ = ("data",)
+            _fields_ = [
+                ("vt", ctypes.c_ushort),
+                ("wReserved1", ctypes.c_ushort),
+                ("wReserved2", ctypes.c_ushort),
+                ("wReserved3", ctypes.c_ushort),
+                ("data", _PVU),
+            ]
+    # IPolicyConfigFx IID {F8679F50-850A-41CF-9C72-430F290290C8}
+    _IID_PolicyConfig = GUID(_guid_from_parts("F8679F50", "-850A-41CF-", "9C72-", "430F290290C8"))
+    class IPolicyConfigFx(IUnknown):
+        _iid_ = _IID_PolicyConfig
+        _methods_ = (
+            COMMETHOD([], HRESULT, 'GetMixFormat',
+                      (['in'], wintypes.LPCWSTR, 'wszDeviceId'),
+                      (['out'], POINTER(ctypes.c_void_p), 'ppFormat')),
+            COMMETHOD([], HRESULT, 'GetDeviceFormat',
+                      (['in'], wintypes.LPCWSTR, 'wszDeviceId'),
+                      (['in'], wintypes.BOOL, 'bDefault'),
+                      (['out'], POINTER(ctypes.c_void_p), 'ppFormat')),
+            COMMETHOD([], HRESULT, 'SetDeviceFormat',
+                      (['in'], wintypes.LPCWSTR, 'wszDeviceId'),
+                      (['in'], ctypes.c_void_p, 'pEndpointFormat'),
+                      (['in'], ctypes.c_void_p, 'mixFormat')),
+            COMMETHOD([], HRESULT, 'GetProcessingPeriod',
+                      (['in'], wintypes.LPCWSTR, 'wszDeviceId'),
+                      (['in'], wintypes.BOOL, 'bDefault'),
+                      (['out'], POINTER(ctypes.c_longlong), 'pmftDefaultPeriod'),
+                      (['out'], POINTER(ctypes.c_longlong), 'pmftMinimumPeriod')),
+            COMMETHOD([], HRESULT, 'SetProcessingPeriod',
+                      (['in'], wintypes.LPCWSTR, 'wszDeviceId'),
+                      (['in'], POINTER(ctypes.c_longlong), 'pmftPeriod')),
+            COMMETHOD([], HRESULT, 'GetShareMode',
+                      (['in'], wintypes.LPCWSTR, 'wszDeviceId'),
+                      (['out'], POINTER(ctypes.c_void_p), 'pMode')),
+            COMMETHOD([], HRESULT, 'SetShareMode',
+                      (['in'], wintypes.LPCWSTR, 'wszDeviceId'),
+                      (['in'], ctypes.c_void_p, 'mode')),
+            # NOTE: bFxStore variants we need:
+            COMMETHOD([], HRESULT, 'GetPropertyValue',
+                      (['in'], wintypes.LPCWSTR, 'pszDeviceName'),
+                      (['in'], wintypes.BOOL, 'bFxStore'),
+                      (['in'], POINTER(PROPERTYKEY), 'pKey'),
+                      (['out'], POINTER(PROPVARIANT), 'pv')),
+            COMMETHOD([], HRESULT, 'SetPropertyValue',
+                      (['in'], wintypes.LPCWSTR, 'pszDeviceName'),
+                      (['in'], wintypes.BOOL, 'bFxStore'),
+                      (['in'], POINTER(PROPERTYKEY), 'pKey'),
+                      (['in'], POINTER(PROPVARIANT), 'pv')),
+            COMMETHOD([], HRESULT, 'SetDefaultEndpoint',
+                      (['in'], wintypes.LPCWSTR, 'wszDeviceId'),
+                      (['in'], wintypes.DWORD, 'role')),
+            COMMETHOD([], HRESULT, 'SetEndpointVisibility',
+                      (['in'], wintypes.LPCWSTR, 'wszDeviceId'),
+                      (['in'], wintypes.BOOL, 'bVisible')),
+        )
+    # CLSID_PolicyConfigClient {870AF99C-171D-4F9E-AF0D-E63DF40C2BC9}
+    CLSID_PolicyConfigClient = GUID(_guid_from_parts("870AF99C", "-171D-4F9E-", "AF0D-", "E63DF40C2BC9"))
+    _POLICY_CONFIG_FX_DEFS = (IPolicyConfigFx, CLSID_PolicyConfigClient, PROPERTYKEY, PROPVARIANT)
+# Initialize once at import time
+_init_policyconfig_fx_defs_once()
+def _define_policyconfig_fx_interfaces():
+    # Backward-compatible helper that now just returns the cached defs
+    _init_policyconfig_fx_defs_once()
+    return _POLICY_CONFIG_FX_DEFS
 # Global cache for PropertyStore interface definitions to avoid GC-related COM crashes
 _PROPERTY_STORE_INTERFACES_CACHE = None
-
 def _short_settle(sec=0.15):
     try:
         time.sleep(float(sec))
@@ -58,152 +171,172 @@ def _extract_endpoint_guid_from_device_id(device_id: str):
         return None
 def set_listen_to_device_ps(capture_device_id, enable, render_device_id=None):
     """
-    Enable/disable 'Listen to this device' using IPropertyStore for enable flag
-    and registry for playback target (which requires admin for HKLM write).
-    Assumes COM is already initialized on this thread (GUI or CLI does that).
+    Enable/disable 'Listen to this device' using IPropertyStore for the enable flag
+    and the registry for the playback target (HKLM write requires Admin).
+    COM is initialized and cleaned up internally by this function.
     """
-    import sys
-    
-    # Get cached interface definitions
-    interfaces = _get_property_store_interfaces()
-    PROPVARIANT = interfaces["PROPVARIANT"]
-    PROPERTYKEY = interfaces["PROPERTYKEY"]
-    IPropertyStoreRaw = interfaces["IPropertyStoreRaw"]
-    PIPS = interfaces["PIPS"]
-    VT_BOOL = interfaces["VT_BOOL"]
-    HRESULT_T = interfaces["HRESULT_T"]
-    VARIANT_TRUE = interfaces["VARIANT_TRUE"]
-    VARIANT_FALSE = interfaces["VARIANT_FALSE"]
-    
-    def _hrx(hr): return f"0x{ctypes.c_uint(hr).value:08X}"
-    def _raw_ptr(p): return ctypes.cast(p, ctypes.c_void_p).value
-    
-    propsys = ctypes.OleDLL("propsys.dll")
-    ole32 = ctypes.OleDLL("ole32.dll")
-    have_helpers = True
-    try:
-        InitPropVariantFromBoolean = propsys.InitPropVariantFromBoolean
-        InitPropVariantFromBoolean.restype = HRESULT_T
-        InitPropVariantFromBoolean.argtypes = (wintypes.BOOL, POINTER(PROPVARIANT))
-    except (AttributeError, OSError):
-        have_helpers = False
-    PropVariantClear = ole32.PropVariantClear
-    PropVariantClear.restype = HRESULT_T
-    PropVariantClear.argtypes = (POINTER(PROPVARIANT),)
-    
-    def _pv_from_bool_local(value: bool):
-        pv = PROPVARIANT()
-        if have_helpers:
-            hr = InitPropVariantFromBoolean(VARIANT_TRUE if value else VARIANT_FALSE, byref(pv))
-            if hr != 0:
-                raise OSError(f"InitPropVariantFromBoolean failed: {_hrx(hr)}")
-        else:
-            pv.vt = VT_BOOL
-            try:
-                pv.boolVal = VARIANT_TRUE if value else VARIANT_FALSE
-            except AttributeError:
-                pass
-        return pv
-    
-    PKEY_LISTEN_ENABLE = PROPERTYKEY(GUID("{24dbb0fc-9311-4b3d-9cf0-18ff155639d4}"), 1)
-    
-    pv_enable = None
-    try:
-        # Set enable/disable via IPropertyStore (works)
-        enumerator = CoCreateInstance(CLSID_MMDeviceEnumerator, interface=IMMDeviceEnumerator, clsctx=CLSCTX_ALL)
-        dev = enumerator.GetDevice(capture_device_id)
-        ps_unknown = dev.OpenPropertyStore(STGM_WRITE)
-        ps_ptr_val = _raw_ptr(ps_unknown)
-        if not ps_ptr_val:
-            raise OSError("OpenPropertyStore returned null pointer for IPropertyStore.")
-        ps_iface = ctypes.cast(ctypes.c_void_p(ps_ptr_val), PIPS)
-        
-        pv_enable = _pv_from_bool_local(bool(enable))
-        hr = ps_iface.contents.lpVtbl.contents.SetValue(ps_iface, byref(PKEY_LISTEN_ENABLE), byref(pv_enable))
-        if hr != 0:
-            raise OSError(f"IPropertyStore::SetValue(enable) failed: {_hrx(hr)}")
-        
-        hr = ps_iface.contents.lpVtbl.contents.Commit(ps_iface)
-        if hr != 0:
-            raise OSError(f"IPropertyStore::Commit failed: {_hrx(hr)}")
-        
-        # Set playback target via registry (only way that works)
-        if render_device_id is not None:
-            guid = _extract_endpoint_guid_from_device_id(capture_device_id)
-            if guid:
-                key_path = rf"SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Capture\{guid}\Properties"
-                value_name = "{24dbb0fc-9311-4b3d-9cf0-18ff155639d4},0"
-                target_value = render_device_id if render_device_id else ""
-                
-                try:
-                    key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, key_path, 0, winreg.KEY_SET_VALUE)
-                    try:
-                        winreg.SetValueEx(key, value_name, 0, winreg.REG_SZ, target_value)
-                    finally:
-                        winreg.CloseKey(key)
-                except OSError as e:
-                    print(f"WARNING: Failed to set playback target (requires Admin): {e}", file=sys.stderr)
-        
-        return True
-    except Exception as e:
-        print(f"ERROR: set_listen_to_device_ps failed for '{capture_device_id}': {e}", file=sys.stderr)
-        return False
-    finally:
+    with _com_context():
+        import sys, gc
+        # Get cached interface definitions
+        interfaces = _get_property_store_interfaces()
+        PROPVARIANT = interfaces["PROPVARIANT"]
+        PROPERTYKEY = interfaces["PROPERTYKEY"]
+        IPropertyStoreRaw = interfaces["IPropertyStoreRaw"]
+        PIPS = interfaces["PIPS"]
+        VT_BOOL = interfaces["VT_BOOL"]
+        HRESULT_T = interfaces["HRESULT_T"]
+        VARIANT_TRUE = interfaces["VARIANT_TRUE"]
+        VARIANT_FALSE = interfaces["VARIANT_FALSE"]
+        def _hrx(hr): return f"0x{ctypes.c_uint(hr).value:08X}"
+        def _raw_ptr(p): return ctypes.cast(p, ctypes.c_void_p).value
+        propsys = ctypes.OleDLL("propsys.dll")
+        ole32 = ctypes.OleDLL("ole32.dll")
+        have_helpers = True
         try:
-            if pv_enable is not None:
-                PropVariantClear(byref(pv_enable))
-        except Exception:
-            pass
+            InitPropVariantFromBoolean = propsys.InitPropVariantFromBoolean
+            InitPropVariantFromBoolean.restype = HRESULT_T
+            InitPropVariantFromBoolean.argtypes = (wintypes.BOOL, POINTER(PROPVARIANT))
+        except (AttributeError, OSError):
+            have_helpers = False
+        PropVariantClear = ole32.PropVariantClear
+        PropVariantClear.restype = HRESULT_T
+        PropVariantClear.argtypes = (POINTER(PROPVARIANT),)
+        def _pv_from_bool_local(value: bool):
+            pv = PROPVARIANT()
+            if have_helpers:
+                hr = InitPropVariantFromBoolean(VARIANT_TRUE if value else VARIANT_FALSE, byref(pv))
+                if hr != 0:
+                    raise OSError(f"InitPropVariantFromBoolean failed: {_hrx(hr)}")
+            else:
+                pv.vt = VT_BOOL
+                try:
+                    pv.boolVal = VARIANT_TRUE if value else VARIANT_FALSE
+                except AttributeError:
+                    pass
+            return pv
+        PKEY_LISTEN_ENABLE = PROPERTYKEY(GUID("{24dbb0fc-9311-4b3d-9cf0-18ff155639d4}"), 1)
+        pv_enable = None
+        try:
+            pv_enable = _pv_from_bool_local(bool(enable))
+            # GC guard around raw vtable calls
+            gc_was_enabled = gc.isenabled()
+            if gc_was_enabled:
+                gc.disable()
+            try:
+                enumerator = CoCreateInstance(CLSID_MMDeviceEnumerator, interface=IMMDeviceEnumerator, clsctx=CLSCTX_ALL)
+                dev = enumerator.GetDevice(capture_device_id)
+                ps_unknown = dev.OpenPropertyStore(STGM_WRITE)
+                ps_ptr_val = _raw_ptr(ps_unknown)
+                if not ps_ptr_val:
+                    raise OSError("OpenPropertyStore returned null pointer for IPropertyStore.")
+                ps_iface = ctypes.cast(ctypes.c_void_p(ps_ptr_val), PIPS)
+                hr = ps_iface.contents.lpVtbl.contents.SetValue(ps_iface, byref(PKEY_LISTEN_ENABLE), byref(pv_enable))
+                if hr != 0:
+                    raise OSError(f"IPropertyStore::SetValue(enable) failed: {_hrx(hr)}")
+                hr = ps_iface.contents.lpVtbl.contents.Commit(ps_iface)
+                if hr != 0:
+                    raise OSError(f"IPropertyStore::Commit failed: {_hrx(hr)}")
+            finally:
+                if gc_was_enabled:
+                    gc.enable()
+            # Set playback target via registry (only way that works)
+            if render_device_id is not None:
+                guid = _extract_endpoint_guid_from_device_id(capture_device_id)
+                if guid:
+                    key_path = rf"SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Capture\{guid}\Properties"
+                    value_name = "{24dbb0fc-9311-4b3d-9cf0-18ff155639d4},0"
+                    target_value = render_device_id if render_device_id else ""
+                    try:
+                        key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, key_path, 0, winreg.KEY_SET_VALUE)
+                        try:
+                            winreg.SetValueEx(key, value_name, 0, winreg.REG_SZ, target_value)
+                        finally:
+                            winreg.CloseKey(key)
+                    except OSError as e:
+                        print(f"WARNING: Failed to set playback target (requires Admin): {e}", file=sys.stderr)
+            return True
+        except Exception as e:
+            print(f"ERROR: set_listen_to_device_ps failed for '{capture_device_id}': {e}", file=sys.stderr)
+            return False
+        finally:
+            try:
+                if pv_enable is not None:
+                    PropVariantClear(byref(pv_enable))
+            except Exception:
+                pass
 def _get_listen_to_device_status_ps(device_id):
     """
-    Reads the 'Listen to this device' enable flag using IPropertyStore::GetValue via raw vtable (ctypes).
-    Assumes COM is already initialized on this thread.
+    Read the 'Listen to this device' enable flag using IPropertyStore::GetValue via raw vtable (ctypes).
     Returns True/False/None.
+    COM is initialized and cleaned up internally by this function.
     """
-    import sys
-    
-    # Get cached interface definitions
-    interfaces = _get_property_store_interfaces()
-    PROPVARIANT = interfaces["PROPVARIANT"]
-    PROPERTYKEY = interfaces["PROPERTYKEY"]
-    PIPS = interfaces["PIPS"]
-    VT_BOOL = interfaces["VT_BOOL"]
-    HRESULT_T = interfaces["HRESULT_T"]
-    VARIANT_FALSE = interfaces["VARIANT_FALSE"]
-    
-    ole32 = ctypes.OleDLL("ole32.dll")
-    PropVariantClear = ole32.PropVariantClear
-    PropVariantClear.restype = HRESULT_T
-    PropVariantClear.argtypes = (POINTER(PROPVARIANT),)
-    PKEY_LISTEN_ENABLE = PROPERTYKEY(GUID("{24dbb0fc-9311-4b3d-9cf0-18ff155639d4}"), 1)
-    pv = PROPVARIANT()
-    try:
-        enumerator = CoCreateInstance(CLSID_MMDeviceEnumerator, interface=IMMDeviceEnumerator, clsctx=CLSCTX_ALL)
-        dev = enumerator.GetDevice(device_id)
-        ps_unknown = dev.OpenPropertyStore(STGM_READ)
-        ps_ptr_val = ctypes.cast(ps_unknown, ctypes.c_void_p).value
-        if not ps_ptr_val:
-            return None
-        ps_iface = ctypes.cast(ctypes.c_void_p(ps_ptr_val), PIPS)
-        
-        hr = ps_iface.contents.lpVtbl.contents.GetValue(ps_iface, byref(PKEY_LISTEN_ENABLE), byref(pv))
-        if hr != 0:
-            return False
-        
-        if getattr(pv, "vt", 0) == VT_BOOL:
-            try:
-                return pv.boolVal != VARIANT_FALSE
-            except Exception:
-                return None
-        return False
-    except Exception as e:
-        print(f"WARNING: Failed to read listen status via COM for '{device_id}': {e}", file=sys.stderr)
-        return None
-    finally:
+    with _com_context():
+        import sys, gc
+        # Get cached interface definitions
+        interfaces = _get_property_store_interfaces()
+        PROPVARIANT = interfaces["PROPVARIANT"]
+        PROPERTYKEY = interfaces["PROPERTYKEY"]
+        PIPS = interfaces["PIPS"]
+        VT_BOOL = interfaces["VT_BOOL"]
+        HRESULT_T = interfaces["HRESULT_T"]
+        VARIANT_FALSE = interfaces["VARIANT_FALSE"]
+
+        ole32 = ctypes.OleDLL("ole32.dll")
+        PropVariantClear = ole32.PropVariantClear
+        PropVariantClear.restype = HRESULT_T
+        PropVariantClear.argtypes = (POINTER(PROPVARIANT),)
+
+        PKEY_LISTEN_ENABLE = PROPERTYKEY(GUID("{24dbb0fc-9311-4b3d-9cf0-18ff155639d4}"), 1)
+        pv = PROPVARIANT()
         try:
-            PropVariantClear(byref(pv))
-        except Exception:
-            pass
+            result = None
+            # GC guard around raw vtable calls
+            gc_was_enabled = gc.isenabled()
+            if gc_was_enabled:
+                gc.disable()
+            try:
+                enumerator = CoCreateInstance(CLSID_MMDeviceEnumerator, interface=IMMDeviceEnumerator, clsctx=CLSCTX_ALL)
+                dev = enumerator.GetDevice(device_id)
+                ps_unknown = dev.OpenPropertyStore(STGM_READ)
+                ps_ptr_val = ctypes.cast(ps_unknown, ctypes.c_void_p).value
+                if not ps_ptr_val:
+                    result = None
+                else:
+                    ps_iface = ctypes.cast(ctypes.c_void_p(ps_ptr_val), PIPS)
+                    hr = ps_iface.contents.lpVtbl.contents.GetValue(ps_iface, byref(PKEY_LISTEN_ENABLE), byref(pv))
+                    if hr != 0:
+                        # allow caller to fall back to registry
+                        result = None
+                    else:
+                        if getattr(pv, "vt", 0) == VT_BOOL:
+                            try:
+                                result = (pv.boolVal != VARIANT_FALSE)
+                            except Exception:
+                                result = None
+                        else:
+                            # unexpected VT -> let caller fall back
+                            result = None
+            finally:
+                if gc_was_enabled:
+                    gc.enable()
+            return result
+        except Exception as e:
+            print(f"WARNING: Failed to read listen status via COM for '{device_id}': {e}", file=sys.stderr)
+            return None
+        finally:
+            try:
+                PropVariantClear(byref(pv))
+            except Exception:
+                pass
+def _read_listen_enable_fast(device_id: str):
+    """
+    Compatibility helper used by CLI: COM-backed read first (exact PropertyStore),
+    then robust registry fallback. Returns True/False/None.
+    """
+    state = _get_listen_to_device_status_ps(device_id)
+    if state is None:
+        state = _read_listen_enable_from_registry(device_id)
+    return state
 def _read_listen_enable_from_registry(device_id: str):
     r"""
     Robustly read the 'Listen to this device' enable state from MMDevices.
@@ -302,63 +435,10 @@ def _verify_listen_via_registry(device_id: str, expected_enabled: bool, timeout=
         time.sleep(interval)
     return False, last_state
 # --- Enhancements Helpers (PropertyStore, Registry, COM helpers) ---
-def _define_policyconfig_fx_interfaces():
-    """
-    Define a local IPolicyConfig interface with GetPropertyValue/SetPropertyValue
-    that take the bFxStore flag, using runtime-assembled GUID strings.
-    """
-    class PROPERTYKEY(ctypes.Structure):
-        _fields_ = (("fmtid", GUID), ("pid", wintypes.DWORD))
-    # Prefer comtypes' PROPVARIANT; fallback to a minimal struct if missing
-    try:
-        PROPVARIANT = getattr(automation, "PROPVARIANT", getattr(automation, "tagPROPVARIANT"))
-    except Exception:
-        class _PVU(ctypes.Union):
-            _fields_ = [
-                ("boolVal", ctypes.c_short),
-                ("uiVal", ctypes.c_ushort),
-                ("ulVal", ctypes.c_ulong),
-            ]
-        class PROPVARIANT(ctypes.Structure):
-            _anonymous_ = ("data",)
-            _fields_ = [
-                ("vt", ctypes.c_ushort),
-                ("wReserved1", ctypes.c_ushort),
-                ("wReserved2", ctypes.c_ushort),
-                ("wReserved3", ctypes.c_ushort),
-                ("data", _PVU),
-            ]
-    # IPolicyConfig IID {F8679F50-850A-41CF-9C72-430F290290C8}
-    _IID_PolicyConfig = GUID(_guid_from_parts("F8679F50", "-850A-41CF-", "9C72-", "430F290290C8"))
-    class IPolicyConfigFx(IUnknown):
-        _iid_ = _IID_PolicyConfig
-        _methods_ = (
-            COMMETHOD([], HRESULT, 'GetMixFormat', (['in'], wintypes.LPCWSTR, 'wszDeviceId'), (['out'], POINTER(ctypes.c_void_p), 'ppFormat')),
-            COMMETHOD([], HRESULT, 'GetDeviceFormat', (['in'], wintypes.LPCWSTR, 'wszDeviceId'), (['in'], wintypes.BOOL, 'bDefault'), (['out'], ctypes.POINTER(ctypes.c_void_p), 'ppFormat')),
-            COMMETHOD([], HRESULT, 'SetDeviceFormat', (['in'], wintypes.LPCWSTR, 'wszDeviceId'), (['in'], ctypes.c_void_p, 'pEndpointFormat'), (['in'], ctypes.c_void_p, 'mixFormat')),
-            COMMETHOD([], HRESULT, 'GetProcessingPeriod', (['in'], wintypes.LPCWSTR, 'wszDeviceId'), (['in'], wintypes.BOOL, 'bDefault'), (['out'], ctypes.POINTER(ctypes.c_longlong), 'pmftDefaultPeriod'), (['out'], ctypes.POINTER(ctypes.c_longlong), 'pmftMinimumPeriod')),
-            COMMETHOD([], HRESULT, 'SetProcessingPeriod', (['in'], wintypes.LPCWSTR, 'wszDeviceId'), (['in'], ctypes.POINTER(ctypes.c_longlong), 'pmftPeriod')),
-            COMMETHOD([], HRESULT, 'GetShareMode', (['in'], wintypes.LPCWSTR, 'wszDeviceId'), (['out'], ctypes.POINTER(ctypes.c_void_p), 'pMode')),
-            COMMETHOD([], HRESULT, 'SetShareMode', (['in'], wintypes.LPCWSTR, 'wszDeviceId'), (['in'], ctypes.c_void_p, 'mode')),
-            COMMETHOD([], HRESULT, 'GetPropertyValue',
-                      (['in'], wintypes.LPCWSTR, 'pszDeviceName'),
-                      (['in'], wintypes.BOOL, 'bFxStore'),
-                      (['in'], POINTER(PROPERTYKEY), 'pKey'),
-                      (['out'], POINTER(PROPVARIANT), 'pv')),
-            COMMETHOD([], HRESULT, 'SetPropertyValue',
-                      (['in'], wintypes.LPCWSTR, 'pszDeviceName'),
-                      (['in'], wintypes.BOOL, 'bFxStore'),
-                      (['in'], POINTER(PROPERTYKEY), 'pKey'),
-                      (['in'], POINTER(PROPVARIANT), 'pv')),
-            COMMETHOD([], HRESULT, 'SetDefaultEndpoint', (['in'], wintypes.LPCWSTR, 'wszDeviceId'), (['in'], wintypes.DWORD, 'role')),
-            COMMETHOD([], HRESULT, 'SetEndpointVisibility', (['in'], wintypes.LPCWSTR, 'wszDeviceId'), (['in'], wintypes.BOOL, 'bVisible')),
-        )
-    # CLSID_PolicyConfigClient {870AF99C-171D-4F9E-AF0D-E63DF40C2BC9}
-    CLSID_PolicyConfigClient = GUID(_guid_from_parts("870AF99C", "-171D-4F9E-", "AF0D-", "E63DF40C2BC9"))
-    return IPolicyConfigFx, CLSID_PolicyConfigClient, PROPERTYKEY, PROPVARIANT
 def _get_policy_config_fx():
     IPolicyConfigFx, CLSID_PolicyConfigClient, PROPERTYKEY, PROPVARIANT = _define_policyconfig_fx_interfaces()
-    return CoCreateInstance(CLSID_PolicyConfigClient, interface=IPolicyConfigFx, clsctx=CLSCTX_ALL)
+    with _com_context():
+        return CoCreateInstance(CLSID_PolicyConfigClient, interface=IPolicyConfigFx, clsctx=CLSCTX_ALL)
 def _get_policy_config_fx_singleton():
     """
     Create a fresh PolicyConfig object each time - no singleton caching.
@@ -375,7 +455,8 @@ def _get_policy_config_fx_singleton():
     _dbg("Creating PolicyConfigFx COM object (fresh instance, not singleton)")
     try:
         IPolicyConfigFx, CLSID_PolicyConfigClient, PROPERTYKEY, PROPVARIANT = _define_policyconfig_fx_interfaces()
-        pc = CoCreateInstance(CLSID_PolicyConfigClient, interface=IPolicyConfigFx, clsctx=CLSCTX_ALL)
+        with _com_context():
+            pc = CoCreateInstance(CLSID_PolicyConfigClient, interface=IPolicyConfigFx, clsctx=CLSCTX_ALL)
         try:
             import ctypes
             ptr = ctypes.cast(pc, ctypes.c_void_p).value
@@ -599,22 +680,23 @@ def _get_enhancements_status_com(device_id):
     Tries both FX store (bFxStore=True) and normal store (bFxStore=False).
     """
     try:
-        IPolicyConfigFx, CLSID_PolicyConfigClient, PROPERTYKEY, PROPVARIANT = _define_policyconfig_fx_interfaces()
-        pkey = _pkey_disable_sysfx()
-        pc = _get_policy_config_fx_singleton()
-        if pc is None:  # ADD THIS CHECK
-            return None
-        for bfx in (True, False):
-            pv = PROPVARIANT()
-            try:
-                pc.GetPropertyValue(device_id, bfx, byref(pkey), byref(pv))
-                raw = _parse_boolish_from_propvariant(pv)  # Disable_SysFx: 0=enh on, 1=off
-                if raw is None:
+        with _com_context():
+            IPolicyConfigFx, CLSID_PolicyConfigClient, PROPERTYKEY, PROPVARIANT = _define_policyconfig_fx_interfaces()
+            pkey = _pkey_disable_sysfx()
+            pc = _get_policy_config_fx_singleton()
+            if pc is None:  # ADD THIS CHECK
+                return None
+            for bfx in (True, False):
+                pv = PROPVARIANT()
+                try:
+                    pc.GetPropertyValue(device_id, bfx, byref(pkey), byref(pv))
+                    raw = _parse_boolish_from_propvariant(pv)  # Disable_SysFx: 0=enh on, 1=off
+                    if raw is None:
+                        continue
+                    return False if raw == 1 else True
+                except Exception:
                     continue
-                return False if raw == 1 else True
-            except Exception:
-                continue
-        return None
+            return None
     except Exception:
         return None
 def _set_enhancements_com(device_id, enable):
@@ -624,32 +706,33 @@ def _set_enhancements_com(device_id, enable):
     Returns True if any write succeeded.
     """
     try:
-        IPolicyConfigFx, CLSID_PolicyConfigClient, PROPERTYKEY, PROPVARIANT = _define_policyconfig_fx_interfaces()
-        pkey = _pkey_disable_sysfx()
-        pc = _get_policy_config_fx_singleton()
-        if pc is None:  # ADD THIS CHECK
-            return False
-        desired_disable = 0 if enable else 1
-        ok_any = False
-        for bfx in (True, False):
-            try:
-                pv = PROPVARIANT()
-                # Read current (to get correct VT), ignore errors
+        with _com_context():
+            IPolicyConfigFx, CLSID_PolicyConfigClient, PROPERTYKEY, PROPVARIANT = _define_policyconfig_fx_interfaces()
+            pkey = _pkey_disable_sysfx()
+            pc = _get_policy_config_fx_singleton()
+            if pc is None:  # ADD THIS CHECK
+                return False
+            desired_disable = 0 if enable else 1
+            ok_any = False
+            for bfx in (True, False):
                 try:
-                    pc.GetPropertyValue(device_id, bfx, byref(pkey), byref(pv))
-                except Exception:
-                    pass
-                if not _set_boolish_in_propvariant(pv, desired_disable):
+                    pv = PROPVARIANT()
+                    # Read current (to get correct VT), ignore errors
                     try:
-                        pv.vt = 19  # VT_UI4
-                        pv.ulVal = desired_disable
+                        pc.GetPropertyValue(device_id, bfx, byref(pkey), byref(pv))
                     except Exception:
                         pass
-                pc.SetPropertyValue(device_id, bfx, byref(pkey), byref(pv))
-                ok_any = True
-            except Exception:
-                continue
-        return ok_any
+                    if not _set_boolish_in_propvariant(pv, desired_disable):
+                        try:
+                            pv.vt = 19  # VT_UI4
+                            pv.ulVal = desired_disable
+                        except Exception:
+                            pass
+                    pc.SetPropertyValue(device_id, bfx, byref(pkey), byref(pv))
+                    ok_any = True
+                except Exception:
+                    continue
+            return ok_any
     except Exception:
         return False
 def _read_enhancements_from_registry(device_id):
@@ -798,6 +881,8 @@ def _verify_enhancements_via_registry(device_id, expected_enabled, timeout=2.0, 
 def _dump_mmdevices_all_values(device_id):
     r"""
     Dump ALL values under BOTH hives for this endpoint.
+    Augmented: include full raw data in 'dataRaw' so learning can replay binary values exactly.
+    Recurses under FxProperties and Properties (e.g., FxProperties\{plugin}\User).
     """
     guid = _extract_endpoint_guid_from_device_id(device_id)
     if not guid:
@@ -807,48 +892,93 @@ def _dump_mmdevices_all_values(device_id):
         (winreg.HKEY_CURRENT_USER,  "HKCU"),
         (winreg.HKEY_LOCAL_MACHINE, "HKLM"),
     ]
+    def _enum_key_recursive(hive, hive_name, root_path, rel_subkey, flow):
+        """
+        Enumerate values at root_path and recurse into subkeys.
+        rel_subkey is the relative path under the endpoint GUID, e.g.:
+          - 'FxProperties'
+          - 'FxProperties\\{plugin-guid}\\User'
+        """
+        # Enumerate values in current key
+        try:
+            key = winreg.OpenKey(hive, root_path, 0, winreg.KEY_READ)
+        except OSError:
+            return
+        try:
+            i = 0
+            while True:
+                try:
+                    name, val, typ = winreg.EnumValue(key, i)
+                    i += 1
+                except OSError:
+                    break
+                rec = {
+                    "hive": hive_name,
+                    "flow": flow,
+                    "subkey": rel_subkey,    # relative path under endpoint GUID
+                    "name": name,
+                    "type": typ,
+                }
+                # dataPreview (compat)
+                try:
+                    if typ == winreg.REG_DWORD:
+                        rec["dataPreview"] = int(val)
+                    elif typ == winreg.REG_SZ:
+                        rec["dataPreview"] = str(val)
+                    elif typ == winreg.REG_BINARY:
+                        b = bytes(val)
+                        rec["dataPreview"] = "hex:" + b[:16].hex() + (f"...({len(b)})" if len(b) > 16 else "")
+                    else:
+                        rec["dataPreview"] = f"<type {typ}>"
+                except Exception:
+                    rec["dataPreview"] = "<unreadable>"
+                # dataRaw (exact payload)
+                try:
+                    if typ == winreg.REG_DWORD:
+                        rec["dataRaw"] = int(val)
+                    elif typ == winreg.REG_SZ:
+                        rec["dataRaw"] = str(val)
+                    elif typ == winreg.REG_BINARY:
+                        rec["dataRaw"] = bytes(val).hex()
+                    else:
+                        rec["dataRaw"] = None
+                except Exception:
+                    rec["dataRaw"] = None
+                items.append(rec)
+        finally:
+            try:
+                winreg.CloseKey(key)
+            except Exception:
+                pass
+        # Recurse into subkeys
+        try:
+            key = winreg.OpenKey(hive, root_path, 0, winreg.KEY_READ)
+        except OSError:
+            return
+        try:
+            i = 0
+            while True:
+                try:
+                    subname = winreg.EnumKey(key, i)
+                    i += 1
+                except OSError:
+                    break
+                next_rel = rel_subkey + "\\" + subname if rel_subkey else subname
+                next_path = root_path + "\\" + subname
+                _enum_key_recursive(hive, hive_name, next_path, next_rel, flow)
+        finally:
+            try:
+                winreg.CloseKey(key)
+            except Exception:
+                pass
     for hive, hive_name in roots:
         for flow in ("Render", "Capture"):
-            for sub in ("FxProperties", "Properties"):
-                key_path = rf"SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\{flow}\{guid}\{sub}"
-                try:
-                    key = winreg.OpenKey(hive, key_path, 0, winreg.KEY_READ)
-                except OSError:
-                    continue
-                try:
-                    i = 0
-                    while True:
-                        try:
-                            name, val, typ = winreg.EnumValue(key, i)
-                            i += 1
-                        except OSError:
-                            break
-                        rec = {
-                            "hive": hive_name,
-                            "flow": flow,
-                            "subkey": sub,
-                            "name": name,
-                            "type": typ,
-                        }
-                        try:
-                            if typ == winreg.REG_DWORD:
-                                rec["dataPreview"] = int(val)
-                            elif typ == winreg.REG_SZ:
-                                rec["dataPreview"] = str(val)
-                            elif typ == winreg.REG_BINARY:
-                                b = bytes(val)
-                                rec["dataPreview"] = "hex:" + b[:16].hex() + (f"...({len(b)})" if len(b) > 16 else "")
-                            else:
-                                rec["dataPreview"] = f"<type {typ}>"
-                        except Exception:
-                            rec["dataPreview"] = "<unreadable>"
-                        items.append(rec)
-                finally:
-                    try:
-                        winreg.CloseKey(key)
-                    except Exception:
-                        pass
+            # Start recursion from the two well-known roots
+            for first in ("FxProperties", "Properties"):
+                base = rf"SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\{flow}\{guid}\{first}"
+                _enum_key_recursive(hive, hive_name, base, first, flow)
     return items
+    
 def _mmdev_key_of(rec):
     return f"{rec.get('hive','?')}|{rec.get('flow','?')}|{rec.get('subkey','?')}|{rec.get('name','?')}"
 def _normalize_preview(v):
@@ -869,7 +999,6 @@ def _diff_mmdevices_lists(before_list, after_list):
     flips = []
     hits = []
     guid_disable = "{e4870e26-3cc5-4cd2-ba46-ca0a9a70ed04}"
-    
     for k in sorted(all_keys):
         a = idxA.get(k)
         b = idxB.get(k)
@@ -925,99 +1054,129 @@ def _diff_mmdevices_lists(before_list, after_list):
 def _get_enhancements_status_propstore(device_id):
     """
     Read Disable_SysFx directly from the endpoint's IPropertyStore.
+    GC-guarded to avoid Release races while using raw vtable pointers.
     """
-    import sys
+    import sys, gc
     try:
         if not sys.platform.startswith("win"):
             return None
-        
-        # Get cached interface definitions
-        interfaces = _get_property_store_interfaces()
-        PROPVARIANT = interfaces["PROPVARIANT"]
-        PROPERTYKEY = interfaces["PROPERTYKEY"]
-        PIPS = interfaces["PIPS"]
-        HRESULT_T = interfaces["HRESULT_T"]
-        
-        enumerator = CoCreateInstance(CLSID_MMDeviceEnumerator, interface=IMMDeviceEnumerator, clsctx=CLSCTX_ALL)
-        dev = enumerator.GetDevice(device_id)
-        ps_unknown = dev.OpenPropertyStore(STGM_READ)
-        ps_ptr_val = ctypes.cast(ps_unknown, ctypes.c_void_p).value
-        if not ps_ptr_val:
-            return None
-        ps_iface = ctypes.cast(ctypes.c_void_p(ps_ptr_val), PIPS)
-        
-        pkey = PROPERTYKEY(GUID("{E4870E26-3CC5-4CD2-BA46-CA0A9A70ED04}"), wintypes.DWORD(2))
-        pv = PROPVARIANT()
-        hr = ps_iface.contents.lpVtbl.contents.GetValue(ps_iface, byref(pkey), byref(pv))
-        if hr != 0:
-            return None
-            
-        raw = _parse_boolish_from_propvariant(pv)  # 0 = enh ON, 1 = enh OFF
-        
-        try:
-            ole32 = ctypes.OleDLL("ole32.dll")
-            PropVariantClear = getattr(ole32, "PropVariantClear", None)
-            if PropVariantClear:
-                PropVariantClear.restype = HRESULT_T
-                PropVariantClear.argtypes = (ctypes.POINTER(PROPVARIANT),)
-                PropVariantClear(byref(pv))
-        except Exception:
-            pass
-        
-        if raw is None:
-            return None
-        return False if raw == 1 else True
+        with _com_context():
+            # Get cached interface definitions
+            interfaces = _get_property_store_interfaces()
+            PROPVARIANT = interfaces["PROPVARIANT"]
+            PROPERTYKEY = interfaces["PROPERTYKEY"]
+            PIPS = interfaces["PIPS"]
+            HRESULT_T = interfaces["HRESULT_T"]
+            # Prepare structures and result holder outside the GC-guarded block
+            pkey = PROPERTYKEY(GUID("{E4870E26-3CC5-4CD2-BA46-CA0A9A70ED04}"), wintypes.DWORD(2))
+            pv = PROPVARIANT()
+            result = None
+            gc_was_enabled = gc.isenabled()
+            if gc_was_enabled:
+                gc.disable()
+            try:
+                enumerator = CoCreateInstance(CLSID_MMDeviceEnumerator, interface=IMMDeviceEnumerator, clsctx=CLSCTX_ALL)
+                dev = enumerator.GetDevice(device_id)
+                ps_unknown = dev.OpenPropertyStore(STGM_READ)
+                ps_ptr_val = ctypes.cast(ps_unknown, ctypes.c_void_p).value
+                if not ps_ptr_val:
+                    result = None
+                else:
+                    ps_iface = ctypes.cast(ctypes.c_void_p(ps_ptr_val), PIPS)
+                    hr = ps_iface.contents.lpVtbl.contents.GetValue(ps_iface, byref(pkey), byref(pv))
+                    if hr == 0:
+                        raw = _parse_boolish_from_propvariant(pv)  # 0 = enh ON, 1 = OFF
+                        if raw is None:
+                            result = None
+                        else:
+                            result = (False if raw == 1 else True)
+                    else:
+                        result = None
+            finally:
+                if gc_was_enabled:
+                    gc.enable()
+            # Clear PROPVARIANT after GC is re-enabled
+            try:
+                ole32 = ctypes.OleDLL("ole32.dll")
+                PropVariantClear = getattr(ole32, "PropVariantClear", None)
+                if PropVariantClear:
+                    PropVariantClear.restype = HRESULT_T
+                    PropVariantClear.argtypes = (ctypes.POINTER(PROPVARIANT),)
+                    PropVariantClear(byref(pv))
+            except Exception:
+                pass
+            return result
     except Exception:
         return None
 def _set_enhancements_propstore(device_id, enable):
     """
     Write Disable_SysFx directly via IPropertyStore::SetValue + Commit.
+    GC-guarded to avoid Release races while using raw vtable pointers.
     """
-    import sys
+    import sys, gc
     try:
         if not sys.platform.startswith("win"):
             return False
-        
-        # Get cached interface definitions
-        interfaces = _get_property_store_interfaces()
-        PROPVARIANT = interfaces["PROPVARIANT"]
-        PROPERTYKEY = interfaces["PROPERTYKEY"]
-        PIPS = interfaces["PIPS"]
-        HRESULT_T = interfaces["HRESULT_T"]
-        
-        enumerator = CoCreateInstance(CLSID_MMDeviceEnumerator, interface=IMMDeviceEnumerator, clsctx=CLSCTX_ALL)
-        dev = enumerator.GetDevice(device_id)
-        ps_unknown = dev.OpenPropertyStore(STGM_WRITE)
-        ps_ptr_val = ctypes.cast(ps_unknown, ctypes.c_void_p).value
-        if not ps_ptr_val:
-            return False
-        ps_iface = ctypes.cast(ctypes.c_void_p(ps_ptr_val), PIPS)
-        
-        pkey = PROPERTYKEY(GUID("{E4870E26-3CC5-4CD2-BA46-CA0A9A70ED04}"), wintypes.DWORD(2))
-        desired_disable = 0 if enable else 1
-        pv = PROPVARIANT()
-        
-        try:
-            ps_iface.contents.lpVtbl.contents.GetValue(ps_iface, byref(pkey), byref(pv))
-            if not _set_boolish_in_propvariant(pv, desired_disable):
-                pv.vt = 19  # VT_UI4
-                try:
-                    pv.ulVal = desired_disable
-                except Exception:
-                    pass
-        except Exception:
+        with _com_context():
+            # Get cached interface definitions
+            interfaces = _get_property_store_interfaces()
+            PROPVARIANT = interfaces["PROPVARIANT"]
+            PROPERTYKEY = interfaces["PROPERTYKEY"]
+            PIPS = interfaces["PIPS"]
+            HRESULT_T = interfaces["HRESULT_T"]
+            pkey = PROPERTYKEY(GUID("{E4870E26-3CC5-4CD2-BA46-CA0A9A70ED04}"), wintypes.DWORD(2))
+            desired_disable = 0 if enable else 1
             pv = PROPVARIANT()
-            pv.vt = 19  # VT_UI4
+            ok = False
+            gc_was_enabled = gc.isenabled()
+            if gc_was_enabled:
+                gc.disable()
             try:
-                pv.ulVal = desired_disable
+                enumerator = CoCreateInstance(CLSID_MMDeviceEnumerator, interface=IMMDeviceEnumerator, clsctx=CLSCTX_ALL)
+                dev = enumerator.GetDevice(device_id)
+                ps_unknown = dev.OpenPropertyStore(STGM_WRITE)
+                ps_ptr_val = ctypes.cast(ps_unknown, ctypes.c_void_p).value
+                if not ps_ptr_val:
+                    ok = False
+                else:
+                    ps_iface = ctypes.cast(ctypes.c_void_p(ps_ptr_val), PIPS)
+                    # Try to read the existing pv to preserve VT where possible
+                    try:
+                        ps_iface.contents.lpVtbl.contents.GetValue(ps_iface, byref(pkey), byref(pv))
+                        if not _set_boolish_in_propvariant(pv, desired_disable):
+                            pv.vt = 19  # VT_UI4
+                            try:
+                                pv.ulVal = desired_disable
+                            except Exception:
+                                pass
+                    except Exception:
+                        # Build a fresh PV if GetValue failed
+                        pv = PROPVARIANT()
+                        pv.vt = 19  # VT_UI4
+                        try:
+                            pv.ulVal = desired_disable
+                        except Exception:
+                            pass
+                    hr = ps_iface.contents.lpVtbl.contents.SetValue(ps_iface, byref(pkey), byref(pv))
+                    if hr == 0:
+                        hr = ps_iface.contents.lpVtbl.contents.Commit(ps_iface)
+                        ok = (hr == 0)
+                    else:
+                        ok = False
+            finally:
+                if gc_was_enabled:
+                    gc.enable()
+            # Clear PROPVARIANT after GC is re-enabled
+            try:
+                ole32 = ctypes.OleDLL("ole32.dll")
+                PropVariantClear = getattr(ole32, "PropVariantClear", None)
+                if PropVariantClear:
+                    PropVariantClear.restype = HRESULT_T
+                    PropVariantClear.argtypes = (ctypes.POINTER(PROPVARIANT),)
+                    PropVariantClear(byref(pv))
             except Exception:
                 pass
-        hr = ps_iface.contents.lpVtbl.contents.SetValue(ps_iface, byref(pkey), byref(pv))
-        if hr != 0:
-            return False
-            
-        hr = ps_iface.contents.lpVtbl.contents.Commit(ps_iface)
-        return hr == 0
+            return ok
     except Exception:
         return False
 def _wait_for_propstore_sysfx(device_id, expected_enabled, timeout=1.5, interval=0.12):
@@ -1045,22 +1204,32 @@ def _collect_sysfx_snapshot(device_id):
         "propStore": {},
         "registry": [],
     }
-    # COM (both stores)
+    # COM (both stores) - wrap in a GC guard to avoid Release races while using COM
     try:
-        IPolicyConfigFx, CLSID_PolicyConfigClient, PROPERTYKEY, PROPVARIANT = _define_policyconfig_fx_interfaces()
-        pkey = _pkey_disable_sysfx()
-        pc = _get_policy_config_fx()
-        for bfx, label in ((True, "fxStore"), (False, "normalStore")):
-            pv = PROPVARIANT()
-            rec = {}
-            try:
-                pc.GetPropertyValue(device_id, bfx, byref(pkey), byref(pv))
-                raw = _parse_boolish_from_propvariant(pv)  # Disable_SysFx: 0=enh on, 1=off
-                rec["rawDisable"] = raw
-                rec["enhEnabled"] = (False if raw == 1 else True) if raw is not None else None
-            except Exception as e:
-                rec["error"] = str(e)
-            snap["com"][label] = rec
+        import gc
+        gc_was_enabled = gc.isenabled()
+        if gc_was_enabled:
+            gc.disable()
+        try:
+            with _com_context():
+                IPolicyConfigFx, CLSID_PolicyConfigClient, PROPERTYKEY, PROPVARIANT = _define_policyconfig_fx_interfaces()
+                pkey = _pkey_disable_sysfx()
+                pc = _get_policy_config_fx()
+                for bfx, label in ((True, "fxStore"), (False, "normalStore")):
+                    pv = PROPVARIANT()
+                    rec = {}
+                    try:
+                        pc.GetPropertyValue(device_id, bfx, byref(pkey), byref(pv))
+                        raw = _parse_boolish_from_propvariant(pv)  # Disable_SysFx: 0=enh on, 1=off
+                        rec["rawDisable"] = raw
+                        rec["enhEnabled"] = (False if raw == 1 else True) if raw is not None else None
+                    except Exception as e:
+                        rec["error"] = str(e)
+                    snap["com"][label] = rec
+                del pc
+        finally:
+            if gc_was_enabled:
+                gc.enable()
     except Exception as e:
         snap["com"] = {"error": str(e)}
         
@@ -1144,7 +1313,8 @@ def _get_policy_config():
         try:
             getter = getattr(AudioUtilities, name, None)
             if getter:
-                return getter()
+                with _com_context():
+                    return getter()
         except Exception:
             pass
     
@@ -1152,9 +1322,11 @@ def _get_policy_config():
     try:
         IPolicyConfig, IPolicyConfigVista, CLSID_PolicyConfigClient = _get_policy_config_interfaces()
         try:
-            return CoCreateInstance(CLSID_PolicyConfigClient, interface=IPolicyConfig, clsctx=CLSCTX_ALL)
+            with _com_context():
+                return CoCreateInstance(CLSID_PolicyConfigClient, interface=IPolicyConfig, clsctx=CLSCTX_ALL)
         except Exception:
-            return CoCreateInstance(CLSID_PolicyConfigClient, interface=IPolicyConfigVista, clsctx=CLSCTX_ALL)
+            with _com_context():
+                return CoCreateInstance(CLSID_PolicyConfigClient, interface=IPolicyConfigVista, clsctx=CLSCTX_ALL)
     except Exception as e:
         raise AttributeError("Audio policy config interface not available in this environment") from e
 def set_default_endpoint(device_id, role):
@@ -1165,45 +1337,47 @@ def set_default_endpoint(device_id, role):
     if not _is_device_active(device_id):
         _dbg("SetDefaultEndpoint abort: device not active")
         raise RuntimeError("Target device is not active; refusing to set default.")
-    policy = _get_policy_config()
-    
-    def _call(rname, rval):
-        try:
-            policy.SetDefaultEndpoint(device_id, rval)
-            return True, None
-        except Exception as e:
-            return False, e
-    if role == "all":
-        results = {}
-        ok_all = True
-        last_err = None
-        for rname, rval in (("console", E_CONSOLE), ("multimedia", E_MULTIMEDIA), ("communications", E_COMMUNICATIONS)):
-            ok, err = _call(rname, rval)
-            results[rname] = ok
-            if not ok:
-                ok_all = False
-                last_err = err
-        if not ok_all:
-            _dbg(f"SetDefaultEndpoint failed for some roles: {results}")
-            details = ", ".join([f"{k}={'ok' if v else 'fail'}" for k, v in results.items()])
-            raise RuntimeError(f"SetDefaultEndpoint failed for roles: {details}. Underlying error: {last_err}")
-    else:
-        policy.SetDefaultEndpoint(device_id, ROLES[role])
+    with _com_context():
+        policy = _get_policy_config()
+        def _call(rname, rval):
+            try:
+                policy.SetDefaultEndpoint(device_id, rval)
+                return True, None
+            except Exception as e:
+                return False, e
+        if role == "all":
+            results = {}
+            ok_all = True
+            last_err = None
+            for rname, rval in (("console", E_CONSOLE), ("multimedia", E_MULTIMEDIA), ("communications", E_COMMUNICATIONS)):
+                ok, err = _call(rname, rval)
+                results[rname] = ok
+                if not ok:
+                    ok_all = False
+                    last_err = err
+            if not ok_all:
+                _dbg(f"SetDefaultEndpoint failed for some roles: {results}")
+                details = ", ".join([f"{k}={'ok' if v else 'fail'}" for k, v in results.items()])
+                raise RuntimeError(f"SetDefaultEndpoint failed for roles: {details}. Underlying error: {last_err}")
+        else:
+            policy.SetDefaultEndpoint(device_id, ROLES[role])
     _dbg("SetDefaultEndpoint done")
 def _is_device_active(device_id):
-    for flow in (E_RENDER, E_CAPTURE):
-        try:
-            _, coll = enum_endpoints(flow, DEVICE_STATE_ACTIVE)
-            for i in range(coll.GetCount()):
-                if coll.Item(i).GetId() == device_id:
-                    return True
-        except Exception:
-            pass
+    with _com_context():
+        for flow in (E_RENDER, E_CAPTURE):
+            try:
+                _, coll = enum_endpoints(flow, DEVICE_STATE_ACTIVE)
+                for i in range(coll.GetCount()):
+                    if coll.Item(i).GetId() == device_id:
+                        return True
+            except Exception:
+                pass
     return False
 def enum_endpoints(flow, state_mask):
-    enumerator = CoCreateInstance(CLSID_MMDeviceEnumerator, IMMDeviceEnumerator, CLSCTX_ALL)
-    collection = enumerator.EnumAudioEndpoints(flow, state_mask)
-    return enumerator, collection
+    with _com_context():
+        enumerator = CoCreateInstance(CLSID_MMDeviceEnumerator, IMMDeviceEnumerator, CLSCTX_ALL)
+        collection = enumerator.EnumAudioEndpoints(flow, state_mask)
+        return enumerator, collection
 def get_default_ids(enumerator):
     defaults = {"Render": {}, "Capture": {}}
     for flow_name, flow in [("Render", E_RENDER), ("Capture", E_CAPTURE)]:
@@ -1225,17 +1399,18 @@ def _friendly_names_by_id():
     """
     names = {}
     try:
-        for dev in AudioUtilities.GetAllDevices():
-            try:
-                dev_id = getattr(dev, "id", None) or dev.GetId()
-            except Exception:
-                continue
-            try:
-                fn = getattr(dev, "FriendlyName", None)
-            except Exception:
-                fn = None
-            if dev_id and fn:
-                names[dev_id] = fn
+        with _com_context():
+            for dev in AudioUtilities.GetAllDevices():
+                try:
+                    dev_id = getattr(dev, "id", None) or dev.GetId()
+                except Exception:
+                    continue
+                try:
+                    fn = getattr(dev, "FriendlyName", None)
+                except Exception:
+                    fn = None
+                if dev_id and fn:
+                    names[dev_id] = fn
     except Exception:
         pass
     return names
@@ -1368,53 +1543,54 @@ def list_devices(include_all=False):
     Returns list of devices with fields: id, name, flow, state, isDefault flags.
     """
     _dbg(f"list_devices: include_all={include_all}")
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", UserWarning)
-        
-        enumerator_for_defaults = CoCreateInstance(CLSID_MMDeviceEnumerator, IMMDeviceEnumerator, CLSCTX_ALL)
-        defaults = get_default_ids(enumerator_for_defaults)
-        state_mask = DEVICE_STATE_ALL if include_all else DEVICE_STATE_ACTIVE
-        
-        # Build the name map once per call
-        name_map = _friendly_names_by_id()
-        
-        out = []
-        
-        for flow_name, flow in [("Render", E_RENDER), ("Capture", E_CAPTURE)]:
-            _dbg(f"Enum flow={flow_name}")
-            enumerator, coll = enum_endpoints(flow, state_mask)
-            for i in range(coll.GetCount()):
-                dev = coll.Item(i)
-                dev_id = dev.GetId()
-                
-                # Use name map lookup instead of raw COM call
-                name = name_map.get(dev_id) or dev_id
-                
-                state_str = "active"
-                
-                if include_all:
-                    try:
-                        st = dev.GetState()
-                        if st != DEVICE_STATE_ACTIVE:
-                            parts = [label for bit, label in DEVICE_STATES.items() if st & bit]
-                            state_str = ",".join(parts) if parts else "unknown"
-                    except Exception:
-                        state_str = "unknown"
-                        
-                is_default = {
-                    "console": dev_id == defaults[flow_name]["console"],
-                    "multimedia": dev_id == defaults[flow_name]["multimedia"],
-                    "communications": dev_id == defaults[flow_name]["communications"],
-                }
-                out.append({
-                    "id": dev_id,
-                    "name": name,
-                    "flow": flow_name,
-                    "state": state_str,
-                    "isDefault": is_default,
-                })
-        _dbg(f"list_devices: total={len(out)}")
-        return out
+    with _com_context():
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            
+            enumerator_for_defaults = CoCreateInstance(CLSID_MMDeviceEnumerator, IMMDeviceEnumerator, CLSCTX_ALL)
+            defaults = get_default_ids(enumerator_for_defaults)
+            state_mask = DEVICE_STATE_ALL if include_all else DEVICE_STATE_ACTIVE
+            
+            # Build the name map once per call
+            name_map = _friendly_names_by_id()
+            
+            out = []
+            
+            for flow_name, flow in [("Render", E_RENDER), ("Capture", E_CAPTURE)]:
+                _dbg(f"Enum flow={flow_name}")
+                enumerator, coll = enum_endpoints(flow, state_mask)
+                for i in range(coll.GetCount()):
+                    dev = coll.Item(i)
+                    dev_id = dev.GetId()
+                    
+                    # Use name map lookup instead of raw COM call
+                    name = name_map.get(dev_id) or dev_id
+                    
+                    state_str = "active"
+                    
+                    if include_all:
+                        try:
+                            st = dev.GetState()
+                            if st != DEVICE_STATE_ACTIVE:
+                                parts = [label for bit, label in DEVICE_STATES.items() if st & bit]
+                                state_str = ",".join(parts) if parts else "unknown"
+                        except Exception:
+                            state_str = "unknown"
+                            
+                    is_default = {
+                        "console": dev_id == defaults[flow_name]["console"],
+                        "multimedia": dev_id == defaults[flow_name]["multimedia"],
+                        "communications": dev_id == defaults[flow_name]["communications"],
+                    }
+                    out.append({
+                        "id": dev_id,
+                        "name": name,
+                        "flow": flow_name,
+                        "state": state_str,
+                        "isDefault": is_default,
+                    })
+            _dbg(f"list_devices: total={len(out)}")
+            return out
 def find_devices_by_selector(devices, dev_id=None, name_substr=None, flow=None, regex=False):
     """
     Returns list of devices matching selector.
@@ -1496,76 +1672,80 @@ def _select_by_name_active_only(flow_name, name_text, index, regex):
         
     return ordered[0], None
 def set_endpoint_mute(device_id, mute_state):
-    for flow in (E_RENDER, E_CAPTURE):
-        _, coll = enum_endpoints(flow, DEVICE_STATE_ACTIVE)
-        for i in range(coll.GetCount()):
-            dev = coll.Item(i)
-            if dev.GetId() == device_id:
-                try:
-                    vol_iface = dev.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
-                    vol = ctypes.cast(vol_iface, ctypes.POINTER(IAudioEndpointVolume))
-                    vol.SetMute(mute_state, None)
-                    return True
-                except Exception:
-                    return False
+    with _com_context():
+        for flow in (E_RENDER, E_CAPTURE):
+            _, coll = enum_endpoints(flow, DEVICE_STATE_ACTIVE)
+            for i in range(coll.GetCount()):
+                dev = coll.Item(i)
+                if dev.GetId() == device_id:
+                    try:
+                        vol_iface = dev.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
+                        vol = ctypes.cast(vol_iface, ctypes.POINTER(IAudioEndpointVolume))
+                        vol.SetMute(mute_state, None)
+                        return True
+                    except Exception:
+                        return False
     return False
 def get_endpoint_mute(device_id):
-    for flow in (E_RENDER, E_CAPTURE):
-        _, coll = enum_endpoints(flow, DEVICE_STATE_ACTIVE)
-        for i in range(coll.GetCount()):
-            dev = coll.Item(i)
-            if dev.GetId() == device_id:
-                vol_iface = dev.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
-                vol = ctypes.cast(vol_iface, ctypes.POINTER(IAudioEndpointVolume))
-                try:
-                    ret = vol.GetMute()
-                    if isinstance(ret, tuple):
-                        ret = ret[0]
-                    return bool(ret)
-                except Exception:
+    with _com_context():
+        for flow in (E_RENDER, E_CAPTURE):
+            _, coll = enum_endpoints(flow, DEVICE_STATE_ACTIVE)
+            for i in range(coll.GetCount()):
+                dev = coll.Item(i)
+                if dev.GetId() == device_id:
+                    vol_iface = dev.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
+                    vol = ctypes.cast(vol_iface, ctypes.POINTER(IAudioEndpointVolume))
                     try:
-                        from ctypes import wintypes
-                        b = wintypes.BOOL()
-                        vol.GetMute(ctypes.byref(b))
-                        return bool(b.value)
+                        ret = vol.GetMute()
+                        if isinstance(ret, tuple):
+                            ret = ret[0]
+                        return bool(ret)
                     except Exception:
-                        return None
+                        try:
+                            from ctypes import wintypes
+                            b = wintypes.BOOL()
+                            vol.GetMute(ctypes.byref(b))
+                            return bool(b.value)
+                        except Exception:
+                            return None
     return None
 def get_endpoint_volume(device_id):
-    for flow in (E_RENDER, E_CAPTURE):
-        _, coll = enum_endpoints(flow, DEVICE_STATE_ACTIVE)
-        for i in range(coll.GetCount()):
-            dev = coll.Item(i)
-            if dev.GetId() == device_id:
-                vol_iface = dev.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
-                vol = ctypes.cast(vol_iface, ctypes.POINTER(IAudioEndpointVolume))
-                try:
-                    ret = vol.GetMasterVolumeLevelScalar()
-                    if isinstance(ret, tuple):
-                        ret = ret[0]
-                    return max(0, min(100, int(round(float(ret) * 100.0))))
-                except Exception:
+    with _com_context():
+        for flow in (E_RENDER, E_CAPTURE):
+            _, coll = enum_endpoints(flow, DEVICE_STATE_ACTIVE)
+            for i in range(coll.GetCount()):
+                dev = coll.Item(i)
+                if dev.GetId() == device_id:
+                    vol_iface = dev.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
+                    vol = ctypes.cast(vol_iface, ctypes.POINTER(IAudioEndpointVolume))
                     try:
-                        f = ctypes.c_float()
-                        vol.GetMasterVolumeLevelScalar(ctypes.byref(f))
-                        return max(0, min(100, int(round(float(f.value) * 100.0))))
+                        ret = vol.GetMasterVolumeLevelScalar()
+                        if isinstance(ret, tuple):
+                            ret = ret[0]
+                        return max(0, min(100, int(round(float(ret) * 100.0))))
                     except Exception:
-                        return None
+                        try:
+                            f = ctypes.c_float()
+                            vol.GetMasterVolumeLevelScalar(ctypes.byref(f))
+                            return max(0, min(100, int(round(float(f.value) * 100.0))))
+                        except Exception:
+                            return None
     return None
 def set_endpoint_volume(device_id, level_percent):
     level = max(0.0, min(1.0, float(level_percent) / 100.0))
-    for flow in (E_RENDER, E_CAPTURE):
-        _, coll = enum_endpoints(flow, DEVICE_STATE_ACTIVE)
-        for i in range(coll.GetCount()):
-            dev = coll.Item(i)
-            if dev.GetId() == device_id:
-                try:
-                    vol_iface = dev.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
-                    vol = ctypes.cast(vol_iface, ctypes.POINTER(IAudioEndpointVolume))
-                    vol.SetMasterVolumeLevelScalar(level, None)
-                    return True
-                except Exception:
-                    return False
+    with _com_context():
+        for flow in (E_RENDER, E_CAPTURE):
+            _, coll = enum_endpoints(flow, DEVICE_STATE_ACTIVE)
+            for i in range(coll.GetCount()):
+                dev = coll.Item(i)
+                if dev.GetId() == device_id:
+                    try:
+                        vol_iface = dev.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
+                        vol = ctypes.cast(vol_iface, ctypes.POINTER(IAudioEndpointVolume))
+                        vol.SetMasterVolumeLevelScalar(level, None)
+                        return True
+                    except Exception:
+                        return False
     return False
 def _verify_effect_only(device_id, flow, expected_enabled, timeout=2.5, interval=0.2, consecutive=2):
     """

@@ -16,6 +16,8 @@ py -3 -m venv .\venv
 5) Upgrade pip and install requirements
 ```powershell
 python -m pip install --upgrade pip
+```
+```powershell
 pip install -r requirements.txt
 ```
 6) Build the executable with PyInstaller

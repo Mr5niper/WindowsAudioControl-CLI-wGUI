@@ -1,6 +1,55 @@
 # AUDIOCTL.PY CHANGELOG
 
-## v1.4.3.2 - [Current]
+## v1.4.7.1 - [Current]
+Date: 2026-01-19
+
+### New Features
+- CLI query helpers (read-only, script friendly):
+  - get-volume: Return current endpoint volume (0–100) and mute state.
+  - get-listen: Return current “Listen to this device” enabled/disabled state for a Capture endpoint (fast registry probe).
+  - get-enhancements: Return vendor-only Enhancements state (True/False/None) using fast INI-driven reads; if inconclusive but INI supports the device, defaults to True.
+  - get-device-state: Aggregated state for GUI/scripts: volume, mute, listenEnabled, enhancementsEnabled, and available FX with states.
+- Enhancements FX system:
+  - New operations on enhancements command:
+    - --list-fx: List FX available for a device from vendor_toggles.ini.
+    - --learn-fx FX_NAME: Guided learn flow for a specific effect (e.g., “BassBoost”, “Loudness”) with a two-pass A/B (A/B then A2/B2) capture to stabilize driver behavior.
+    - --enable-fx FX_NAME / --disable-fx FX_NAME: Toggle a learned FX.
+    - --delete-fx FX_NAME: Remove per-device associations for a learned FX from vendor_toggles.ini.
+  - INI schema (FX) supports multi-write toggles:
+    - write_count, write{i}_hive, write{i}_subkey, write{i}_name, type_enable/disable, enable/disable values.
+    - Per-write scoping: write{i}_devices = comma-separated GUIDs; None (missing) = universal; empty = applies to nobody.
+    - decider_index and quorum_threshold govern verification and fast state reads.
+  - Fast vendor state helpers:
+    - _fast_get_enhancements_state, _fast_read_vendor_entry_state: Single-probe reads with hive last-write tie-break logic for correctness and speed.
+
+### Improvements
+- Listen target improvements:
+  - --playback-target-name supports choosing the render routing target by name; passing the flag without a value selects “Default Playback Device”.
+  - Direct HKLM write of the routing value ({24dbb0fc-9311-4b3d-9cf0-18ff155639d4},0) ensures Windows reflects the target (Admin may be required).
+- COM stabilization and lifecycle:
+  - All sensitive COM calls now run within a thread-local _com_context (devices.py), which calls comtypes.CoInitialize()/CoUninitialize() around each operation instead of at CLI entry.
+  - PropertyStore and PolicyConfigFx interface definitions are cached once (module scope) to prevent GC-time races when building vtables with ctypes.
+  - Forced import of comtypes._post_coinit (and submodules) ensures PyInstaller bundles critical release-time modules; prevents late import during COM cleanup.
+- Device listing and naming:
+  - Friendly names are gathered from pycaw’s GetAllDevices first (safer), with a hardened PropertyStore fallback codepath if needed.
+  - GUI and CLI index order is consistent (name-sorted per-flow) and shared across all commands that accept --index.
+- GUI enhancements:
+  - Context menu cascade “Enhancement Effects” lists all learned FX for a device; each entry toggles enabled/disabled.
+  - Learning flows (main and FX) run non-blocking with guided prompts; CLI prompts are intercepted, and the GUI sends Enter when you confirm.
+  - Background, incremental caching of per-device state (get-device-state) for fast menu rendering and accurate labels (Mute/Unmute, Listen Enable/Disable, Enhancements Enable/Disable, FX Toggle labels).
+  - During Learn, the “Print CLI commands” checkbox is temporarily disabled and programmatic prints are suppressed to keep logs clean.
+- Vendor INI handling:
+  - Default path prefers the executable directory if writable; otherwise falls back to %LOCALAPPDATA%\audioctl\vendor_toggles.ini.
+  - Append/elevated write helper: vendor-ini-append command (internal; used by GUI to write into Program Files paths when elevated).
+  - All INI reads are cached by (path, mtime) to avoid reparse overhead.
+
+### Bug Fixes
+- Listen target not applied when success was reported: Explicit HKLM write to Properties\{24dbb0fc-...},0 ensures the selection is actually used by Windows.
+- Eliminate sporadic access violations during shutdown and right-click menu population by guarding raw vtable usage with GC-pauses only where required and relying on comtypes-managed CoUninitialize timing.
+
+---
+
+## v1.4.3.2
 ### New Features
 - **Listen Playback by Name:** Added a `--playback-target-name` argument to the `listen` command, allowing users to specify the playback device by a substring of its name instead of the full device ID.
 - **Improved "Default Device" Selection:** Both `--playback-target-id` and `--playback-target-name` now support setting the playback target to "Default Device" by providing the flag without a value (e.g., `... --enable --playback-target-id`). This resolves usability issues with shells that strip empty quotes (`""`).
@@ -374,6 +423,7 @@
 - **Basic Enumeration:** Listed playback (Render) and recording (Capture) devices using `IMMDeviceEnumerator` with `DEVICE_STATE_ACTIVE` only.
 - **“Listen” Toggle (Admin):** Initial registry-based enable/disable of “Listen to this device” for capture endpoints (admin required).
 - **Admin Check:** `is_admin` helper added to warn when elevation is required.
+
 
 
 
