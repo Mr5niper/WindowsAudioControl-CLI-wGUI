@@ -18,9 +18,9 @@
 <BR>
 
 Additional quick links:
-- [Why audioctl (CLI‑first pitch)](#why-audioctl-cli-first)
+- [Why audioctl (CLI‑first)](#why-audioctl-clifirst)
 - [Command map (full tree)](#command-map-full-tree)
-- [Query helpers (read‑only)](#query-helpers-read-only)
+- [Query helpers (read‑only)](#query-helpers-readonly)
 
 ---
 
