@@ -1,4 +1,4 @@
-# audioctl\vendor_db.py
+# audioctl/vendor_db.py
 import os
 import re
 import configparser
@@ -1723,6 +1723,145 @@ def _append_new_write_to_section(ini_path, section_name, write_dict, guid_lc):
         lines.insert(sec_start + 1, f"write_count = {new_idx}\n")
     with open(ini_path, "w", encoding="utf-8", errors="replace") as f:
         f.writelines(lines)
+def _delete_fx_for_guid(fx_name, device_id, ini_path=None):
+    """
+    Remove associations for 'fx_name' for the specific device GUID from vendor_toggles.ini:
+      - Remove GUID from the section devices (union)
+      - For each write{i}, remove GUID from write{i}_devices (creating write{i}_devices to exclude this GUID if the write was universal)
+      - Keep write blocks even if they end up with empty devices (applies to nobody); runtime ignores them
+      - If no devices remain in the bucket (section devices empty), we leave the section; the loader will ignore it
+    Returns (True, info_dict) or (False, reason_str)
+    """
+    ini_path = ini_path or _vendor_ini_default_path()
+    guid_lc = _guid_of(device_id)
+    if not guid_lc:
+        return False, "bad-device-id"
+    section = _find_fx_bucket_section_name(ini_path, fx_name)
+    if not section:
+        return False, "fx-bucket-not-found"
+    try:
+        with open(ini_path, "r", encoding="utf-8", errors="replace") as f:
+            lines = f.read().splitlines(keepends=True)
+    except FileNotFoundError:
+        return False, "ini-not-found"
+    sec_hdr = f"[{section}]"
+    sec_start = None
+    sec_end = len(lines)
+    for i, line in enumerate(lines):
+        s = line.strip()
+        if s.startswith("[") and s.endswith("]"):
+            if sec_start is None:
+                if s.lower() == sec_hdr.lower():
+                    sec_start = i
+            else:
+                sec_end = i
+                break
+    if sec_start is None:
+        return False, "bucket-section-missing"
+    # Section devices (union)
+    devices_idx = None
+    cur_devices = []
+    dev_pat = re.compile(r"^\s*devices\s*=\s*(.*)$", re.IGNORECASE)
+    for i in range(sec_start + 1, sec_end):
+        m = dev_pat.match(lines[i])
+        if m:
+            devices_idx = i
+            txt = (m.group(1) or "").strip()
+            cur_devices = [x.strip().lower() for x in txt.split(",") if x.strip()]
+            break
+    # write_count
+    wc_idx = None
+    write_count = 0
+    wc_pat = re.compile(r"^\s*write_count\s*=\s*(\d+)\s*$", re.IGNORECASE)
+    for i in range(sec_start + 1, sec_end):
+        m = wc_pat.match(lines[i])
+        if m:
+            wc_idx = i
+            try:
+                write_count = int(m.group(1))
+            except Exception:
+                write_count = 0
+            break
+    # Helpers for per-write devices
+    def _get_write_devices(i_idx):
+        pat = re.compile(rf"^\s*write{i_idx}_devices\s*=\s*(.*)$", re.IGNORECASE)
+        for j in range(sec_start + 1, sec_end):
+            m = pat.match(lines[j] or "")
+            if m:
+                txt = (m.group(1) or "").strip()
+                devs = [x.strip().lower() for x in txt.split(",") if x.strip()] if txt else []
+                return j, devs
+        return None, None
+    def _set_write_devices(i_idx, dev_list):
+        pat = re.compile(rf"^\s*write{i_idx}_devices\s*=", re.IGNORECASE)
+        if dev_list is None:
+            line_txt = f"write{i_idx}_devices = \n"  # explicit none
+        else:
+            line_txt = f"write{i_idx}_devices = {','.join(sorted(set(d.lower() for d in dev_list)))}\n" if dev_list else f"write{i_idx}_devices = \n"
+        # Try to replace if exists
+        for j in range(sec_start + 1, sec_end):
+            if pat.match(lines[j] or ""):
+                lines[j] = line_txt
+                return
+        # Else insert after write{i}_disable or at sec_end
+        after_pat = re.compile(rf"^\s*write{i_idx}_disable\s*=", re.IGNORECASE)
+        insert_at = sec_end
+        for j in range(sec_start + 1, sec_end):
+            if after_pat.match(lines[j] or ""):
+                insert_at = j + 1
+                break
+        if insert_at > 0 and not lines[insert_at - 1].endswith(("\n", "\r")):
+            lines.insert(insert_at, "\n"); insert_at += 1
+        lines.insert(insert_at, line_txt)
+    writes_changed = 0
+    # Remaining devices in bucket (minus target)
+    remaining_bucket_devs = [d for d in cur_devices if d != guid_lc]
+    # Scan writes (up to declared count or a generous cap)
+    max_scan = write_count if write_count > 0 else 256
+    for i_idx in range(1, max_scan + 1):
+        # Does write{i} exist?
+        hv_pat = re.compile(rf"^\s*write{i_idx}_hive\s*=", re.IGNORECASE)
+        exists = any(hv_pat.match(lines[j] or "") for j in range(sec_start + 1, sec_end))
+        if not exists:
+            if write_count > 0 and i_idx > write_count:
+                break
+            continue
+        w_idx, w_devs = _get_write_devices(i_idx)
+        if w_idx is not None:
+            if guid_lc in (w_devs or []):
+                new_list = [x for x in (w_devs or []) if x != guid_lc]
+                _set_write_devices(i_idx, new_list)
+                writes_changed += 1
+        else:
+            # Universal write: scope to remaining devices (exclude target) or to none
+            if remaining_bucket_devs:
+                _set_write_devices(i_idx, remaining_bucket_devs)
+                writes_changed += 1
+            else:
+                _set_write_devices(i_idx, [])  # applies to nobody
+                writes_changed += 1
+    # Update section devices (union)
+    new_devices = [d for d in cur_devices if d != guid_lc]
+    new_line = f"devices = {','.join(sorted(set(new_devices)))}\n" if new_devices else "devices = \n"
+    if devices_idx is not None:
+        lines[devices_idx] = new_line
+    else:
+        insert_at = sec_end
+        if insert_at > 0 and not lines[insert_at - 1].endswith(("\n", "\r")):
+            lines.insert(insert_at, "\n"); insert_at += 1
+        lines.insert(insert_at, new_line)
+    try:
+        with open(ini_path, "w", encoding="utf-8", errors="replace") as f:
+            f.writelines(lines)
+    except Exception as e:
+        return False, f"write-ini-failed: {e}"
+    return True, {
+        "iniPath": ini_path,
+        "section": section,
+        "removedGuid": guid_lc,
+        "writesAffected": writes_changed,
+        "remainingDevices": new_devices,
+    }
 def _learn_fx_and_write_ini(target, fx_name, snapA, snapB, ini_path=None, prefer_hkcu=True, snapA2=None, snapB2=None):
     """
     Learn an FX toggle from captured snapshots.
