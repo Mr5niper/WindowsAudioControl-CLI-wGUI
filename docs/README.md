@@ -619,11 +619,11 @@ Use `audioctl wait` to block until a device becomes active (appears) or until a 
 # GUI (Graphical User Interface)
 - Launch the GUI:
   - Double-click `audioctl.exe` (no arguments), or run it without command-line options.
-    <br>
-  <img width="80" height="94" alt="image" src="https://github.com/user-attachments/assets/7559971f-8d97-4337-8f3a-c1b6df6038ba" />
+  <br>
+    <img width="98" height="98" alt="image" src="https://github.com/user-attachments/assets/a8bacaf0-71e9-45c6-bfa2-676647c0157c" />
   <br>
   
-<img width="1367" height="357" alt="image" src="https://github.com/user-attachments/assets/58d35c73-2cdd-44d4-9704-62817a97e558" />
+<img width="1367" height="357" alt="image" src="https://github.com/user-attachments/assets/efd4d7bd-ce8e-4be8-b352-9fdea7af92b8" />
 <br>
 
 ### Features
@@ -632,19 +632,23 @@ Use `audioctl wait` to block until a device becomes active (appears) or until a 
 - **Right-click** or **double-click** a device for actions:
 &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<br>
 &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<br>
-&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<img width="344" height="224" alt="image" src="https://github.com/user-attachments/assets/8745eae7-b9d8-415a-bb7a-3feebd739300" />
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<img width="356" height="237" alt="image" src="https://github.com/user-attachments/assets/460f6740-1eac-4f92-8afe-db89675661f8" />
 &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<br>
 
   - **“Set as Default (all roles)”**
   - “Set Volume…”
     <br>
-    <img width="245" height="146" alt="image" src="https://github.com/user-attachments/assets/010de5dc-28ca-407e-affe-fba7b2161d38" />
+    <img width="218" height="146" alt="image" src="https://github.com/user-attachments/assets/b58c8b9e-df50-411a-ae13-d341d61ce332" />
     <br>
   - **“Mute” / “Unmute”**
   - **“Toggle Listen (capture only)”**
   - **“Enable/Disable Enhancements”** (when a vendor toggle is known)
   - **“Enhancement Effects”** (per‑effect toggles learned from your INI)
-  - **“Learn Enhancements”** (discover a vendor DWORD and/or effects for that device)
+    <img width="642" height="237" alt="image" src="https://github.com/user-attachments/assets/d79cf646-6fb0-43fc-b417-85c88885583e" />
+  
+  - **“Learn Enhancements”** (discover a vendor DWORD and/or effects for that device)<br>
+    <img width="346" height="238" alt="image" src="https://github.com/user-attachments/assets/ebb033e9-89fb-4a34-a92a-165d443fdd7a" />
+
 
 ### Print CLI Commands
 - Enable **“Print CLI commands”** in the top bar.  
