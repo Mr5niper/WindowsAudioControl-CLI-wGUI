@@ -65,36 +65,50 @@ When using the `--name`, `--playback-name`, or `--recording-name` options, comma
 
 ```
 audioctl
-├─ list [--all] [--json]
-├─ set-default
-│  ├─ --playback-id/--playback-name [--playback-role console|multimedia|communications|all]
-│  └─ --recording-id/--recording-name [--recording-role console|multimedia|communications|all]
-│     [--index] [--regex]
-├─ set-volume
-│  └─ (--id | --name) [--flow Render|Capture] (--level 0..100 | --mute | --unmute)
-│     [--index] [--regex]
-├─ listen (Capture only)
-│  └─ (--id | --name) (--enable | --disable)
-│     [--playback-target-id [<RenderID>]] [--playback-target-name [<RenderName>]]
-│     [--index] [--regex]
-├─ enhancements
-│  ├─ Main switch:
-│  │  └─ (--id | --name) [--flow] (--enable | --disable | --learn)
-│  │     [--index] [--regex] [--prefer-hklm] [--vendor-ini PATH]
-│  └─ FX operations:
-│     ├─ --list-fx [--json]
-│     ├─ --learn-fx "FX_NAME"
-│     ├─ --enable-fx "FX_NAME" | --disable-fx "FX_NAME"
-│     └─ --delete-fx "FX_NAME"
-├─ get-volume [--id|--name] [--flow] [--index] [--regex]
-├─ get-listen [--id|--name] [--index] [--regex]          (Capture)
-├─ get-enhancements [--id|--name] [--flow] [--index] [--regex]
-├─ get-device-state [--id|--name] [--flow] [--index] [--regex] [--vendor-ini PATH]
-├─ diag-sysfx [--id|--name] [--flow] [--index] [--regex]
-├─ diag-mmdevices [--id|--name] [--flow] [--index] [--regex]
-├─ discover-enhancements [--id|--name] [--flow] [--index] [--regex]
-│  └─ [--output-dir DIR] [--ini-snippet FILE]
-└─ wait (--id|--name) [--flow] [--timeout] [--index] [--regex]
+ │ 
+ ├─ list [--all] [--json]
+ │ 
+ ├─ set-default
+ │  ├─ --playback-id/--playback-name [--playback-role console|multimedia|communications|all]
+ │  └─ --recording-id/--recording-name [--recording-role console|multimedia|communications|all]
+ │     [--index] [--regex]
+ │ 
+ ├─ set-volume
+ │  └─ (--id | --name) [--flow Render|Capture] (--level 0..100 | --mute | --unmute)
+ │     [--index] [--regex]
+ │ 
+ ├─ listen (Capture only)
+ │  └─ (--id | --name) (--enable | --disable)
+ │     [--playback-target-id [<RenderID>]] [--playback-target-name [<RenderName>]]
+ │     [--index] [--regex]
+ │ 
+ ├─ enhancements
+ │  ├─ Main switch:
+ │  │  └─ (--id | --name) [--flow] (--enable | --disable | --learn)
+ │  │     [--index] [--regex] [--prefer-hklm] [--vendor-ini PATH]
+ │  │ 
+ │  └─ FX operations:
+ │     ├─ --list-fx [--json]
+ │     ├─ --learn-fx "FX_NAME"
+ │     ├─ --enable-fx "FX_NAME" | --disable-fx "FX_NAME"
+ │     └─ --delete-fx "FX_NAME"
+ │ 
+ ├─ get-volume [--id|--name] [--flow] [--index] [--regex]
+ │ 
+ ├─ get-listen [--id|--name] [--index] [--regex]          (Capture)
+ │ 
+ ├─ get-enhancements [--id|--name] [--flow] [--index] [--regex]
+ │ 
+ ├─ get-device-state [--id|--name] [--flow] [--index] [--regex] [--vendor-ini PATH]
+ │ 
+ ├─ diag-sysfx [--id|--name] [--flow] [--index] [--regex]
+ │ 
+ ├─ diag-mmdevices [--id|--name] [--flow] [--index] [--regex]
+ │ 
+ ├─ discover-enhancements [--id|--name] [--flow] [--index] [--regex]
+ │  └─ [--output-dir DIR] [--ini-snippet FILE]
+ │ 
+ └─ wait (--id|--name) [--flow] [--timeout] [--index] [--regex]
 ```
 
 ---
