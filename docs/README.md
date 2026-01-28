@@ -26,11 +26,11 @@ Additional quick links:
 
 # Why audioctl (CLI‑first)
 Audio that actually obeys you. audioctl puts industrial‑grade Windows audio control behind a clean, scriptable CLI, then layers a friendly GUI on top. You can:
-- Script everything: list devices, set defaults, set volume/mute, flip “Listen,” and toggle Enhancements—reliably and repeatably.
+- Script everything: list devices, set defaults, set volume/mute, flip “Listen,” and toggle Enhancements, reliably and repeatably.
 - Teach your driver new tricks: our “Learn Enhancements” and “Learn FX” capture exactly what your device changes in the registry so audioctl can reproduce it, every time.
-- Control effects precisely: once learned, per‑effect toggles (FX) like BassBoost or Loudness can be enabled/disabled on demand—even if your driver doesn’t expose a native API.
-- Trust it in automation: fast read‑only commands give you state (volume, mute, listen, enhancements, per‑effect) without side effects—perfect for validation, automated testing, hotkeys, and scripts.
-- Enjoy a better GUI: right‑click a device and you’ll see context‑aware actions with live state (including FX). Learn flows are guided, non‑blocking, and safe—while the engine remains CLI‑first.
+- Control effects precisely: once learned, per‑effect toggles (FX) like BassBoost or Loudness can be enabled/disabled on demand, even if your driver doesn’t expose a native API.
+- Trust it in automation: fast read‑only commands give you state (volume, mute, listen, enhancements, per‑effect) without side effects, perfect for validation, automated testing, hotkeys, and scripts.
+- Enjoy a better GUI: right‑click a device and you’ll see context‑aware actions with live state (including FX). Learn flows are guided, non-blocking, and safe.  While the engine remains CLI‑first.
 
 Bottom line: audioctl is CLI‑first for power and reliability. The GUI is a great assistant; the CLI is the authority.
 
@@ -133,9 +133,9 @@ audioctl
 Use `audioctl set-default` to choose the system’s default playback (Render) and/or recording (Capture) endpoints. Targets must be active (`DEVICE_STATE_ACTIVE`). On some systems, you may need an elevated console (Run as Administrator).
 
 Roles you can set:
-- console — the default device most apps use.
-- multimedia — often resolved to the same device as console on most systems.
-- communications — used by calling/telephony apps.
+- console - the default device most apps use.
+- multimedia - often resolved to the same device as console on most systems.
+- communications - used by calling/telephony apps.
 - all (applies to all three roles)
 
 Defaults if a role is omitted:
@@ -143,7 +143,7 @@ Defaults if a role is omitted:
 - Recording role defaults to `communications`.
 
 About Windows roles (console vs multimedia):
-- On most Windows systems, “console” and “multimedia” effectively point to the same default device. If you set either one, you will typically see both flags update in the next `audioctl list` output. The tool still lets you set them independently—or set `all`—for completeness and for environments where they’re distinct.
+- On most Windows systems, “console” and “multimedia” effectively point to the same default device. If you set either one, you will typically see both flags update in the next `audioctl list` output. The tool still lets you set them independently, or set `all` for completeness and for environments where they’re distinct.
 
 Most users want a device to be the default for everything. Use:
 - `--playback-role all` for playback (Render)
@@ -168,7 +168,7 @@ Notes about JSON output:
 - Successful commands print compact, single‑line JSON (no pretty‑printing). For pretty output, pipe to a formatter (e.g., `| jq .`).
 
 ## Examples (only using “all”)
-### 1) Playback (Render) — by name
+### 1) Playback (Render) - by name
 ```bash
 audioctl set-default --playback-name "Speakers" --playback-role all --index 0
 ```
@@ -177,7 +177,7 @@ Sample output:
 {"set":[{"flow":"Render","role":"all","id":"{RENDER-ENDPOINT-ID}","name":"Speakers (Realtek(R) Audio)"}]}
 ```
 
-### 2) Playback (Render) — by ID
+### 2) Playback (Render) - by ID
 ```bash
 audioctl set-default --playback-id "{RENDER-ENDPOINT-ID}" --playback-role all
 ```
@@ -186,7 +186,7 @@ Sample output:
 {"set":[{"flow":"Render","role":"all","id":"{RENDER-ENDPOINT-ID}","name":"Speakers (USB DAC)"}]}
 ```
 
-### 3) Recording (Capture) — by name
+### 3) Recording (Capture) - by name
 ```bash
 audioctl set-default --recording-name "USB Microphone" --recording-role all --index 0
 ```
@@ -195,7 +195,7 @@ Sample output:
 {"set":[{"flow":"Capture","role":"all","id":"{CAPTURE-ENDPOINT-ID}","name":"USB Microphone"}]}
 ```
 
-### 4) Recording (Capture) — by ID
+### 4) Recording (Capture) - by ID
 ```bash
 audioctl set-default --recording-id "{CAPTURE-ENDPOINT-ID}" --recording-role all
 ```
@@ -204,7 +204,7 @@ Sample output:
 {"set":[{"flow":"Capture","role":"all","id":"{CAPTURE-ENDPOINT-ID}","name":"Headset Mic"}]}
 ```
 
-### 5) Playback + Recording — both “all” in one command
+### 5) Playback + Recording - both “all” in one command
 ```bash
 audioctl set-default \
   --playback-id "{RENDER-ENDPOINT-ID}"   --playback-role all \
@@ -216,7 +216,7 @@ Sample output:
 ```
 
 Additional notes:
-- If list output shows both console and multimedia toggled after setting only one, that is expected on most Windows builds—they commonly map to the same endpoint.
+- If list output shows both console and multimedia toggled after setting only one, that is expected on most Windows builds, they commonly map to the same endpoint.
 - “device not found (active only)”: verify the device is connected/enabled and visible in `audioctl list`.
 - If multiple name matches occur, rerun with `--index N` using the indices printed in the disambiguation prompt.
 
@@ -685,8 +685,8 @@ Use `audioctl wait` to block until a device becomes active (appears) or until a 
 
 ## Credits
 This project uses:
-- pycaw — <https://github.com/AndreMiras/pycaw>  
-- comtypes — <https://github.com/enthought/comtypes>  
+- pycaw - <https://github.com/AndreMiras/pycaw>  
+- comtypes - <https://github.com/enthought/comtypes>  
 
 Windows GUIDs and PROPERTYKEY constants are Microsoft API identifiers and do not require attribution.
 
@@ -694,7 +694,7 @@ Windows GUIDs and PROPERTYKEY constants are Microsoft API identifiers and do not
 
 ## Third‑Party License Texts
 
-### pycaw — MIT License
+### pycaw - MIT License
 ```text
 Copyright (c) Andre Miras and contributors
 Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -708,7 +708,7 @@ Source: <https://github.com/AndreMiras/pycaw>
 
 ---
 
-### comtypes — MIT License
+### comtypes - MIT License
 ```text
 Copyright (c) Thomas Heller, Enthought, Inc., and contributors
 Permission is hereby granted, free of charge, to any person obtaining a copy
