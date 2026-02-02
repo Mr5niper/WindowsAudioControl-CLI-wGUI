@@ -1,27 +1,32 @@
 # audioctl/devices.py
 #
-# This module is the "engine room" for Windows audio control.
-# It contains the low-level COM + registry plumbing that the CLI and GUI build on.
+# Low-level Windows audio engine (COM + registry)
+# -----------------------------------------------
+# This module contains the Windows-specific implementation behind the CLI/GUI.
+# The CLI (audioctl/cli.py) is intentionally thin; it calls into this module for:
+#   - Endpoint enumeration (Render/Playback and Capture/Recording)
+#   - Setting default endpoints via PolicyConfig (SetDefaultEndpoint)
+#   - Volume/mute via IAudioEndpointVolume (IAudioEndpointVolume::Set*/Get*)
+#   - "Listen to this device" toggle:
+#       * enable flag via endpoint IPropertyStore
+#       * routing target via registry (HKLM Properties value; often requires admin)
+#   - SysFX/Enhancements helpers used for diagnostics and learn workflows:
+#       * read/write Disable_SysFx via PolicyConfigFx (COM) and PropertyStore
+#       * registry snapshot/diff helpers under MMDevices for discovery
 #
-# Responsibilities (high-level):
-# - Enumerate audio endpoints (Render/Playback and Capture/Recording).
-# - Set default endpoints via PolicyConfig (undocumented-ish Windows COM API).
-# - Read/set master volume and mute via IAudioEndpointVolume.
-# - Toggle "Listen to this device" for Capture endpoints:
-#     * enable flag via IPropertyStore (COM PropertyStore)
-#     * routing target via MMDevices registry (HKLM) because Windows honors that for routing.
-# - Read/set SysFX/Enhancements state via PolicyConfigFx and endpoint PropertyStore
-#   (primarily for diagnostics and learning flows).
-#
-# Guiding stability principles (why this code looks "paranoid"):
-# - Every helper that touches COM manages its own COM init/teardown via _com_context().
-#   The CLI does NOT do a global CoInitialize anymore.
-# - Avoid persistent COM singletons: COM objects have thread affinity; keeping them alive
-#   across GUI events + GC cycles can trigger intermittent access violations at shutdown
-#   when comtypes finalizers call Release() on the wrong thread.
-# - Cache *interface class definitions* (ctypes vtable layouts / comtypes interface classes),
-#   not COM objects. Dynamic class creation (COMMETHOD/CFUNCTYPE) is GC-sensitive; caching
-#   avoids "GC running during vtable construction" crash patterns.
+# Stability principles (why this code looks "defensive"):
+#   1) Per-call COM initialization:
+#      Every public helper enters _com_context(), which initializes COM on the current
+#      thread and uninitializes it when the last nested call exits. This keeps COM
+#      lifetime local and avoids long-lived apartment state in the GUI process.
+#   2) Avoid long-lived COM singletons:
+#      COM interfaces are apartment/thread-affine. Keeping singletons alive across GUI
+#      operations interacts badly with comtypes finalizers and GC timing (Release on
+#      unexpected threads), which can cause intermittent access violations.
+#   3) Cache interface *definitions* (not instances):
+#      Creating ctypes/comtypes vtable structures (COMMETHOD/CFUNCTYPE) repeatedly at
+#      runtime can trigger GC at unsafe moments. We define and cache the interface class
+#      definitions once and reuse them to reduce GC-sensitive construction.
 
 import re
 import time
@@ -30,9 +35,9 @@ import ctypes
 import winreg
 from ctypes import POINTER, byref, wintypes
 
-# Import compat BEFORE comtypes/pycaw:
-# The compat module applies global comtypes.automation shims that must be in place
-# before we import modules that use PROPVARIANT/VT_* constants.
+# Import compat BEFORE comtypes/pycaw
+# compat.py installs small comtypes shims and forces import of comtypes post_coinit
+# modules for PyInstaller bundling stability.
 from .compat import (
     E_RENDER, E_CAPTURE,
     E_CONSOLE, E_MULTIMEDIA, E_COMMUNICATIONS,
@@ -51,32 +56,32 @@ import copy
 import threading
 import comtypes
 
-# ---- COM lifecycle management ------------------------------------------------
-# COM must be initialized per-thread. We also want to support nested calls:
-# e.g. cmd_get_device_state -> get_endpoint_volume() + get_endpoint_mute() etc.
-# If each helper called CoInitialize/CoUninitialize without reference counting,
-# nested calls could uninitialize COM while still in use.
-#
-# We therefore keep a thread-local refcount. First enter initializes COM,
-# last exit uninitializes COM.
-#
-# Note: we deliberately swallow exceptions here. In some environments (frozen exe,
-# unusual COM configuration, shutdown edge cases), CoInitialize/CoUninitialize can
-# raise. We treat COM init as best-effort and let the caller's COM operation be the
-# real success/failure signal.
 _com_tls = threading.local()
 
 def _com_enter():
+    # Thread-local COM reference count:
+    # - Many helpers call other helpers. Nested calls should not repeatedly call
+    #   CoInitialize/CoUninitialize because uninitializing early can invalidate
+    #   COM objects still in use by inner frames.
+    # - We track a per-thread counter and only CoInitialize on the first entry.
+    #
+    # We intentionally swallow exceptions here: COM init is best-effort and callers
+    # determine success based on the actual operation result.
     try:
         cnt = getattr(_com_tls, "count", 0)
         if cnt == 0:
             comtypes.CoInitialize()
         _com_tls.count = cnt + 1
     except Exception:
-        # Best-effort: avoid crashing the app just because COM init failed.
         pass
 
 def _com_exit():
+    # Symmetric to _com_enter:
+    # - Decrement thread-local counter
+    # - Only call CoUninitialize when the last nested caller exits
+    #
+    # Exceptions are swallowed because COM teardown failure should not crash the
+    # process; it typically just means cleanup is best-effort at that point.
     try:
         cnt = getattr(_com_tls, "count", 0) - 1
         if cnt <= 0:
@@ -84,7 +89,6 @@ def _com_exit():
             try:
                 comtypes.CoUninitialize()
             except Exception:
-                # Best-effort: teardown failures are non-fatal; COM may already be down.
                 pass
         else:
             _com_tls.count = cnt
@@ -95,15 +99,7 @@ from contextlib import contextmanager
 
 @contextmanager
 def _com_context():
-    """
-    Context manager wrapper for thread-local COM apartment lifetime.
-
-    Why:
-    - COM must be initialized once per thread.
-    - Many helpers call each other (nested), so we use a refcount.
-    - We want COM init/teardown to be localized to the actual operation, rather than
-      relying on CLI/GUI outer layers to keep COM alive.
-    """
+    # Context manager wrapper so all call sites use the same COM lifecycle logic.
     _com_enter()
     try:
         yield
@@ -111,17 +107,18 @@ def _com_context():
         _com_exit()
 
 # --- Cached PolicyConfigFx interface definitions (define once at import time) ---
-# PolicyConfigFx is an undocumented-ish but widely used COM interface that exposes:
-# - SetDefaultEndpoint
-# - GetPropertyValue/SetPropertyValue for endpoint properties (including FxStore)
+# PolicyConfigFx is used to access endpoint properties with the bFxStore flag
+# (required for reading/writing SysFX state on some Windows builds).
 #
-# We define the interface and associated structs ourselves because:
-# - pycaw versions vary in what they ship
-# - we need the bFxStore parameter for SysFX work
-# - defining COMMETHOD() and ctypes structures dynamically inside a function can
-#   interact badly with GC (historically causing intermittent access violations)
+# Why we define it here instead of importing from pycaw:
+#   - pycaw versions vary; some do not ship the Fx variant or the exact method signatures.
+#   - We need the bFxStore argument for GetPropertyValue/SetPropertyValue when probing
+#     enhancements state (Disable_SysFx).
 #
-# Important: we cache only the *definitions* (classes/structs/IIDs), not COM instances.
+# Why we cache these definitions at import time:
+#   - Defining comtypes interfaces involves creating ctypes function prototypes
+#     (COMMETHOD) and structures. Doing that repeatedly at runtime can trigger GC
+#     at unsafe times and has historically caused access violations during shutdown.
 _POLICY_CONFIG_FX_DEFS = None
 
 def _init_policyconfig_fx_defs_once():
@@ -129,16 +126,17 @@ def _init_policyconfig_fx_defs_once():
     if _POLICY_CONFIG_FX_DEFS is not None:
         return
 
+    # PROPERTYKEY is the standard Windows pair (fmtid GUID + pid integer).
+    # It identifies a property within a property store.
     class PROPERTYKEY(ctypes.Structure):
         _fields_ = (("fmtid", GUID), ("pid", wintypes.DWORD))
 
-    # Prefer comtypes.automation PROPVARIANT, with a small fallback. Some builds of
-    # comtypes expose PROPVARIANT under tagPROPVARIANT; compat.py also tries to ensure
-    # PROPVARIANT exists.
+    # Prefer comtypes.automation PROPVARIANT. Some comtypes builds expose it under
+    # tagPROPVARIANT. If neither exist, we fall back to a minimal union/struct shape
+    # sufficient for bool/UI2/UI4/LPWSTR usage in this file.
     try:
         PROPVARIANT = getattr(automation, "PROPVARIANT", getattr(automation, "tagPROPVARIANT"))
     except Exception:
-        # Minimal fallback PROPVARIANT definition sufficient for the VT types we touch.
         class _PVU(ctypes.Union):
             _fields_ = [
                 ("boolVal", ctypes.c_short),
@@ -156,7 +154,11 @@ def _init_policyconfig_fx_defs_once():
                 ("data", _PVU),
             ]
 
-    # IPolicyConfigFx IID {F8679F50-850A-41CF-9C72-430F290290C8}
+    # IID/CLSID notes:
+    # - IID identifies the COM interface (IPolicyConfigFx).
+    # - CLSID identifies the COM class used to instantiate the client.
+    # We do not embed raw GUID literals directly in some cases; _guid_from_parts()
+    # exists to reduce literal scanning/embedding.
     _IID_PolicyConfig = GUID(_guid_from_parts("F8679F50", "-850A-41CF-", "9C72-", "430F290290C8"))
 
     class IPolicyConfigFx(IUnknown):
@@ -187,9 +189,8 @@ def _init_policyconfig_fx_defs_once():
             COMMETHOD([], HRESULT, 'SetShareMode',
                       (['in'], wintypes.LPCWSTR, 'wszDeviceId'),
                       (['in'], ctypes.c_void_p, 'mode')),
-            # We need bFxStore variants:
-            # - bFxStore=True targets "FxProperties" style storage
-            # - bFxStore=False targets the normal property store
+            # NOTE: bFxStore variants we need:
+            # - Some systems store Disable_SysFx under an "FX store" and require bFxStore=True.
             COMMETHOD([], HRESULT, 'GetPropertyValue',
                       (['in'], wintypes.LPCWSTR, 'pszDeviceName'),
                       (['in'], wintypes.BOOL, 'bFxStore'),
@@ -208,17 +209,14 @@ def _init_policyconfig_fx_defs_once():
                       (['in'], wintypes.BOOL, 'bVisible')),
         )
 
-    # CLSID_PolicyConfigClient {870AF99C-171D-4F9E-AF0D-E63DF40C2BC9}
     CLSID_PolicyConfigClient = GUID(_guid_from_parts("870AF99C", "-171D-4F9E-", "AF0D-", "E63DF40C2BC9"))
-
     _POLICY_CONFIG_FX_DEFS = (IPolicyConfigFx, CLSID_PolicyConfigClient, PROPERTYKEY, PROPVARIANT)
 
-# Initialize once at import time: defines interface classes early, avoiding runtime
-# class construction in the middle of other COM work (historically GC-sensitive).
+# Initialize once at import time (definition caching; no COM instance created here).
 _init_policyconfig_fx_defs_once()
 
 def _define_policyconfig_fx_interfaces():
-    # Backward-compatible helper that now just returns the cached defs
+    # Backward-compatible helper that now just returns the cached defs.
     _init_policyconfig_fx_defs_once()
     return _POLICY_CONFIG_FX_DEFS
 
@@ -226,7 +224,7 @@ def _define_policyconfig_fx_interfaces():
 _PROPERTY_STORE_INTERFACES_CACHE = None
 
 def _short_settle(sec=0.15):
-    # Small delay used for "settling" driver state after registry/COM writes during learn/verify flows.
+    # Small helper for "let Windows/driver settle" delays during learn/discovery.
     try:
         time.sleep(float(sec))
     except Exception:
@@ -237,9 +235,9 @@ def _reemit_non_error_stderr(buf_text: str):
     Re-emit only non-error lines (e.g., INFO) from captured stderr.
     Suppresses lines starting with 'ERROR:' (ignoring leading whitespace).
 
-    Used by CLI flows that capture stderr around COM/property operations so we
-    can keep helpful informational messages while suppressing known noisy errors
-    on benign fallback paths.
+    Used by CLI when we capture stderr from COM-heavy calls:
+      - Users still see useful INFO/WARNING output,
+      - but we avoid duplicating error framing when we already print our own ERROR line.
     """
     try:
         import sys
@@ -254,8 +252,7 @@ def _extract_endpoint_guid_from_device_id(device_id: str):
     Extract the endpoint GUID (with braces) from a device id like:
       "{0.0.1.00000000}.{83a9be54-901e-4429-993b-c9088e3028a0}"
 
-    Many registry locations under MMDevices are keyed by this endpoint GUID,
-    not by the full IMMDevice ID string.
+    Returns "{83a9be54-901e-4429-993b-c9088e3028a0}" or None.
     """
     try:
         # Use raw string literal for regex pattern to avoid SyntaxWarning
@@ -268,37 +265,29 @@ def _extract_endpoint_guid_from_device_id(device_id: str):
 
 def set_listen_to_device_ps(capture_device_id, enable, render_device_id=None):
     """
-    Enable/disable 'Listen to this device' for a Capture endpoint.
+    Enable/disable 'Listen to this device' using IPropertyStore for the enable flag
+    and the registry for the playback target (HKLM write requires Admin).
 
-    How it works:
-    - The checkbox ("Listen to this device") is stored as a PropertyStore boolean:
-        PROPERTYKEY fmtid={24dbb0fc-9311-4b3d-9cf0-18ff155639d4}, pid=1
-      We write it via IPropertyStore::SetValue + Commit.
-    - The routing playback target ("Playback through this device") is stored separately
-      in MMDevices registry as a string:
-        HKLM\...\MMDevices\Audio\Capture\{endpoint-guid}\Properties
-        "{24dbb0fc-...},0" = render_device_id or "" (empty string => Default Playback Device)
+    Key details:
+      - The "Listen enabled" checkbox is stored as a PropertyStore boolean:
+          PROPERTYKEY fmtid "{24dbb0fc-9311-4b3d-9cf0-18ff155639d4}", pid 1
+      - The playback routing target is stored as a REG_SZ under HKLM (driver/Windows expects this):
+          key: SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\MMDevices\\Audio\\Capture\\{guid}\\Properties
+          value: "{24dbb0fc-9311-4b3d-9cf0-18ff155639d4},0"
+        Writes here often require Administrator privileges.
 
-      We use registry for routing because Windows/driver reliably honors this location.
-      Setting routing purely via PropertyStore/COM has historically reported success while
-      not changing actual routing.
+    render_device_id semantics:
+      - None: do not change the routing target (preserve current selection)
+      - "":  set to "Default Playback Device" (empty string is the Windows marker)
+      - "<id>": route to the specified Render endpoint ID
 
-    Inputs:
-    - capture_device_id: full IMMDevice ID for the capture endpoint.
-    - enable: bool, desired listen state.
-    - render_device_id:
-        * None => do not change routing
-        * ""   => route to Default Playback Device
-        * "<id>" => route to specific render endpoint ID
-
-    Returns:
-    - True if the enable toggle write succeeded (routing write best-effort)
-    - False on failure (errors printed to stderr; CLI may use captured stderr)
+    Return semantics:
+      - Returns True if the PropertyStore enable write succeeded (authoritative).
+      - Routing write is best-effort; failures are emitted as WARNING but do not fail the call.
     """
     with _com_context():
         import sys, gc
-
-        # Get cached interface definitions (ctypes vtable layout + PROPVARIANT helpers).
+        # Get cached interface definitions (vtables are cached to avoid GC-sensitive redefinition).
         interfaces = _get_property_store_interfaces()
         PROPVARIANT = interfaces["PROPVARIANT"]
         PROPERTYKEY = interfaces["PROPERTYKEY"]
@@ -314,14 +303,14 @@ def set_listen_to_device_ps(capture_device_id, enable, render_device_id=None):
 
         propsys = ctypes.OleDLL("propsys.dll")
         ole32 = ctypes.OleDLL("ole32.dll")
-
         have_helpers = True
         try:
             InitPropVariantFromBoolean = propsys.InitPropVariantFromBoolean
             InitPropVariantFromBoolean.restype = HRESULT_T
             InitPropVariantFromBoolean.argtypes = (wintypes.BOOL, POINTER(PROPVARIANT))
         except (AttributeError, OSError):
-            # Some systems don't export helper creators; we can still construct a minimal PV.
+            # Some Windows builds don't expose the helper in propsys.dll; in that case
+            # we manually construct the PROPVARIANT (vt=VT_BOOL, boolVal=VARIANT_TRUE/FALSE).
             have_helpers = False
 
         PropVariantClear = ole32.PropVariantClear
@@ -339,38 +328,32 @@ def set_listen_to_device_ps(capture_device_id, enable, render_device_id=None):
                 try:
                     pv.boolVal = VARIANT_TRUE if value else VARIANT_FALSE
                 except AttributeError:
-                    # Some PROPVARIANT variants expose fields differently; vt is still enough for many callers.
                     pass
             return pv
 
-        # PKEY_LISTEN_ENABLE:
-        # fmtid is the Listen-to-device property set; pid=1 corresponds to the enabled flag.
         PKEY_LISTEN_ENABLE = PROPERTYKEY(GUID("{24dbb0fc-9311-4b3d-9cf0-18ff155639d4}"), 1)
-
         pv_enable = None
         try:
             pv_enable = _pv_from_bool_local(bool(enable))
 
-            # GC guard: while we hold raw COM pointers and call through a ctypes vtable,
-            # we don't want comtypes finalizers to run on unrelated objects and call Release()
-            # at an inconvenient time (intermittent access violations).
+            # GC guard around raw vtable calls:
+            # We disable the Python GC to prevent comtypes finalizers (__del__ -> Release)
+            # from running while we hold raw COM interface pointers. This is a defensive
+            # measure against intermittent access violations.
             gc_was_enabled = gc.isenabled()
             if gc_was_enabled:
                 gc.disable()
             try:
                 enumerator = CoCreateInstance(CLSID_MMDeviceEnumerator, interface=IMMDeviceEnumerator, clsctx=CLSCTX_ALL)
                 dev = enumerator.GetDevice(capture_device_id)
-
                 ps_unknown = dev.OpenPropertyStore(STGM_WRITE)
                 ps_ptr_val = _raw_ptr(ps_unknown)
                 if not ps_ptr_val:
                     raise OSError("OpenPropertyStore returned null pointer for IPropertyStore.")
-
                 ps_iface = ctypes.cast(ctypes.c_void_p(ps_ptr_val), PIPS)
                 hr = ps_iface.contents.lpVtbl.contents.SetValue(ps_iface, byref(PKEY_LISTEN_ENABLE), byref(pv_enable))
                 if hr != 0:
                     raise OSError(f"IPropertyStore::SetValue(enable) failed: {_hrx(hr)}")
-
                 hr = ps_iface.contents.lpVtbl.contents.Commit(ps_iface)
                 if hr != 0:
                     raise OSError(f"IPropertyStore::Commit failed: {_hrx(hr)}")
@@ -378,9 +361,8 @@ def set_listen_to_device_ps(capture_device_id, enable, render_device_id=None):
                 if gc_was_enabled:
                     gc.enable()
 
-            # Routing target write:
-            # - pid=0 is the target endpoint id string (render endpoint)
-            # - this is stored under HKLM, and Windows UI/driver behavior is consistent here.
+            # Set playback target via registry (only way that works reliably).
+            # This write is best-effort and may require admin if the driver stores this in HKLM.
             if render_device_id is not None:
                 guid = _extract_endpoint_guid_from_device_id(capture_device_id)
                 if guid:
@@ -394,17 +376,12 @@ def set_listen_to_device_ps(capture_device_id, enable, render_device_id=None):
                         finally:
                             winreg.CloseKey(key)
                     except OSError as e:
-                        # Not fatal to the listen enable toggle; routing requires Admin on many machines.
                         print(f"WARNING: Failed to set playback target (requires Admin): {e}", file=sys.stderr)
-
             return True
-
         except Exception as e:
             print(f"ERROR: set_listen_to_device_ps failed for '{capture_device_id}': {e}", file=sys.stderr)
             return False
-
         finally:
-            # Always clear PROPVARIANT to avoid leaking allocated memory/strings.
             try:
                 if pv_enable is not None:
                     PropVariantClear(byref(pv_enable))
@@ -413,20 +390,16 @@ def set_listen_to_device_ps(capture_device_id, enable, render_device_id=None):
 
 def _get_listen_to_device_status_ps(device_id):
     """
-    Read the "Listen to this device" enable flag via COM PropertyStore:
-      PKEY fmtid={24dbb0fc-...}, pid=1
+    Read the 'Listen to this device' enable flag using IPropertyStore::GetValue via raw vtable (ctypes).
+    Returns True/False/None.
 
-    Returns:
-    - True/False when readable
-    - None when unreadable (caller may fall back to registry read)
-
-    This is intended as the authoritative read (same API Windows uses),
-    but it can fail on some systems due to COM/property store quirks, so
-    callers treat None as "unknown" and may use registry parsing as a fallback.
+    Failure modes:
+      - Returns None if the PropertyStore cannot be opened or if the value cannot be read.
+      - Callers typically fall back to registry probing when None is returned.
     """
     with _com_context():
         import sys, gc
-
+        # Get cached interface definitions
         interfaces = _get_property_store_interfaces()
         PROPVARIANT = interfaces["PROPVARIANT"]
         PROPERTYKEY = interfaces["PROPERTYKEY"]
@@ -434,27 +407,24 @@ def _get_listen_to_device_status_ps(device_id):
         VT_BOOL = interfaces["VT_BOOL"]
         HRESULT_T = interfaces["HRESULT_T"]
         VARIANT_FALSE = interfaces["VARIANT_FALSE"]
-
         ole32 = ctypes.OleDLL("ole32.dll")
         PropVariantClear = ole32.PropVariantClear
         PropVariantClear.restype = HRESULT_T
         PropVariantClear.argtypes = (POINTER(PROPVARIANT),)
 
+        # Listen enable property: fmtid "{24dbb0fc-...}", pid 1 (VT_BOOL).
         PKEY_LISTEN_ENABLE = PROPERTYKEY(GUID("{24dbb0fc-9311-4b3d-9cf0-18ff155639d4}"), 1)
-
         pv = PROPVARIANT()
         try:
             result = None
 
-            # GC guard: we call raw vtable methods through ctypes pointers, so we avoid
-            # comtypes __del__/Release() running concurrently and destabilizing COM refcounts.
+            # GC guard around raw vtable calls (see set_listen_to_device_ps for rationale).
             gc_was_enabled = gc.isenabled()
             if gc_was_enabled:
                 gc.disable()
             try:
                 enumerator = CoCreateInstance(CLSID_MMDeviceEnumerator, interface=IMMDeviceEnumerator, clsctx=CLSCTX_ALL)
                 dev = enumerator.GetDevice(device_id)
-
                 ps_unknown = dev.OpenPropertyStore(STGM_READ)
                 ps_ptr_val = ctypes.cast(ps_unknown, ctypes.c_void_p).value
                 if not ps_ptr_val:
@@ -477,13 +447,10 @@ def _get_listen_to_device_status_ps(device_id):
             finally:
                 if gc_was_enabled:
                     gc.enable()
-
             return result
-
         except Exception as e:
             print(f"WARNING: Failed to read listen status via COM for '{device_id}': {e}", file=sys.stderr)
             return None
-
         finally:
             try:
                 PropVariantClear(byref(pv))
@@ -492,11 +459,11 @@ def _get_listen_to_device_status_ps(device_id):
 
 def _read_listen_enable_fast(device_id: str):
     """
-    Compatibility helper used by CLI/GUI to quickly determine listen state.
+    Compatibility helper used by CLI:
+      - COM-backed read first (exact PropertyStore semantics)
+      - then registry fallback (robust to type/layout variance)
 
-    Strategy:
-    1) COM PropertyStore read (authoritative when it works).
-    2) Registry parsing fallback for resilience.
+    Returns True/False/None.
     """
     state = _get_listen_to_device_status_ps(device_id)
     if state is None:
@@ -507,33 +474,27 @@ def _read_listen_enable_from_registry(device_id: str):
     r"""
     Robustly read the 'Listen to this device' enable state from MMDevices.
 
-    Why this exists:
-    - Some devices/drivers expose the listen flag in slightly different places
-      (FxProperties vs Properties) and sometimes as REG_BINARY (PROPVARIANT blob)
-      rather than a plain DWORD.
-    - COM reads can fail intermittently; registry reads are a pragmatic fallback.
+    Registry reality:
+      Drivers/Windows may store the value in different formats:
+        - REG_DWORD 0/1
+        - REG_BINARY PROPVARIANT blob (VT_BOOL)
+        - REG_SZ representations
+      This reader tries to interpret all of them.
 
-    Returns:
-    - True/False if a value can be parsed
-    - None if not found/parseable
+    Base path pattern (HKCU):
+      SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Capture\{guid}\{FxProperties|Properties}
     """
     try:
         import sys
     except Exception:
         return None
-
     guid = _extract_endpoint_guid_from_device_id(device_id)
     if not guid:
         return None
-
     base = r"SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Capture" + "\\" + guid
     guid_base = "{24dbb0fc-9311-4b3d-9cf0-18ff155639d4}".lower()
 
     def _parse_bool_from_reg(val, typ):
-        # Drivers may store booleans as:
-        # - REG_DWORD: 0/1
-        # - REG_BINARY: PROPVARIANT serialization (VT_BOOL at offset)
-        # - REG_SZ: "true"/"false" variants
         if typ == winreg.REG_DWORD:
             try:
                 return bool(int(val))
@@ -544,7 +505,7 @@ def _read_listen_enable_from_registry(device_id: str):
                 b = bytes(val)
                 if len(b) >= 10:
                     vt = int.from_bytes(b[0:2], "little", signed=False)
-                    if vt == 0x000B:  # VT_BOOL
+                    if vt == 0x000B:
                         bool16 = int.from_bytes(b[8:10], "little", signed=True)
                         return bool16 != 0
             except Exception:
@@ -562,9 +523,6 @@ def _read_listen_enable_from_registry(device_id: str):
 
     preferred = None
     fallback_any = None
-
-    # We check HKCU only here because the listen enable flag is typically per-user.
-    # (Routing target uses HKLM and is handled elsewhere.)
     for sub in ("FxProperties", "Properties"):
         try:
             key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, base + "\\" + sub, 0, winreg.KEY_READ)
@@ -581,26 +539,21 @@ def _read_listen_enable_from_registry(device_id: str):
                 name_l = name.lower()
                 if not name_l.startswith(guid_base):
                     continue
-
                 pid = None
                 if "," in name_l:
                     try:
                         pid = int(name_l.split(",", 1)[1])
                     except Exception:
                         pid = None
-
                 parsed = _parse_bool_from_reg(val, typ)
                 if parsed is None:
                     continue
-
-                # Prefer pid=1 (the canonical "listen enabled" pid).
+                # pid 1 is the Listen enable property; if present, it's preferred.
                 if pid == 1:
                     preferred = parsed
                     break
-
                 if fallback_any is None:
                     fallback_any = parsed
-
             if preferred is not None:
                 break
         finally:
@@ -608,7 +561,6 @@ def _read_listen_enable_from_registry(device_id: str):
                 winreg.CloseKey(key)
             except Exception:
                 pass
-
     if preferred is not None:
         return preferred
     if fallback_any is not None:
@@ -619,14 +571,9 @@ def _verify_listen_via_registry(device_id: str, expected_enabled: bool, timeout=
     """
     Poll the registry until the 'Listen' checkbox matches expected_enabled or timeout.
 
-    Used by the CLI "listen" command to provide a verification fallback when:
-    - The setter reports failure but state actually changed, or
-    - COM readback is inconclusive, or
-    - Windows applies the change asynchronously.
-
-    Returns:
-    - (True, state) if verified
-    - (False, last_state_or_None) if timed out
+    Why polling:
+      UI toggles and driver propagation can be asynchronous; a single immediate read may
+      return the old value briefly.
     """
     deadline = time.time() + timeout
     last_state = None
@@ -639,8 +586,8 @@ def _verify_listen_via_registry(device_id: str, expected_enabled: bool, timeout=
     return False, last_state
 
 # --- Enhancements Helpers (PropertyStore, Registry, COM helpers) ---
+
 def _get_policy_config_fx():
-    # Creates a PolicyConfigFx instance for property access (FxStore + normal store).
     IPolicyConfigFx, CLSID_PolicyConfigClient, PROPERTYKEY, PROPVARIANT = _define_policyconfig_fx_interfaces()
     with _com_context():
         return CoCreateInstance(CLSID_PolicyConfigClient, interface=IPolicyConfigFx, clsctx=CLSCTX_ALL)
@@ -649,12 +596,13 @@ def _get_policy_config_fx_singleton():
     """
     Create a fresh PolicyConfig object each time - no singleton caching.
 
-    Why:
-    - COM objects must be released on the same thread/apartment they were created in.
-    - Keeping a singleton alive across GUI operations increases the chance that GC
-      will finalize it later from an unexpected context, leading to COM Release races
-      and intermittent access violations.
-    - Creating a short-lived instance per operation is safer and predictable.
+    The singleton pattern caused COM cleanup issues during garbage collection because
+    COM objects must be cleaned up on the same thread they were created on. Holding a
+    singleton across multiple GUI operations while GC runs intermittently can cause
+    access violations when Python tries to Release() the interface at inopportune times.
+
+    Creating fresh instances for each operation and letting them go out of scope naturally
+    allows proper COM cleanup timing.
     """
     _dbg("Creating PolicyConfigFx COM object (fresh instance, not singleton)")
     try:
@@ -679,29 +627,27 @@ def _get_policy_config_interfaces():
     """
     Get or create PolicyConfig interface definitions once and cache them.
 
-    Why:
-    - pycaw's packaging varies: some builds expose policyconfig helpers, others don't.
-    - Defining COM interfaces dynamically inside a hot codepath is risky: ctypes/comtypes
-      class construction can run during GC, and comtypes finalizers may try to Release()
-      COM objects concurrently (historically causing access violations).
-    - Caching interface *definitions* avoids repeated dynamic class creation.
+    Compatibility note:
+      pycaw may or may not ship policyconfig interfaces depending on version.
+      We try importing from pycaw first; otherwise we define a compatible Vista
+      interface locally.
     """
     global _POLICY_CONFIG_INTERFACES_CACHE
-
+    
     if _POLICY_CONFIG_INTERFACES_CACHE is not None:
         return _POLICY_CONFIG_INTERFACES_CACHE
-
-    # Try to import from pycaw first (preferred; matches pycaw's known-good definitions).
+    
+    # Try to import from pycaw first
     try:
         from pycaw.policyconfig import IPolicyConfig, IPolicyConfigVista, CLSID_PolicyConfigClient
         _POLICY_CONFIG_INTERFACES_CACHE = (IPolicyConfig, IPolicyConfigVista, CLSID_PolicyConfigClient)
         return _POLICY_CONFIG_INTERFACES_CACHE
     except Exception:
         pass
-
-    # Define locally if pycaw doesn't have them.
+    
+    # Define locally if pycaw doesn't have them
     CLSID_PolicyConfigClient = GUID(_guid_from_parts("294935CE", "-F637-4E7C-", "A41B-", "AB255460B862"))
-
+    
     class IPolicyConfigVista(IUnknown):
         _iid_ = GUID("{568B9108-44BF-40B4-9006-86AFE5B5A620}")
         _methods_ = (
@@ -717,10 +663,10 @@ def _get_policy_config_interfaces():
             COMMETHOD([], HRESULT, 'SetDefaultEndpoint', (['in'], wintypes.LPCWSTR, 'wszDeviceId'), (['in'], wintypes.DWORD, 'role')),
             COMMETHOD([], HRESULT, 'SetEndpointVisibility', (['in'], wintypes.LPCWSTR, 'wszDeviceId'), (['in'], wintypes.BOOL, 'bVisible')),
         )
-
-    # IPolicyConfig is typically the same as Vista for our purposes.
+    
+    # IPolicyConfig is typically the same as Vista for our purposes
     IPolicyConfig = IPolicyConfigVista
-
+    
     _POLICY_CONFIG_INTERFACES_CACHE = (IPolicyConfig, IPolicyConfigVista, CLSID_PolicyConfigClient)
     return _POLICY_CONFIG_INTERFACES_CACHE
 
@@ -735,36 +681,36 @@ def _get_property_store_interfaces():
     """
     Get or create IPropertyStore interface definitions once and cache them.
 
-    Why a raw vtable (ctypes) instead of a comtypes wrapper:
-    - We want stability across comtypes/pycaw versions; some wrapper paths trigger
-      cleanup timing issues.
-    - We want direct access to GetValue/SetValue/Commit on IPropertyStore with
-      predictable calling conventions.
-    - We aggressively control lifetime (GC guards) when using raw pointers.
+    Why raw vtable calls:
+      - comtypes high-level wrappers for PropertyStore can vary across environments and
+        can trigger destructor-time Release behavior that is sensitive to GC timing.
+      - Using a raw vtable via ctypes gives predictable GetValue/SetValue/Commit calls.
 
-    Notes:
-    - We build a vtable layout (QueryInterface/AddRef/Release/GetValue/SetValue/Commit).
-    - CALL uses WINFUNCTYPE on 32-bit and CFUNCTYPE on 64-bit; Windows x64 uses a
-      uniform calling convention and WINFUNCTYPE is not appropriate there.
-    - PROPVARIANT definitions vary across comtypes versions; we prefer automation.PROPVARIANT
-      but have a minimal fallback.
+    Why cache definitions:
+      - Defining the vtable prototypes uses ctypes function factories. Doing this
+        repeatedly at runtime can trigger GC at unsafe times and has been associated
+        with intermittent COM Release crashes.
+
+    Calling convention:
+      - On 32-bit, COM methods use stdcall (WINFUNCTYPE).
+      - On 64-bit, ctypes uses the default C calling convention (CFUNCTYPE) for
+        function pointers in vtables.
+    Returns a dict with all the interface components needed.
     """
     global _PROPERTY_STORE_INTERFACES_CACHE
-
+    
     if _PROPERTY_STORE_INTERFACES_CACHE is not None:
         return _PROPERTY_STORE_INTERFACES_CACHE
-
+    
     try:
         HRESULT_T = wintypes.HRESULT
     except Exception:
         HRESULT_T = ctypes.c_long
-
-    # Calling convention selection:
-    # - On 32-bit Windows, stdcall (WINFUNCTYPE) is required.
-    # - On 64-bit Windows, the ABI is unified, so CFUNCTYPE is used.
+    
     CALL = ctypes.WINFUNCTYPE if ctypes.sizeof(ctypes.c_void_p) == 4 else ctypes.CFUNCTYPE
-
-    # PROPVARIANT: prefer comtypes.automation; fallback if missing.
+    
+    # PROPVARIANT:
+    # Prefer comtypes-provided structures when available to match its layout exactly.
     if hasattr(automation, "PROPVARIANT"):
         PROPVARIANT = automation.PROPVARIANT
     elif hasattr(automation, "tagPROPVARIANT"):
@@ -787,25 +733,24 @@ def _get_property_store_interfaces():
                 ("wReserved3", ctypes.c_ushort),
                 ("data", _PVU),
             ]
-
-    # Keep VT_* constants around so we can interpret PROPVARIANT content without relying
-    # on comtypes having every constant defined (compat.py patches these).
+    
+    # VT_* constants are used when decoding/encoding PROPVARIANT payloads.
     VT_BOOL = getattr(automation, "VT_BOOL", 11)
     VT_LPWSTR = getattr(automation, "VT_LPWSTR", 31)
-
+    
     class PROPERTYKEY(ctypes.Structure):
         _fields_ = (("fmtid", GUID), ("pid", wintypes.DWORD))
-
+    
     class IPropertyStoreRaw(ctypes.Structure):
         pass
-
+    
     PIPS = POINTER(IPropertyStoreRaw)
     _POGUID_ = POINTER(GUID)
     _PPVoid_ = POINTER(ctypes.c_void_p)
     _PDWORD_ = POINTER(wintypes.DWORD)
     _PPROPERTYKEY_ = POINTER(PROPERTYKEY)
     _PPROPVARIANT_ = POINTER(PROPVARIANT)
-
+    
     QueryInterfaceProto = CALL(HRESULT_T, PIPS, _POGUID_, _PPVoid_)
     AddRefProto         = CALL(ctypes.c_ulong, PIPS)
     ReleaseProto        = CALL(ctypes.c_ulong, PIPS)
@@ -814,7 +759,7 @@ def _get_property_store_interfaces():
     GetValueProto       = CALL(HRESULT_T, PIPS, _PPROPERTYKEY_, _PPROPVARIANT_)
     SetValueProto       = CALL(HRESULT_T, PIPS, _PPROPERTYKEY_, _PPROPVARIANT_)
     CommitProto         = CALL(HRESULT_T, PIPS)
-
+    
     class IPropertyStoreVTBL(ctypes.Structure):
         _fields_ = [
             ("QueryInterface", QueryInterfaceProto),
@@ -826,9 +771,10 @@ def _get_property_store_interfaces():
             ("SetValue", SetValueProto),
             ("Commit", CommitProto),
         ]
-
+    
     IPropertyStoreRaw._fields_ = [("lpVtbl", POINTER(IPropertyStoreVTBL))]
-
+    
+    # Returned dict is the compact "interface bundle" used by multiple helpers.
     _PROPERTY_STORE_INTERFACES_CACHE = {
         "PROPVARIANT": PROPVARIANT,
         "PROPERTYKEY": PROPERTYKEY,
@@ -837,31 +783,25 @@ def _get_property_store_interfaces():
         "VT_BOOL": VT_BOOL,
         "VT_LPWSTR": VT_LPWSTR,
         "HRESULT_T": HRESULT_T,
-        # VARIANT_TRUE/FALSE semantics (used for VT_BOOL).
         "VARIANT_TRUE": -1,
         "VARIANT_FALSE": 0,
     }
-
+    
     return _PROPERTY_STORE_INTERFACES_CACHE
 
 def _pkey_disable_sysfx():
-    # PKEY_AudioEndpoint_Disable_SysFx:
-    # - fmtid {E4870E26-3CC5-4CD2-BA46-CA0A9A70ED04}
-    # - pid 2
-    #
-    # Semantics:
-    #   Disable_SysFx = 0 => Enhancements ON
-    #   Disable_SysFx = 1 => Enhancements OFF
-    #
-    # This is the Windows "Audio Enhancements" switch backing store used in diagnostics
-    # and learning, but *runtime toggling* is vendor-driven in vendor_db.py.
+    # Disable_SysFx is the Windows enhancement switch:
+    # - stored as a property key with pid 2 under fmtid E4870E26-...
+    # - semantics: 0 => enhancements enabled, 1 => enhancements disabled
+    # We use this for diagnostics/discovery. Runtime vendor toggling lives in vendor_db.py.
     IPolicyConfigFx, CLSID_PolicyConfigClient, PROPERTYKEY, PROPVARIANT = _define_policyconfig_fx_interfaces()
     g = _guid_from_parts("E4870E26", "-3CC5-4CD2-", "BA46-", "CA0A9A70ED04")
     return PROPERTYKEY(GUID(g), wintypes.DWORD(2))
 
 def _parse_boolish_from_propvariant(pv):
-    # Property stores sometimes expose booleans as VT_BOOL, VT_UI2, or VT_UI4.
-    # We normalize to 0/1 or None so the higher-level logic can interpret it.
+    # Helper to interpret PROPVARIANT values as a simple 0/1 integer where possible.
+    # We accept several types because different stores/drivers expose this as VT_BOOL,
+    # VT_UI2, or VT_UI4.
     VT_BOOL = getattr(automation, "VT_BOOL", 11)
     VT_UI2 = 18
     VT_UI4 = 19
@@ -888,8 +828,8 @@ def _parse_boolish_from_propvariant(pv):
     return None
 
 def _set_boolish_in_propvariant(pv, zero_or_one):
-    # Mirror of _parse_boolish_from_propvariant: attempt to write 0/1 into an
-    # existing PROPVARIANT while preserving its VT type when possible.
+    # Inverse of _parse_boolish_from_propvariant: try to write a boolish 0/1 into an
+    # existing PROPVARIANT while preserving its VT when possible.
     VT_BOOL = getattr(automation, "VT_BOOL", 11)
     VT_UI2 = 18
     VT_UI4 = 19
@@ -911,7 +851,6 @@ def _set_boolish_in_propvariant(pv, zero_or_one):
                 setattr(pv.value, "ulVal", v); return True
     except Exception:
         return False
-    # If we can't preserve VT cleanly, try a couple common fields as best-effort.
     try:
         if hasattr(pv, "uiVal"):
             pv.uiVal = v; return True
@@ -926,21 +865,20 @@ def _set_boolish_in_propvariant(pv, zero_or_one):
 
 def _get_enhancements_status_com(device_id):
     """
-    Read enhancements state via PolicyConfigFx::GetPropertyValue.
+    Returns True if enhancements are enabled, False if disabled, or None if unknown.
+    Tries both FX store (bFxStore=True) and normal store (bFxStore=False).
 
-    Details:
-    - We probe both bFxStore=True and bFxStore=False because different drivers/Windows
-      builds surface Disable_SysFx in different stores.
-    - Returns True if enhancements are enabled, False if disabled, None if unknown.
+    bFxStore probing:
+      Some Windows builds/drivers store Disable_SysFx in the FX store. We try both to
+      avoid false "unknown" reads.
     """
     try:
         with _com_context():
             IPolicyConfigFx, CLSID_PolicyConfigClient, PROPERTYKEY, PROPVARIANT = _define_policyconfig_fx_interfaces()
             pkey = _pkey_disable_sysfx()
             pc = _get_policy_config_fx_singleton()
-            if pc is None:
+            if pc is None:  # ADD THIS CHECK
                 return None
-
             for bfx in (True, False):
                 pv = PROPVARIANT()
                 try:
@@ -957,29 +895,25 @@ def _get_enhancements_status_com(device_id):
 
 def _set_enhancements_com(device_id, enable):
     """
-    Write enhancements state via PolicyConfigFx::SetPropertyValue.
-
-    Semantics:
-    - enable=True  => Disable_SysFx=0
-    - enable=False => Disable_SysFx=1
-
-    We attempt both stores (bFxStore True/False) to maximize compatibility.
+    Set Disable_SysFx to desired value in both stores (FX and normal).
+    enable=True -> Disable_SysFx=0
     Returns True if any write succeeded.
+
+    This is a diagnostics/learn-oriented path. Runtime toggling is vendor-only in vendor_db.py.
     """
     try:
         with _com_context():
             IPolicyConfigFx, CLSID_PolicyConfigClient, PROPERTYKEY, PROPVARIANT = _define_policyconfig_fx_interfaces()
             pkey = _pkey_disable_sysfx()
             pc = _get_policy_config_fx_singleton()
-            if pc is None:
+            if pc is None:  # ADD THIS CHECK
                 return False
-
             desired_disable = 0 if enable else 1
             ok_any = False
             for bfx in (True, False):
                 try:
                     pv = PROPVARIANT()
-                    # Read current to preserve VT where possible; ignore failures.
+                    # Read current (to get correct VT), ignore errors
                     try:
                         pc.GetPropertyValue(device_id, bfx, byref(pkey), byref(pv))
                     except Exception:
@@ -1001,33 +935,28 @@ def _set_enhancements_com(device_id, enable):
 def _read_enhancements_from_registry(device_id):
     r"""
     Read enhancements state (enabled/disabled) via registry.
+    Returns True (enabled) / False (disabled) / None (unknown).
 
-    Where we look:
-    - Both HKCU and HKLM (drivers vary; HKLM often needs Admin for writes).
-    - Both FxProperties and Properties (Windows/driver version differences).
-    - Values are named like "{fmtid},pid" under the endpoint's MMDevices key.
+    We scan both hives and both subkeys because drivers differ:
+      - HKCU vs HKLM (per-user vs per-machine)
+      - FxProperties vs Properties (driver-dependent layout)
 
-    Returns:
-    - True  if enhancements enabled
-    - False if enhancements disabled
-    - None  if unknown
-
-    Note: Registry stores Disable_SysFx itself, where True/1 means "disabled".
-    This function returns the inverted "enabled" boolean for human usage.
+    Prefers ",2" if present (common pid for Disable_SysFx).
     """
     guid = _extract_endpoint_guid_from_device_id(device_id)
     if not guid:
         return None
     fmtid = "{e4870e26-3cc5-4cd2-ba46-ca0a9a70ed04}".lower()
-
     def _parse_bool_from_reg(val, typ):
-        # REG_DWORD: 0/1
+        # Registry type variance:
+        # - Some drivers store Disable_SysFx as REG_DWORD 0/1.
+        # - Some store a PROPVARIANT as REG_BINARY (VT_BOOL or VT_UI4).
+        # - Some use strings for legacy reasons.
         if typ == winreg.REG_DWORD:
             try:
                 return bool(int(val))
             except Exception:
                 return None
-        # Some drivers store as a serialized PROPVARIANT in REG_BINARY.
         if typ == winreg.REG_BINARY:
             try:
                 b = bytes(val)
@@ -1049,16 +978,13 @@ def _read_enhancements_from_registry(device_id):
             except Exception:
                 return None
         return None
-
     hive_list = [
         (winreg.HKEY_CURRENT_USER,  "HKCU"),
         (winreg.HKEY_LOCAL_MACHINE, "HKLM"),
     ]
-
     preferred = None
     fallback_any = None
     found_preferred = False
-
     for hive, _hn in hive_list:
         for flow in ("Render", "Capture"):
             for sub in ("FxProperties", "Properties"):
@@ -1081,7 +1007,6 @@ def _read_enhancements_from_registry(device_id):
                         parsed = _parse_bool_from_reg(val, typ)
                         if parsed is None:
                             continue
-                        # pid=2 is the canonical Disable_SysFx pid.
                         if nl.endswith(",2"):
                             preferred = parsed
                             found_preferred = True
@@ -1099,7 +1024,6 @@ def _read_enhancements_from_registry(device_id):
                 break
         if found_preferred:
             break
-
     # Registry stores Disable_SysFx: True means DISABLED; we return 'enabled' boolean.
     if preferred is not None:
         return False if preferred else True
@@ -1111,21 +1035,17 @@ def _set_enhancements_registry(device_id, enable, prefer_hklm=False):
     """
     Fallback: write Disable_SysFx to registry (DWORD 0/1). Returns True if any write succeeded.
 
-    Used mainly for diagnostics/learning and compatibility testing. Normal runtime toggling
-    of enhancements is vendor-driven (see vendor_db.py), but we keep this path available for:
-    - discovery flows
-    - comparison/verification
-    - environments where Windows honors registry writes directly
-
-    prefer_hklm changes hive ordering; HKLM writes typically require Admin.
+    Admin note:
+      Writes to HKLM usually require Administrator privileges. prefer_hklm controls
+      the hive write order when both are attempted.
     """
     guid = _extract_endpoint_guid_from_device_id(device_id)
     if not guid:
         return False
-    # Value name format: "{fmtid},pid"
+    # Value name: Disable_SysFx pid 2
     name = "{e4870e26-3cc5-4cd2-ba46-ca0a9a70ed04},2"
     desired_disable = 0 if enable else 1
-
+    # Decide hive order
     hive_order = [
         (winreg.HKEY_CURRENT_USER,  "HKCU"),
         (winreg.HKEY_LOCAL_MACHINE, "HKLM"),
@@ -1135,7 +1055,6 @@ def _set_enhancements_registry(device_id, enable, prefer_hklm=False):
             (winreg.HKEY_LOCAL_MACHINE, "HKLM"),
             (winreg.HKEY_CURRENT_USER,  "HKCU"),
         ]
-
     ok_any = False
     for hive, _hn in hive_order:
         for flow in ("Render", "Capture"):
@@ -1156,8 +1075,7 @@ def _set_enhancements_registry(device_id, enable, prefer_hklm=False):
     return ok_any
 
 def _verify_enhancements_via_registry(device_id, expected_enabled, timeout=2.0, interval=0.15):
-    # Poll-based verifier used in some diagnostics/learning flows. Windows/driver may
-    # apply property changes asynchronously, so we allow time for the registry view to settle.
+    # Registry updates can lag behind UI changes; we poll briefly when verification matters.
     deadline = time.time() + timeout
     last_state = None
     while time.time() < deadline:
@@ -1173,32 +1091,29 @@ def _verify_enhancements_via_registry(device_id, expected_enabled, timeout=2.0, 
 
 def _dump_mmdevices_all_values(device_id):
     r"""
-    Dump ALL values under BOTH HKCU and HKLM for this endpoint.
+    Dump ALL values under BOTH hives for this endpoint.
 
-    Why:
-    - Used by discovery/learn flows to capture everything the driver changes when
-      you toggle Enhancements or a specific FX.
-    - Includes 'dataRaw' in addition to a preview so we can reproduce binary
-      payloads exactly when learning a "multi-write" FX toggle.
+    This is primarily used for discovery/learn workflows:
+      - We dump both FxProperties and Properties under HKCU and HKLM.
+      - We recurse into nested subkeys so vendor effects stored under plugin GUIDs
+        are included.
+      - dataRaw contains exact payload bytes (hex) for REG_BINARY so learn can
+        replay values precisely.
 
-    Scope:
-    - Recurses under both FxProperties and Properties, including nested subkeys
-      like FxProperties\{plugin-guid}\User.
+    Returns a list of records with: hive, flow, subkey (relative), name, type,
+    dataPreview (human-oriented), dataRaw (exact).
     """
     guid = _extract_endpoint_guid_from_device_id(device_id)
     if not guid:
         return {"error": "bad endpoint id, cannot extract guid"}
-
     items = []
     roots = [
         (winreg.HKEY_CURRENT_USER,  "HKCU"),
         (winreg.HKEY_LOCAL_MACHINE, "HKLM"),
     ]
-
     def _enum_key_recursive(hive, hive_name, root_path, rel_subkey, flow):
         """
         Enumerate values at root_path and recurse into subkeys.
-
         rel_subkey is the relative path under the endpoint GUID, e.g.:
           - 'FxProperties'
           - 'FxProperties\\{plugin-guid}\\User'
@@ -1219,11 +1134,11 @@ def _dump_mmdevices_all_values(device_id):
                 rec = {
                     "hive": hive_name,
                     "flow": flow,
-                    "subkey": rel_subkey,
+                    "subkey": rel_subkey,    # relative path under endpoint GUID
                     "name": name,
                     "type": typ,
                 }
-                # dataPreview is a small/cheap representation suitable for reports.
+                # dataPreview (compat)
                 try:
                     if typ == winreg.REG_DWORD:
                         rec["dataPreview"] = int(val)
@@ -1236,7 +1151,7 @@ def _dump_mmdevices_all_values(device_id):
                         rec["dataPreview"] = f"<type {typ}>"
                 except Exception:
                     rec["dataPreview"] = "<unreadable>"
-                # dataRaw is the exact payload used by learning to replay writes.
+                # dataRaw (exact payload)
                 try:
                     if typ == winreg.REG_DWORD:
                         rec["dataRaw"] = int(val)
@@ -1248,14 +1163,12 @@ def _dump_mmdevices_all_values(device_id):
                         rec["dataRaw"] = None
                 except Exception:
                     rec["dataRaw"] = None
-
                 items.append(rec)
         finally:
             try:
                 winreg.CloseKey(key)
             except Exception:
                 pass
-
         # Recurse into subkeys
         try:
             key = winreg.OpenKey(hive, root_path, 0, winreg.KEY_READ)
@@ -1277,18 +1190,16 @@ def _dump_mmdevices_all_values(device_id):
                 winreg.CloseKey(key)
             except Exception:
                 pass
-
     for hive, hive_name in roots:
         for flow in ("Render", "Capture"):
+            # Start recursion from the two well-known roots
             for first in ("FxProperties", "Properties"):
                 base = rf"SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\{flow}\{guid}\{first}"
                 _enum_key_recursive(hive, hive_name, base, first, flow)
-
     return items
-
+    
 def _mmdev_key_of(rec):
-    # Unique key used for diffing MMDevices entries across snapshots.
-    # We include hive + flow + subkey + value name to avoid collisions.
+    # Stable identity for diffing registry dumps: hive|flow|subkey|name
     return f"{rec.get('hive','?')}|{rec.get('flow','?')}|{rec.get('subkey','?')}|{rec.get('name','?')}"
 
 def _normalize_preview(v):
@@ -1299,31 +1210,27 @@ def _normalize_preview(v):
 
 def _diff_mmdevices_lists(before_list, after_list):
     """
-    Diff two MMDevices dumps (as produced by _dump_mmdevices_all_values).
+    Diff two mmdevices lists.
 
-    Returns a dict containing:
-    - added/removed/changed: record lists for report/debugging
-    - dword_flips: specifically REG_DWORD values that flipped 0<->1 (strong toggle candidates)
-    - disable_sysfx_hits: any entries involving the Disable_SysFx fmtid (for targeted reporting)
-
-    This is a core building block for learn/discovery workflows. We intentionally keep it
-    conservative and based on stable keys, since registry dumps can be noisy.
+    This is used by discovery/learn logic to locate candidate toggles:
+      - "dword_flips" (0<->1) are highlighted because they are the simplest and most
+        reliable vendor toggle candidates.
+      - "disable_sysfx_hits" collects keys under the Disable_SysFx fmtid so we can
+        see if the Windows switch itself changed.
     """
     idxA = {_mmdev_key_of(e): e for e in (before_list or [])}
     idxB = {_mmdev_key_of(e): e for e in (after_list or [])}
     all_keys = set(idxA.keys()) | set(idxB.keys())
-
     added = []
     removed = []
     changed = []
     flips = []
     hits = []
     guid_disable = "{e4870e26-3cc5-4cd2-ba46-ca0a9a70ed04}"
-
     for k in sorted(all_keys):
         a = idxA.get(k)
         b = idxB.get(k)
-
+        
         if a is None:
             added.append(b)
             if str(b.get("name", "")).lower().startswith(guid_disable):
@@ -1334,21 +1241,21 @@ def _diff_mmdevices_lists(before_list, after_list):
             if str(a.get("name", "")).lower().startswith(guid_disable):
                 hits.append(a)
             continue
-
+            
         try:
             tA = a.get("type")
             tB = b.get("type")
             vA = _normalize_preview(a.get("dataPreview"))
             vB = _normalize_preview(b.get("dataPreview"))
-
+            
             if (tA != tB) or (vA != vB):
                 row = copy.deepcopy(a)
                 row["typeAfter"] = tB
                 row["dataPreviewAfter"] = vB
                 changed.append(row)
-
-            # Specifically detect clean boolean flips (DWORD 0<->1).
+            
             try:
+                # winreg.REG_DWORD is 4; we treat 0<->1 flips as strong candidates.
                 if tA == 4 and tB == 4:
                     ia = int(a.get("dataPreview"))
                     ib = int(b.get("dataPreview"))
@@ -1360,12 +1267,12 @@ def _diff_mmdevices_lists(before_list, after_list):
                         })
             except Exception:
                 pass
-
+            
             if str(a.get("name", "")).lower().startswith(guid_disable) or str(b.get("name","")).lower().startswith(guid_disable):
                 hits.append(b)
         except Exception:
             continue
-
+            
     return {
         "added": added,
         "removed": removed,
@@ -1378,32 +1285,30 @@ def _get_enhancements_status_propstore(device_id):
     """
     Read Disable_SysFx directly from the endpoint's IPropertyStore.
 
-    Why this exists:
-    - Useful for diagnostics and discovery (live view of what Windows thinks).
-    - Some environments can read from PropertyStore even when PolicyConfigFx calls fail.
+    This is a "Windows live" read (not vendor INI). It's used primarily for diagnostics
+    and snapshot tooling.
 
-    Stability:
-    - Uses the cached raw vtable interface definitions.
-    - GC is disabled while holding raw pointers to avoid comtypes Release races
-      (historically intermittent access violations).
+    GC-guarded to avoid Release races while using raw vtable pointers.
     """
     import sys, gc
     try:
         if not sys.platform.startswith("win"):
             return None
         with _com_context():
+            # Get cached interface definitions
             interfaces = _get_property_store_interfaces()
             PROPVARIANT = interfaces["PROPVARIANT"]
             PROPERTYKEY = interfaces["PROPERTYKEY"]
             PIPS = interfaces["PIPS"]
             HRESULT_T = interfaces["HRESULT_T"]
-
+            # Prepare structures and result holder outside the GC-guarded block
             pkey = PROPERTYKEY(GUID("{E4870E26-3CC5-4CD2-BA46-CA0A9A70ED04}"), wintypes.DWORD(2))
             pv = PROPVARIANT()
             result = None
-
             gc_was_enabled = gc.isenabled()
             if gc_was_enabled:
+                # GC guard: prevent comtypes finalizers from calling Release while
+                # we hold raw vtable pointers.
                 gc.disable()
             try:
                 enumerator = CoCreateInstance(CLSID_MMDeviceEnumerator, interface=IMMDeviceEnumerator, clsctx=CLSCTX_ALL)
@@ -1426,8 +1331,7 @@ def _get_enhancements_status_propstore(device_id):
             finally:
                 if gc_was_enabled:
                     gc.enable()
-
-            # Clear PROPVARIANT after GC is re-enabled (safer for comtypes cleanup timing).
+            # Clear PROPVARIANT after GC is re-enabled
             try:
                 ole32 = ctypes.OleDLL("ole32.dll")
                 PropVariantClear = getattr(ole32, "PropVariantClear", None)
@@ -1437,7 +1341,6 @@ def _get_enhancements_status_propstore(device_id):
                     PropVariantClear(byref(pv))
             except Exception:
                 pass
-
             return result
     except Exception:
         return None
@@ -1446,29 +1349,29 @@ def _set_enhancements_propstore(device_id, enable):
     """
     Write Disable_SysFx directly via IPropertyStore::SetValue + Commit.
 
-    Used mainly for discovery and testing. Runtime toggling is vendor-only.
+    This is a "Windows switch" setter used for diagnostics/learn workflows, not the
+    vendor-only runtime toggling.
 
-    Stability:
-    - GC disabled while calling through raw vtable pointers to prevent Release races.
+    GC-guarded to avoid Release races while using raw vtable pointers.
     """
     import sys, gc
     try:
         if not sys.platform.startswith("win"):
             return False
         with _com_context():
+            # Get cached interface definitions
             interfaces = _get_property_store_interfaces()
             PROPVARIANT = interfaces["PROPVARIANT"]
             PROPERTYKEY = interfaces["PROPERTYKEY"]
             PIPS = interfaces["PIPS"]
             HRESULT_T = interfaces["HRESULT_T"]
-
             pkey = PROPERTYKEY(GUID("{E4870E26-3CC5-4CD2-BA46-CA0A9A70ED04}"), wintypes.DWORD(2))
             desired_disable = 0 if enable else 1
             pv = PROPVARIANT()
             ok = False
-
             gc_was_enabled = gc.isenabled()
             if gc_was_enabled:
+                # GC guard: prevent comtypes finalizers from running while raw pointers are live.
                 gc.disable()
             try:
                 enumerator = CoCreateInstance(CLSID_MMDeviceEnumerator, interface=IMMDeviceEnumerator, clsctx=CLSCTX_ALL)
@@ -1479,7 +1382,7 @@ def _set_enhancements_propstore(device_id, enable):
                     ok = False
                 else:
                     ps_iface = ctypes.cast(ctypes.c_void_p(ps_ptr_val), PIPS)
-                    # Try to read existing PV to preserve VT where possible.
+                    # Try to read the existing pv to preserve VT where possible
                     try:
                         ps_iface.contents.lpVtbl.contents.GetValue(ps_iface, byref(pkey), byref(pv))
                         if not _set_boolish_in_propvariant(pv, desired_disable):
@@ -1489,7 +1392,7 @@ def _set_enhancements_propstore(device_id, enable):
                             except Exception:
                                 pass
                     except Exception:
-                        # Build a fresh PV if GetValue failed.
+                        # Build a fresh PV if GetValue failed
                         pv = PROPVARIANT()
                         pv.vt = 19  # VT_UI4
                         try:
@@ -1505,8 +1408,7 @@ def _set_enhancements_propstore(device_id, enable):
             finally:
                 if gc_was_enabled:
                     gc.enable()
-
-            # Clear PROPVARIANT after GC is re-enabled.
+            # Clear PROPVARIANT after GC is re-enabled
             try:
                 ole32 = ctypes.OleDLL("ole32.dll")
                 PropVariantClear = getattr(ole32, "PropVariantClear", None)
@@ -1516,17 +1418,16 @@ def _set_enhancements_propstore(device_id, enable):
                     PropVariantClear(byref(pv))
             except Exception:
                 pass
-
             return ok
     except Exception:
         return False
 
 def _wait_for_propstore_sysfx(device_id, expected_enabled, timeout=1.5, interval=0.12):
     """
-    Poll the endpoint's IPropertyStore for Disable_SysFx until it matches expected_enabled.
+    Poll the endpoint's IPropertyStore for Disable_SysFx until it matches expected_enabled
+    or timeout.
 
-    Used for verification in some fallback paths. Some drivers update the property
-    asynchronously after a write.
+    Used when we need to verify a change and Windows/driver propagation may be delayed.
     """
     last = None
     end = time.time() + float(timeout)
@@ -1540,16 +1441,12 @@ def _wait_for_propstore_sysfx(device_id, expected_enabled, timeout=1.5, interval
 
 def _collect_sysfx_snapshot(device_id):
     """
-    Collect a full snapshot for enhancement discovery/learning.
+    Collects a full snapshot for discovering how 'Audio Enhancements' toggles on this device.
 
-    Snapshot contains:
-    - com: PolicyConfigFx reads from both fxStore and normal store
-    - propStore: live IPropertyStore read for Disable_SysFx
-    - registry: full MMDevices dump (HKCU/HKLM, FxProperties/Properties, recursive)
-
-    Used by:
-    - discover-enhancements (interactive report)
-    - learn flows (to detect which registry keys flip)
+    This is used by discover-enhancements and learn flows:
+      - COM view (PolicyConfigFx; both bFxStore variants)
+      - PropertyStore live view (endpoint store)
+      - Full MMDevices registry dump (HKCU/HKLM, FxProperties/Properties)
     """
     import datetime
     snap = {
@@ -1558,14 +1455,12 @@ def _collect_sysfx_snapshot(device_id):
         "propStore": {},
         "registry": [],
     }
-
-    # COM snapshot: we also GC-guard this section. PolicyConfig calls are comtypes-based,
-    # but we still want to avoid unrelated comtypes finalizers running during this sensitive
-    # period (this is part of the "defensive stability" strategy).
+    # COM (both stores) - wrap in a GC guard to avoid Release races while using COM
     try:
         import gc
         gc_was_enabled = gc.isenabled()
         if gc_was_enabled:
+            # GC guard: prevents comtypes finalizers from releasing COM objects mid-call.
             gc.disable()
         try:
             with _com_context():
@@ -1589,30 +1484,29 @@ def _collect_sysfx_snapshot(device_id):
                 gc.enable()
     except Exception as e:
         snap["com"] = {"error": str(e)}
-
+        
     # Property store (live)
     try:
         enh = _get_enhancements_status_propstore(device_id)
         snap["propStore"] = {"enhEnabled": enh}
     except Exception as e:
         snap["propStore"] = {"error": str(e)}
-
+        
     # Registry (all values under MMDevices for this endpoint)
     try:
         snap["registry"] = _dump_mmdevices_all_values(device_id)
     except Exception as e:
         snap["registry"] = [{"error": str(e)}]
-
+        
     return snap
 
 def _generate_enh_discovery_report(target, snapA, snapB, diffs):
     """
-    Build a human-readable report string for discover-enhancements.
+    Build a human-readable text report string from snapshots and diff.
 
-    This report is intended to:
-    - summarize COM/PropertyStore views of Disable_SysFx
-    - highlight candidate registry keys that flipped during the user's toggle
-    - guide the user/developer toward a vendor DWORD that can be learned into the INI
+    This is the textual output for discover-enhancements:
+      - summarizes COM and PropertyStore views of Disable_SysFx
+      - summarizes registry changes and highlights candidate DWORD flips
     """
     import datetime
     lines = []
@@ -1622,10 +1516,8 @@ def _generate_enh_discovery_report(target, snapA, snapB, diffs):
     lines.append(f"Device:    {target.get('name')} [{target.get('id')}]")
     lines.append(f"Flow:      {target.get('flow')}")
     lines.append("")
-
     def _fmt_bool(x):
         return "True" if x is True else ("False" if x is False else "None")
-
     # COM summary
     lines.append("COM (PolicyConfig) - Disable_SysFx (0=Enh ON, 1=OFF)")
     for label in ("fxStore", "normalStore"):
@@ -1633,7 +1525,6 @@ def _generate_enh_discovery_report(target, snapA, snapB, diffs):
         B = snapB.get("com", {}).get(label, {})
         lines.append(f"  {label:12} A: rawDisable={A.get('rawDisable')} -> enhEnabled={_fmt_bool(A.get('enhEnabled'))} "
                      f"| B: rawDisable={B.get('rawDisable')} -> enhEnabled={_fmt_bool(B.get('enhEnabled'))}")
-
     # PropStore summary
     Aps = snapA.get("propStore", {}).get("enhEnabled")
     Bps = snapB.get("propStore", {}).get("enhEnabled")
@@ -1645,7 +1536,6 @@ def _generate_enh_discovery_report(target, snapA, snapB, diffs):
     lines.append(f"  Changed: {len(diffs.get('changed', []))}")
     lines.append(f"  DWORD flips (0<->1): {len(diffs.get('dword_flips', []))}")
     lines.append("")
-
     # Highlight Disable_SysFx entries if present
     ds_hits = [e for e in diffs.get("changed", []) if str(e.get('name','')).lower().startswith("{e4870e26-3cc5-4cd2-ba46-ca0a9a70ed04}")]
     if ds_hits:
@@ -1654,7 +1544,6 @@ def _generate_enh_discovery_report(target, snapA, snapB, diffs):
             lines.append(f"  {e.get('hive')}\\{e.get('flow')}\\{e.get('subkey')}\\{e.get('name')} "
                          f"{e.get('dataPreview')} -> {e.get('dataPreviewAfter')} (type {e.get('type')} -> {e.get('typeAfter')})")
         lines.append("")
-
     # Show boolean-like flips (strong candidates)
     flips = diffs.get("dword_flips", [])
     if flips:
@@ -1665,7 +1554,7 @@ def _generate_enh_discovery_report(target, snapA, snapB, diffs):
     else:
         lines.append("No DWORD 0/1 flips detected. Vendor may use non-DWORD or a different location.")
         lines.append("")
-
+    # Next steps suggestion
     lines.append("Notes:")
     lines.append("- If COM/PropertyStore show A!=B, Windows honored Disable_SysFx and the existing setter is correct.")
     lines.append("- If COM/PropertyStore stay the same but a vendor REG_DWORD flips, that key is likely the real toggle.")
@@ -1677,17 +1566,11 @@ def _get_policy_config():
     """
     Obtain a PolicyConfig COM interface that supports SetDefaultEndpoint.
 
-    Why the multi-strategy approach:
-    - pycaw has shipped multiple variants over time:
-      * AudioUtilities may expose a helper to get PolicyConfig
-      * policyconfig module may or may not exist / may define different interfaces
-    - We prefer pycaw's own helpers when available, otherwise we fall back to our cached
-      interface definitions.
-
-    Failure mode:
-    - Raises AttributeError if no suitable PolicyConfig interface is available in this environment.
+    Compatibility strategy:
+      - Prefer any helper exposed by pycaw.AudioUtilities (varies by version).
+      - Otherwise use our cached local interface definitions (Vista-compatible fallback).
     """
-    # 1) Try any helper exposed by the installed pycaw AudioUtilities.
+    # 1) Try any helper exposed by the installed pycaw AudioUtilities
     for name in ("GetPolicyConfig", "_get_policy_config", "get_policy_config"):
         try:
             getter = getattr(AudioUtilities, name, None)
@@ -1696,8 +1579,8 @@ def _get_policy_config():
                     return getter()
         except Exception:
             pass
-
-    # 2) Use cached interface definitions (either from pycaw or our fallback).
+    
+    # 2) Use cached interface definitions (either from pycaw or our fallback)
     try:
         IPolicyConfig, IPolicyConfigVista, CLSID_PolicyConfigClient = _get_policy_config_interfaces()
         try:
@@ -1711,16 +1594,11 @@ def _get_policy_config():
 
 def set_default_endpoint(device_id, role):
     """
-    Set the system default endpoint for one or more roles.
-
-    Inputs:
-    - device_id: IMMDevice endpoint ID (must be active)
-    - role: one of ROLES keys ("console"/"multimedia"/"communications") or "all"
+    role in ROLES keys or 'all'. Requires the device to be active.
 
     Safety:
-    - We refuse to set defaults to inactive devices (disabled/unplugged/not present).
-      This avoids "setting default to something you can't use", and some systems will
-      error/crash when asked to set an unplugged endpoint.
+      We refuse to set defaults for inactive endpoints to avoid selecting disabled
+      or not-present devices (which can lead to confusing Windows behavior).
     """
     _dbg(f"SetDefaultEndpoint start: id={device_id} role={role}")
     if not _is_device_active(device_id):
@@ -1728,16 +1606,14 @@ def set_default_endpoint(device_id, role):
         raise RuntimeError("Target device is not active; refusing to set default.")
     with _com_context():
         policy = _get_policy_config()
-
         def _call(rname, rval):
             try:
                 policy.SetDefaultEndpoint(device_id, rval)
                 return True, None
             except Exception as e:
                 return False, e
-
         if role == "all":
-            # Apply to all three roles; report partial failure with detail.
+            # "all" means set console + multimedia + communications.
             results = {}
             ok_all = True
             last_err = None
@@ -1756,13 +1632,6 @@ def set_default_endpoint(device_id, role):
     _dbg("SetDefaultEndpoint done")
 
 def _is_device_active(device_id):
-    """
-    Verify the endpoint is currently active.
-
-    Why:
-    - Prevent setting defaults to unplugged/disabled endpoints.
-    - Some PolicyConfig implementations behave unpredictably when passed inactive endpoints.
-    """
     with _com_context():
         for flow in (E_RENDER, E_CAPTURE):
             try:
@@ -1775,14 +1644,12 @@ def _is_device_active(device_id):
     return False
 
 def enum_endpoints(flow, state_mask):
-    # Low-level IMMDeviceEnumerator wrapper; always called within COM context by callers.
     with _com_context():
         enumerator = CoCreateInstance(CLSID_MMDeviceEnumerator, IMMDeviceEnumerator, CLSCTX_ALL)
         collection = enumerator.EnumAudioEndpoints(flow, state_mask)
         return enumerator, collection
 
 def get_default_ids(enumerator):
-    # Read current default endpoints for each flow/role. Used by list_devices() to flag defaults.
     defaults = {"Render": {}, "Capture": {}}
     for flow_name, flow in [("Render", E_RENDER), ("Capture", E_CAPTURE)]:
         for role_name, role_val in [
@@ -1801,12 +1668,9 @@ def _friendly_names_by_id():
     """
     Build {device_id: FriendlyName} using pycaw objects.
 
-    Why prefer this approach:
-    - It avoids direct raw PropertyStore reads for every device, which can be sensitive
-      to COM lifetime issues on some drivers.
-    - pycaw's GetAllDevices typically returns friendly names safely in managed wrappers.
-
-    If name mapping fails, callers fall back to device_id.
+    Why this is preferred:
+      AudioUtilities.GetAllDevices() is typically safe and avoids the raw PropertyStore
+      path, which is more sensitive to COM Release timing and GC edge cases.
     """
     names = {}
     try:
@@ -1830,32 +1694,34 @@ def _safe_friendly_name_from_device(dev):
     """
     Read PKEY_Device_FriendlyName from an IMMDevice via IPropertyStore using cached interfaces.
 
-    This is a hardened fallback path when pycaw-friendly-name mapping isn't sufficient.
+    Why this exists (fallback path):
+      - Some environments may not provide FriendlyName via pycaw objects.
+      - Raw PropertyStore reads are more direct and can work even when higher-level
+        wrappers fail, but they must be done carefully due to COM/GC interactions.
 
-    Stability measures explained:
-    - We pause GC while we hold raw COM pointers; comtypes finalizers can otherwise
-      run mid-call and Release() objects unexpectedly, causing intermittent access
-      violations in native code.
-    - We AddRef/Release explicitly on the IPropertyStore COM object while using the
-      raw vtable pointer, to keep the refcount stable regardless of Python object lifetime.
-    - We always call PropVariantClear on the returned PROPVARIANT to avoid leaking memory.
-    - comtypes may expose PROPVARIANT.pwszVal as either a pointer or a Python str depending
-      on version; we handle multiple access patterns defensively.
+    Key stability tricks used here:
+      - Temporarily disable GC to avoid comtypes finalizers running Release() while
+        raw pointers are live.
+      - Explicit AddRef/Release around the IPropertyStore pointer to ensure refcount
+        remains correct regardless of GC timing.
+      - Robust string extraction from PROPVARIANT because comtypes can expose pwszVal
+        in different shapes (pointer vs Python string).
     """
     _dbg("FriendlyName: enter (_safe_friendly_name_from_device)")
     try:
         import sys, gc
         if not sys.platform.startswith("win"):
             return None
-
+        
+        # Get cached interface definitions
         interfaces = _get_property_store_interfaces()
         PROPVARIANT = interfaces["PROPVARIANT"]
         PROPERTYKEY = interfaces["PROPERTYKEY"]
         PIPS = interfaces["PIPS"]
         VT_LPWSTR = interfaces["VT_LPWSTR"]
         HRESULT_T = interfaces["HRESULT_T"]
-
-        # Pause GC so comtypes __del__ won't run Release while we hold raw pointers.
+        
+        # Pause GC so comtypes __del__ won't run Release while we hold raw pointers
         gc_was_enabled = gc.isenabled()
         if gc_was_enabled:
             try:
@@ -1864,8 +1730,7 @@ def _safe_friendly_name_from_device(dev):
                 gc_was_enabled = False
         try:
             ps_unknown = dev.OpenPropertyStore(STGM_READ)
-
-            # Balance COM refcount explicitly while we use the raw vtable.
+            # Balance COM refcount explicitly while we use the raw vtable
             did_addref = False
             try:
                 try:
@@ -1873,26 +1738,21 @@ def _safe_friendly_name_from_device(dev):
                     did_addref = True
                 except Exception:
                     pass
-
                 ps_ptr_val = ctypes.cast(ps_unknown, ctypes.c_void_p).value
                 if not ps_ptr_val:
                     return None
-
+                
                 _dbg(f"FriendlyName: IPropertyStore raw=0x{ps_ptr_val:016X} (AddRef before use)")
-
+                
                 ps_iface = ctypes.cast(ctypes.c_void_p(ps_ptr_val), PIPS)
-
-                # PKEY_Device_FriendlyName:
-                # fmtid {a45c254e-df1c-4efd-8020-67d146a850e0}, pid=14
                 PKEY_Device_FriendlyName = PROPERTYKEY(GUID("{a45c254e-df1c-4efd-8020-67d146a850e0}"), 14)
-                # Fallback device description:
                 PKEY_Device_DeviceDesc   = PROPERTYKEY(GUID("{a45c254e-df1c-4efd-8020-67d146a850e0}"), 2)
-
+                
                 ole32 = ctypes.OleDLL("ole32.dll")
                 PropVariantClear = ole32.PropVariantClear
                 PropVariantClear.restype = HRESULT_T
                 PropVariantClear.argtypes = (ctypes.POINTER(PROPVARIANT),)
-
+                
                 def _read_ptr_or_str(val):
                     if isinstance(val, str):
                         return val
@@ -1902,30 +1762,26 @@ def _safe_friendly_name_from_device(dev):
                         except Exception:
                             return None
                     return None
-
+                
                 def _pv_read_lpwstr(pv):
-                    # comtypes can expose pv.pwszVal in different ways; try several layouts.
                     try:
                         s = _read_ptr_or_str(getattr(pv, "pwszVal", None))
                         if s: return s
-                    except Exception:
-                        pass
+                    except Exception: pass
                     try:
                         val = getattr(pv, "value", None)
                         if val is not None:
                             s = _read_ptr_or_str(getattr(val, "pwszVal", None))
                             if s: return s
-                    except Exception:
-                        pass
+                    except Exception: pass
                     try:
                         data = getattr(pv, "data", None)
                         if data is not None:
                             s = _read_ptr_or_str(getattr(data, "pwszVal", None))
                             if s: return s
-                    except Exception:
-                        pass
+                    except Exception: pass
                     return None
-
+                
                 def _get_string_prop(pkey):
                     pv = PROPVARIANT()
                     try:
@@ -1940,7 +1796,7 @@ def _safe_friendly_name_from_device(dev):
                         except Exception:
                             pass
                     return None
-
+                
                 name = _get_string_prop(PKEY_Device_FriendlyName)
                 if not name:
                     name = _get_string_prop(PKEY_Device_DeviceDesc)
@@ -1948,7 +1804,7 @@ def _safe_friendly_name_from_device(dev):
                     _dbg(f"FriendlyName: got='{name}'")
                     return name
             finally:
-                # Balance the AddRef we did above so refcount is correct no matter when GC runs.
+                # Balance the AddRef we did above so refcount is correct no matter when GC runs
                 if did_addref:
                     try:
                         ps_unknown.Release()
@@ -1957,7 +1813,7 @@ def _safe_friendly_name_from_device(dev):
         except Exception:
             pass
         finally:
-            # Re-enable GC if it was enabled initially.
+            # Re-enable GC if it was enabled initially
             if gc_was_enabled:
                 try:
                     gc.enable()
@@ -1966,7 +1822,6 @@ def _safe_friendly_name_from_device(dev):
             _dbg("FriendlyName: leave (released, GC re-enabled)")
     except Exception:
         pass
-
     # Fallbacks: ID or None
     try:
         return dev.GetId()
@@ -1975,42 +1830,40 @@ def _safe_friendly_name_from_device(dev):
 
 def list_devices(include_all=False):
     """
-    Enumerate endpoints and return a list of device dicts:
-      {id, name, flow, state, isDefault}
+    Returns list of devices with fields: id, name, flow, state, isDefault flags.
 
-    Notes:
-    - This function returns an unsorted list; GUI/CLI order parity is enforced by
-      _sort_and_tag_gui_indices() in higher-level layers.
-    - Friendly names are populated from a pycaw GetAllDevices() map first for stability.
-      Raw PropertyStore name reads are available as a fallback, but we avoid doing that
-      for every device by default because it's more GC/COM sensitive.
+    Naming strategy:
+      We build a name map via AudioUtilities.GetAllDevices() and use it for device names.
+      This is typically safer than opening PropertyStore per-device (raw vtable path),
+      which is more sensitive to COM/GC edge cases.
     """
     _dbg(f"list_devices: include_all={include_all}")
     with _com_context():
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", UserWarning)
-
+            
             enumerator_for_defaults = CoCreateInstance(CLSID_MMDeviceEnumerator, IMMDeviceEnumerator, CLSCTX_ALL)
             defaults = get_default_ids(enumerator_for_defaults)
             state_mask = DEVICE_STATE_ALL if include_all else DEVICE_STATE_ACTIVE
-
-            # Build the name map once per call (safer than per-device property-store reads).
+            
+            # Build the name map once per call (keeps enumeration fast and stable).
             name_map = _friendly_names_by_id()
-
+            
             out = []
-
+            
             for flow_name, flow in [("Render", E_RENDER), ("Capture", E_CAPTURE)]:
                 _dbg(f"Enum flow={flow_name}")
                 enumerator, coll = enum_endpoints(flow, state_mask)
                 for i in range(coll.GetCount()):
                     dev = coll.Item(i)
                     dev_id = dev.GetId()
-
-                    # Prefer name map lookup; fall back to raw ID if unknown.
+                    
+                    # Use name map lookup instead of raw COM call
                     name = name_map.get(dev_id) or dev_id
-
+                    
                     state_str = "active"
-
+                    
+                    # If include_all is enabled, decode Windows device state flags.
                     if include_all:
                         try:
                             st = dev.GetState()
@@ -2019,7 +1872,7 @@ def list_devices(include_all=False):
                                 state_str = ",".join(parts) if parts else "unknown"
                         except Exception:
                             state_str = "unknown"
-
+                            
                     is_default = {
                         "console": dev_id == defaults[flow_name]["console"],
                         "multimedia": dev_id == defaults[flow_name]["multimedia"],
@@ -2038,13 +1891,10 @@ def list_devices(include_all=False):
 def find_devices_by_selector(devices, dev_id=None, name_substr=None, flow=None, regex=False):
     """
     Returns list of devices matching selector.
-
-    This is intentionally pure/filter-only (no COM). Higher layers decide how to
-    disambiguate matches in GUI order.
     """
     if not dev_id and not name_substr:
         return []
-
+        
     def match(d):
         if flow and d["flow"].lower() != flow.lower():
             return False
@@ -2055,30 +1905,30 @@ def find_devices_by_selector(devices, dev_id=None, name_substr=None, flow=None, 
                 return re.search(name_substr, d["name"], re.IGNORECASE) is not None
             return name_substr.lower() in d["name"].lower()
         return False
-
+        
     return [d for d in devices if match(d)]
 
 def _sort_and_tag_gui_indices(devices):
     """
     Sort devices by name within each flow exactly like the GUI, and tag each
     item with d['guiIndex'] (0-based within its flow).
-
-    This is the single source of truth for CLI/GUI index parity.
+    Returns {'Render': [list], 'Capture': [list]} and also mutates 'devices'
+    to include 'guiIndex' for convenience.
     """
     buckets = {"Render": [], "Capture": []}
     for d in devices:
         buckets[d["flow"]].append(d)
-
+        
     for flow in buckets:
         buckets[flow].sort(key=lambda x: x["name"].lower())
         for i, d in enumerate(buckets[flow]):
             d["guiIndex"] = i
-
+            
     return buckets
 
 def _pretty_matches_msg(label, matches):
     """
-    Print a small list of candidates in GUI order to help the user pick.
+    Print a small list of candidates in GUI order to help the user pick
     """
     buckets = _sort_and_tag_gui_indices(matches[:])
     lines = []
@@ -2093,43 +1943,40 @@ def _select_by_name_active_only(flow_name, name_text, index, regex):
     Interpret --index using the same GUI order (sorted by name within flow).
     Only considers active devices. Returns (device_dict, None) or (None, error).
 
-    This is used by CLI commands that allow name selection + --index.
+    This ensures CLI selection matches the GUI ordering so users can share the same index.
     """
     label = "playback" if flow_name == "Render" else "recording"
     active_devices = list_devices(include_all=False)
-
+    
     candidates = [d for d in active_devices if d["flow"] == flow_name]
-
+    
     buckets = _sort_and_tag_gui_indices(candidates)
     ordered = buckets[flow_name]
-
+    
     if name_text:
         if regex:
             pat = re.compile(name_text, re.IGNORECASE)
             ordered = [d for d in ordered if pat.search(d["name"])]
         else:
             ordered = [d for d in ordered if name_text.lower() in d["name"].lower()]
-
+            
     if not ordered:
         return None, f"ERROR: {label} device not found (active only)"
-
+        
     if index is None and len(ordered) > 1:
         return None, _pretty_matches_msg(label, ordered) + "\nUse --index to disambiguate."
-
+        
     if index is not None:
         for d in ordered:
             if d.get("guiIndex") == index:
                 return d, None
         return None, f"ERROR: --index {index} does not match any active {label} device in GUI order."
-
+        
     return ordered[0], None
 
 def set_endpoint_mute(device_id, mute_state):
-    """
-    Set mute for an endpoint using IAudioEndpointVolume.
-
-    Returns True/False (no exception propagation). Callers treat False as failure.
-    """
+    # Mute/unmute via IAudioEndpointVolume.
+    # Some COM wrappers return tuples; setters generally throw on failure.
     with _com_context():
         for flow in (E_RENDER, E_CAPTURE):
             _, coll = enum_endpoints(flow, DEVICE_STATE_ACTIVE)
@@ -2146,16 +1993,11 @@ def set_endpoint_mute(device_id, mute_state):
     return False
 
 def get_endpoint_mute(device_id):
-    """
-    Read mute state using IAudioEndpointVolume.GetMute().
-
-    Some comtypes/pycaw versions return:
-    - a raw bool/int
-    - or a 1-tuple (value,)
-    - or require an out-parameter (ctypes BOOL)
-
-    We normalize to bool or None.
-    """
+    # Read mute state via IAudioEndpointVolume.
+    # Depending on comtypes/pycaw version, GetMute may return:
+    #   - a bool/int directly, or
+    #   - a one-element tuple, or
+    #   - require an out-parameter BOOL pointer.
     with _com_context():
         for flow in (E_RENDER, E_CAPTURE):
             _, coll = enum_endpoints(flow, DEVICE_STATE_ACTIVE)
@@ -2180,13 +2022,9 @@ def get_endpoint_mute(device_id):
     return None
 
 def get_endpoint_volume(device_id):
-    """
-    Read master volume scalar via IAudioEndpointVolume.GetMasterVolumeLevelScalar().
-
-    Normalization:
-    - Windows returns 0.0..1.0 float
-    - We convert to integer percent 0..100 (clamped)
-    """
+    # Read master volume scalar via IAudioEndpointVolume.
+    # Return normalized integer 0..100 for stable CLI/GUI JSON.
+    # Similar to GetMute, GetMasterVolumeLevelScalar may return tuple or require out param.
     with _com_context():
         for flow in (E_RENDER, E_CAPTURE):
             _, coll = enum_endpoints(flow, DEVICE_STATE_ACTIVE)
@@ -2201,7 +2039,6 @@ def get_endpoint_volume(device_id):
                             ret = ret[0]
                         return max(0, min(100, int(round(float(ret) * 100.0))))
                     except Exception:
-                        # Some builds require an out-parameter.
                         try:
                             f = ctypes.c_float()
                             vol.GetMasterVolumeLevelScalar(ctypes.byref(f))
@@ -2211,14 +2048,8 @@ def get_endpoint_volume(device_id):
     return None
 
 def set_endpoint_volume(device_id, level_percent):
-    """
-    Set master volume scalar using IAudioEndpointVolume.SetMasterVolumeLevelScalar().
-
-    Input:
-    - level_percent: 0..100 (we clamp, then convert to 0.0..1.0 float)
-
-    Returns True/False.
-    """
+    # Set master volume scalar via IAudioEndpointVolume.
+    # We convert 0..100 into 0.0..1.0 scalar and clamp for safety.
     level = max(0.0, min(1.0, float(level_percent) / 100.0))
     with _com_context():
         for flow in (E_RENDER, E_CAPTURE):
@@ -2237,16 +2068,12 @@ def set_endpoint_volume(device_id, level_percent):
 
 def _verify_effect_only(device_id, flow, expected_enabled, timeout=2.5, interval=0.2, consecutive=2):
     """
-    Windows-only verification for fallback paths.
+    Windows-only verification for fallback paths: require PropertyStore Disable_SysFx match expected.
+    Returns (ok, verifiedBy, finalState).
 
-    We require the live PropertyStore Disable_SysFx to match the expected_enabled state
-    for 'consecutive' reads to be confident (guards against transient/async updates).
-
-    Returns:
-    - (ok, verifiedBy, finalState)
-
-    verifiedBy tags (used by higher layers in JSON):
-    - "windows-live(ps)" indicates the Windows PropertyStore readback path.
+    verifiedBy meaning:
+      - "windows-live(ps)" indicates the result was verified by reading the live
+        Windows PropertyStore Disable_SysFx value (not vendor INI state).
     """
     import time as _time
     want = True if expected_enabled else False
