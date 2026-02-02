@@ -1,7 +1,7 @@
 # Windows Audio Control CLI + GUI
 ## audioctl.exe (pycaw/comtypes-based)
 
-**AUDIOCTL** is a Windows audio control utility with a scriptable CLI and an optional GUI. You can:
+A Windows audio control utility with a scriptable CLI and an optional GUI. You can:
 
 - **Automate common tasks:** list devices, set default playback/recording endpoints, adjust volume, mute/unmute, toggle “Listen to this device,” and control Enhancements.
 - **Learn vendor toggles:** “Learn Enhancements” and “Learn FX” observe what Windows/drivers change in the registry for a specific device, then store those rules so audioctl can reproduce the same toggle later.
@@ -12,27 +12,33 @@
 audioctl is designed to be CLI-first for repeatability and automation; the GUI is a helper layer on top.
 
 ---
-
-[List devices](#list-devices)
+[Quick Start](#quick-start)
 <BR>
-[Set default endpoints](#set-default-devices-cli)
+[Command Map (Full Tree)](#command-map-full-tree)
 <BR>
-[Adjust volume / mute](#set-volume-or-muteunmute-cli)
+[List Devices](#list-devices)
 <BR>
-[Listen to this device](#listen-to-this-device-capture-only-cli)
+[Set Default Endpoints](#set-default-devices-cli)
 <BR>
-[Audio enhancements](#audio-enhancements-sysfx--vendor-toggles-cli)
+[Adjust Volume / Mute](#set-volume-or-muteunmute-cli)
 <BR>
-[Wait for a device](#wait-for-a-device-to-appear-cli)
+[Listen To This Device](#listen-to-this-device-capture-only-cli)
+<BR>
+[Audio Enhancements](#audio-enhancements-sysfx--vendor-toggles-cli)
+<BR>
+[Query Helpers (Read‑Only)](#query-helpers-readonly)
+<BR>
+[Diagnostic Discovery](#diagnostics--discovery-optional-readonly)
+<BR>
+[Wait For A Device](#wait-for-a-device-to-appear-cli)
+<BR>
+[General Exit Codes](#general-exit-codes)
 <BR>
 [Troubleshooting](#troubleshooting)
 <BR>
 [GUI (Graphical User Interface)](#gui-graphical-user-interface)
 <BR>
 
-Additional quick links:
-- [Command map (full tree)](#command-map-full-tree)
-- [Query helpers (read‑only)](#query-helpers-readonly)
 
 ---
 
