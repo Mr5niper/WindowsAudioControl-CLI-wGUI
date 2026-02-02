@@ -1,4 +1,26 @@
 # audioctl/cli.py
+#
+# This module defines the *public* CLI surface for audioctl.
+# It is intentionally the single "command router" used by:
+#   - humans on the command line,
+#   - scripts/automation (JSON outputs),
+#   - and the Tkinter GUI (which shells out to the CLI rather than importing
+#     low-level COM helpers directly).
+#
+# Why the GUI uses the CLI instead of calling COM helpers:
+#   - Stability: the low-level Windows audio operations involve COM (comtypes/pycaw)
+#     and, in some cases, raw vtable calls. Keeping that logic inside a CLI boundary
+#     reduces the chance of long-lived Tk event-loop interactions with COM lifetime
+#     and garbage collection timing.
+#   - Single source of truth: CLI JSON output is the stable contract; the GUI consumes
+#     the same results that scripts do.
+#
+# IMPORTANT:
+#   compat.py MUST be imported before anything that might touch comtypes/pycaw.
+#   It installs small compatibility shims needed for certain comtypes builds and
+#   ensures PyInstaller bundles critical COM cleanup modules.
+
+# --- stdlib imports ---
 import sys
 import argparse
 import json
@@ -7,11 +29,15 @@ import io
 import os
 import re
 from contextlib import redirect_stderr
+
+# --- local/project imports (do these early; compat must run before comtypes usage) ---
 # Import compat BEFORE any comtypes usage
 from .compat import (
     ROLES, is_admin,
 )
 from .logging_setup import _log, _log_exc
+
+# --- device helpers (CLI stays thin; COM/registry implementation lives in devices.py) ---
 from .devices import (
     list_devices, find_devices_by_selector, _sort_and_tag_gui_indices,
     _pretty_matches_msg, _select_by_name_active_only,
@@ -29,6 +55,8 @@ from .devices import (
     _get_enhancements_status_com,
     _read_listen_enable_fast,
 )
+
+# --- vendor/INI helpers (vendor-first enhancements/FX; parsing and registry writing live in vendor_db.py) ---
 from .vendor_db import (
     _vendor_ini_default_path,
     _enhancements_supported,
@@ -42,7 +70,23 @@ from .vendor_db import (
     _fast_get_enhancements_state,
     _fast_read_vendor_entry_state,
 )
+
+
 def cmd_list(args):
+    # list:
+    #   - Enumerate endpoints via devices.list_devices().
+    #   - By default includes ACTIVE endpoints only; --all includes disabled/unplugged/etc.
+    #
+    # Indexing note (cross-cutting behavior for many commands):
+    #   We sort devices by name within each flow (Render/Capture) and attach guiIndex.
+    #   This mirrors the GUI order and makes --index stable and predictable.
+    #
+    # Output:
+    #   - --json: { "devices": [ {id,name,flow,state,isDefault,guiIndex}, ... ] }
+    #   - otherwise: human-readable sections with [guiIndex] labels.
+    #
+    # Exit codes:
+    #   0 success
     devices = list_devices(include_all=args.all)
     buckets = _sort_and_tag_gui_indices(devices)
     if args.json:
@@ -57,12 +101,40 @@ def cmd_list(args):
         flags = [k for k, v in d["isDefault"].items() if v]
         print(f"[{d['guiIndex']}] {d['name']}  id={d['id']}  defaults={','.join(flags) if flags else '-'}\n")
     return 0
+
+
 def cmd_set_default(args):
+    # set-default:
+    #   Set default playback and/or recording endpoints using PolicyConfig.
+    #
+    # Selection:
+    #   - Active-only (we intentionally refuse to target disabled/notpresent devices).
+    #   - playback selector: --playback-id (exact) OR --playback-name (substring/regex),
+    #     with --index interpreted as GUI-order within the Render flow.
+    #   - recording selector: --recording-id OR --recording-name, with --index interpreted
+    #     as GUI-order within the Capture flow.
+    #
+    # Roles:
+    #   - console/multimedia/communications/all (see ROLES).
+    #   - Playback defaults to "all" because most users want the same endpoint for all roles.
+    #   - Recording defaults to "communications" historically; you can choose "all" explicitly.
+    #
+    # Output:
+    #   JSON: {"set":[{"flow":"Render|Capture","role":"...","id":"...","name":"..."}]}
+    #
+    # Exit codes:
+    #   0 success (or partial success; failures set exit_code=1 but still prints JSON)
+    #   1 runtime failure setting one or more defaults
+    #   3 not found (active-only)
+    #   4 multiple matches / index required (selection ambiguity)
     if not is_admin():
+        # "Might" is intentional: some systems allow PolicyConfig calls without elevation,
+        # others require Administrator depending on policy/drivers.
         print("WARNING: 'set-default' might require Administrator privileges on this system.", file=sys.stderr)
     
     exit_code = 0
     results = {"set": []}
+
     if args.playback_id or args.playback_name:
         flow_name = "Render"
         if args.playback_id:
@@ -72,6 +144,7 @@ def cmd_set_default(args):
                 return 3
             target = matches[0]
         else:
+            # _select_by_name_active_only enforces GUI-order indexing and active-only selection.
             target, err = _select_by_name_active_only(flow_name, args.playback_name, args.index, args.regex)
             if err:
                 print(err, file=sys.stderr)
@@ -84,6 +157,7 @@ def cmd_set_default(args):
         except Exception as e:
             print(f"ERROR: failed to set playback default: {e}", file=sys.stderr)
             exit_code = 1
+
     if args.recording_id or args.recording_name:
         flow_name = "Capture"
         if args.recording_id:
@@ -93,6 +167,7 @@ def cmd_set_default(args):
                 return 3
             target = matches[0]
         else:
+            # _select_by_name_active_only enforces GUI-order indexing and active-only selection.
             target, err = _select_by_name_active_only(flow_name, args.recording_name, args.index, args.regex)
             if err:
                 print(err, file=sys.stderr)
@@ -105,15 +180,44 @@ def cmd_set_default(args):
         except Exception as e:
             print(f"ERROR: failed to set recording default: {e}", file=sys.stderr)
             exit_code = 1
+
     print(json.dumps(results))
     return exit_code
+
+
 def cmd_set_volume(args):
+    # set-volume:
+    #   Mutate endpoint state:
+    #     - set master volume scalar (0..100) OR
+    #     - mute/unmute
+    #
+    # Validation:
+    #   - Exactly one of: --level, --mute, --unmute.
+    #
+    # Selection:
+    #   - Active-only.
+    #   - Match by --id (exact) or --name (substring/regex), optional --flow filter.
+    #   - If ambiguous and --index not provided: exit 4.
+    #
+    # Indexing:
+    #   When selecting among matches, we sort and tag guiIndex using the same logic
+    #   as the GUI (name-sorted within each flow). This keeps --index stable.
+    #
+    # Output:
+    #   - {"volumeSet": {...}} or {"muteSet": {...}} on success.
+    #
+    # Exit codes:
+    #   0 success
+    #   1 invalid args or failed to set
+    #   3 not found (active-only)
+    #   4 ambiguous / --index out of range
     if (args.mute or args.unmute) and args.level is not None:
         print("ERROR: Cannot specify both --level and --mute/--unmute", file=sys.stderr)
         return 1
     if not (args.mute or args.unmute or args.level is not None):
         print("ERROR: Must specify --level or --mute/--unmute", file=sys.stderr)
         return 1
+
     devices = list_devices(include_all=False)
     matches = find_devices_by_selector(devices, dev_id=args.id, name_substr=args.name, flow=args.flow, regex=args.regex)
     if len(matches) == 0:
@@ -123,6 +227,10 @@ def cmd_set_volume(args):
         print("ERROR: multiple matches; specify --index", file=sys.stderr)
         return 4
     
+    # Cross-cutting selection pattern:
+    # - _sort_and_tag_gui_indices sorts by name within flow and assigns guiIndex.
+    # - We then construct an "ordered" list that matches GUI ordering so --index
+    #   is consistent between CLI and GUI.
     buckets = _sort_and_tag_gui_indices([d for d in matches])
     flow = args.flow or (matches[0]["flow"] if matches else None)
     ordered = (buckets.get(flow) or []) if args.flow else (buckets["Render"] + buckets["Capture"])
@@ -138,6 +246,7 @@ def cmd_set_volume(args):
         target = ordered[args.index]
     else:
         target = ordered[0]
+
     ok = False
     if args.mute:
         ok = set_endpoint_mute(target["id"], True)
@@ -151,16 +260,33 @@ def cmd_set_volume(args):
         ok = set_endpoint_volume(target["id"], args.level)
         if ok:
             print(json.dumps({"volumeSet": {"id": target["id"], "name": target["name"], "level": args.level}}))
+
     if not ok:
         print("ERROR: failed to set volume/mute", file=sys.stderr)
         return 1
     return 0
+
+
 def cmd_get_volume(args):
     """
     Get current volume and mute status for a device.
     This is a read-only helper so the GUI (or scripts) can query state
     without using low-level code directly.
     """
+    # get-volume:
+    #   Read-only query used heavily by GUI/script polling.
+    #
+    # Selection:
+    #   - Active-only.
+    #   - Same selection/disambiguation rules as set-volume.
+    #
+    # Output JSON:
+    #   { "id": "...", "name": "...", "flow": "Render|Capture", "volume": int|null, "muted": bool|null }
+    #
+    # Exit codes:
+    #   0 success
+    #   3 not found
+    #   4 ambiguous / --index out of range
     devices = list_devices(include_all=False)
     matches = find_devices_by_selector(
         devices,
@@ -191,6 +317,7 @@ def cmd_get_volume(args):
     vol = get_endpoint_volume(target["id"])
     muted = get_endpoint_mute(target["id"])
     # Normalize muted to a plain bool/null-like; don't let odd types leak
+    # (Some COM wrappers can return non-bool truthy values; GUI/scripts want stable JSON.)
     if muted is not None:
         muted = bool(muted)
     result = {
@@ -202,7 +329,39 @@ def cmd_get_volume(args):
     }
     print(json.dumps(result))
     return 0
+
+
 def cmd_listen(args):
+    # listen:
+    #   Enable/disable "Listen to this device" for a Capture endpoint.
+    #
+    # High-level flow:
+    #   1) Resolve optional playback routing target (Render endpoint) first.
+    #      - --playback-target-id may be: None (don't change), "" (default device), or actual ID.
+    #      - --playback-target-name overrides the ID (also supports flag-without-value -> const='' -> default device).
+    #   2) Resolve the Capture device (active-only, GUI-order --index).
+    #   3) Call set_listen_to_device_ps():
+    #      - writes the checkbox state via IPropertyStore (COM),
+    #      - and may write routing target via registry (HKLM; may require admin).
+    #   4) Capture stderr and re-emit only non-error lines:
+    #      COM/registry paths can emit warnings that are useful but noisy; we filter to
+    #      preserve INFO lines while avoiding duplicate ERROR framing.
+    #   5) Verification fallbacks:
+    #      - read back via COM PropertyStore (exact),
+    #      - if COM read is inconclusive, poll registry until it matches.
+    #
+    # "verifiedBy" meaning in JSON:
+    #   If the setter returns a failure but we can confirm the state changed anyway,
+    #   we still return success with verifiedBy="com" or "registry". This reflects
+    #   real-world Windows behavior where the write may apply even when the call path
+    #   signaled an error due to timing or driver quirks.
+    #
+    # Exit codes:
+    #   0 success
+    #   1 failed (and not verifiable)
+    #   3 not found (active-only)
+    #   4 ambiguous / --index out of range
+    #
     # Resolve playback target. Start with ID if it was provided.
     render_device_id = args.playback_target_id
     # Handle --playback-target-name. This will override the ID if both are used.
@@ -211,12 +370,13 @@ def cmd_listen(args):
         if args.playback_target_name == '':
             render_device_id = ''
         else:
-            # A name was provided, so find the device ID
+            # A name was provided, so find the device ID (Render devices, active-only).
             render_target, err = _select_by_name_active_only("Render", args.playback_target_name, None, args.regex)
             if err:
                 print(f"ERROR: Could not find playback target device: {err}", file=sys.stderr)
                 return 3
             render_device_id = render_target["id"]
+
     # --- The rest of the function is for finding the CAPTURE device ---
     devices = list_devices(include_all=False)
     matches = find_devices_by_selector(devices, dev_id=args.id, name_substr=args.name, flow="Capture", regex=args.regex)
@@ -227,6 +387,7 @@ def cmd_listen(args):
         print("ERROR: multiple matches; specify --index", file=sys.stderr)
         return 4
     
+    # --index is interpreted in GUI-order within Capture (name-sorted).
     buckets = _sort_and_tag_gui_indices(matches[:])
     ordered = buckets["Capture"]
     if not ordered:
@@ -245,11 +406,16 @@ def cmd_listen(args):
     captured_stderr = io.StringIO()
     ok = False
     with redirect_stderr(captured_stderr):
-        # render_device_id will be a string ID, '', or None
+        # render_device_id semantics:
+        #   None => do not modify routing target
+        #   ''   => route to "Default Playback Device"
+        #   id   => route to that specific Render endpoint
         ok = set_listen_to_device_ps(target["id"], args.enable, render_device_id=render_device_id)
         
     stderr_output = captured_stderr.getvalue()
     if not ok:
+        # Even if the setter returned False, Windows/driver may have applied the change.
+        # Verify via COM first (exact), then registry (robust) before calling it a failure.
         actual = _get_listen_to_device_status_ps(target["id"])
         if actual is not None and actual == args.enable:
             _reemit_non_error_stderr(stderr_output)
@@ -264,6 +430,7 @@ def cmd_listen(args):
         print(f"ERROR: failed to set 'Listen to this device' for '{target['name']}'.", file=sys.stderr)
         return 1
         
+    # Setter returned success; still re-emit any useful INFO/WARN lines.
     _reemit_non_error_stderr(stderr_output)
     actual_enabled_state = _get_listen_to_device_status_ps(target["id"])
     if actual_enabled_state is None:
@@ -273,12 +440,25 @@ def cmd_listen(args):
             
     print(json.dumps({"listenSet": {"id": target["id"], "name": target["name"], "enabled": actual_enabled_state}}))
     return 0
+
+
 def cmd_get_listen(args):
     """
     Get current 'Listen to this device' enabled/disabled state for a capture device.
     Returns JSON:
       { "id": "...", "name": "...", "flow": "Capture", "listenEnabled": true|false|null }
     """
+    # get-listen:
+    #   Read-only helper intended for fast polling.
+    #
+    # Design choice:
+    #   We use _read_listen_enable_fast (registry-first, no COM) to keep this cheap
+    #   enough for frequent GUI refresh and scripting loops.
+    #
+    # Exit codes:
+    #   0 success
+    #   3 not found (active-only)
+    #   4 ambiguous / --index out of range
     devices = list_devices(include_all=False)
     matches = find_devices_by_selector(
         devices,
@@ -314,7 +494,27 @@ def cmd_get_listen(args):
         "listenEnabled": state,
     }))
     return 0
+
+
 def cmd_enhancements(args):
+    # enhancements:
+    #   Vendor-first control surface for:
+    #     - Main "Audio Enhancements" on/off (SysFX) toggle (vendor-only at runtime)
+    #     - FX operations: list/learn/enable/disable/delete learned per-effect toggles
+    #
+    # Constraint:
+    #   Exactly one operation must be specified. This keeps the command unambiguous
+    #   and predictable for GUI callers and scripts.
+    #
+    # Device selection:
+    #   Active-only selection with consistent --index semantics (GUI-order within flow).
+    #
+    # Exit codes:
+    #   0 success
+    #   1 invalid args or toggle/learn failure
+    #   3 not found
+    #   4 ambiguous selection / out of range / user selection invalid (interactive disambiguation)
+    #
     # Validation: exactly one operation
     ops = [
         bool(args.enable), bool(args.disable), bool(args.learn),
@@ -324,6 +524,7 @@ def cmd_enhancements(args):
     if sum(ops) != 1:
         print("ERROR: specify exactly one of --enable, --disable, --learn, --learn-fx, --enable-fx, --disable-fx, or --list-fx", file=sys.stderr)
         return 1
+
     # Device selection (existing pattern)
     devices = list_devices(include_all=False)
     matches = find_devices_by_selector(devices, dev_id=args.id, name_substr=args.name, flow=args.flow, regex=args.regex)
@@ -333,18 +534,27 @@ def cmd_enhancements(args):
     if len(matches) > 1 and args.index is None:
         print(_pretty_matches_msg("device", matches), file=sys.stderr)
         return 4
+
+    # --index is in GUI-order within flow (name-sorted) for consistency with the GUI.
     buckets = _sort_and_tag_gui_indices(matches[:])
     ordered = (buckets.get(args.flow) or []) if args.flow else (buckets["Render"] + buckets["Capture"])
     if not ordered:
         print("ERROR: no target device found for the specified criteria", file=sys.stderr)
         return 4
     target = ordered[args.index] if args.index is not None else ordered[0]
-    # === NEW: FX Operations ===
+
+    # === FX Operations ===
+    # FX entries are learned/defined in vendor_toggles.ini and are per-device scoped.
+    # They may be:
+    #   - simple single-DWORD toggles, or
+    #   - "multi-write" sequences (multiple registry values/types written together).
     if args.list_fx:
+        # List FX available to this device as defined in vendor_toggles.ini.
         fx_list = _list_fx_for_device(target["id"], target["flow"],
                                       ini_path=getattr(args, "vendor_ini", None))
         fx_list = sorted(fx_list, key=lambda x: (x.get("fx_name") or "").lower())
-        # If --json, return existing JSON format
+
+        # JSON form is consumed by the GUI; includes per-FX state if readable.
         if getattr(args, "json", False):
             result = {
                 "device": {"id": target["id"], "name": target["name"], "flow": target["flow"]},
@@ -364,7 +574,8 @@ def cmd_enhancements(args):
                 })
             print(json.dumps(result))
             return 0
-        # Human-readable listing (default)
+
+        # Human-readable listing (default CLI UX).
         print(f"Enhancement Effects for: {target['name']} ({target['flow']})")
         if not fx_list:
             print("  (none)")
@@ -379,8 +590,21 @@ def cmd_enhancements(args):
             src = "ini"
             print(f"  - {fx.get('fx_name')}  [source={src}]  state={state_txt}")
         return 0
+
     if args.learn_fx:
-        # inside cmd_enhancements, under: if args.learn_fx:
+        # learn-fx:
+        #   Guided, interactive A/B snapshot capture for a specific effect.
+        #
+        # Two-pass model (important for real drivers):
+        #   Many drivers create registry keys or stabilize state only after the first
+        #   toggle. So we do:
+        #     - Pass 1: A/B (prime/initialize)
+        #     - Pass 2: A2/B2 (the authoritative pair we record in the INI)
+        #
+        # Timing:
+        #   We allow a small settle delay before each snapshot to let the driver and
+        #   property system commit changes. This is configurable via:
+        #     AUDIOCTL_LEARN_FX_SETTLE (seconds)
         fx_name = args.learn_fx.strip()
         if not fx_name:
             print("ERROR: FX name cannot be empty", file=sys.stderr)
@@ -391,6 +615,7 @@ def cmd_enhancements(args):
             FX_SETTLE = float(os.environ.get("AUDIOCTL_LEARN_FX_SETTLE", "0.35"))
         except Exception:
             FX_SETTLE = 0.35
+
         # First pass (A/B) – used only to "prime" the driver
         print(f"Set the '{fx_name}' effect to ENABLED for this device.")
         input("When ready, press Enter to capture snapshot A... ")
@@ -406,6 +631,7 @@ def cmd_enhancements(args):
             time.sleep(FX_SETTLE)
             snapB = _collect_sysfx_snapshot(target["id"])
         _reemit_non_error_stderr(captured_stderr.getvalue())
+
         # Second pass (A2/B2) – this pair is what we will record in the INI
         print(f"Enable the '{fx_name}' effect again (second pass).")
         input("When ready, press Enter to capture snapshot A2... ")
@@ -421,6 +647,7 @@ def cmd_enhancements(args):
             time.sleep(FX_SETTLE)
             snapB2 = _collect_sysfx_snapshot(target["id"])
         _reemit_non_error_stderr(captured_stderr.getvalue())
+
         ok, info = _learn_fx_and_write_ini(
             target, fx_name, snapA, snapB,
             ini_path=getattr(args, "vendor_ini", None) or _vendor_ini_default_path(),
@@ -439,8 +666,21 @@ def cmd_enhancements(args):
         else:
             print(f"ERROR: FX learn failed: {info}", file=sys.stderr)
             return 1
+
     if args.enable_fx or args.disable_fx:
-        # Flexible FX name matching with substring/regex; interactive disambiguation on multiple
+        # enable-fx/disable-fx:
+        #   Toggle a learned effect for this device.
+        #
+        # Matching:
+        #   - Default: case-insensitive substring match against fx_name.
+        #   - With --regex: treat the provided FX selector as a regex.
+        #
+        # If multiple matches:
+        #   - interactive disambiguation prompts user for an index on stdin.
+        #
+        # Output:
+        #   {"fxSet":{"id","name","fx_name","enabled","verifiedBy"}}
+        # verifiedBy indicates the vendor method used (INI entry type / multi-write decider).
         desired = (args.enable_fx or args.disable_fx or "").strip()
         if not desired:
             print("ERROR: FX name cannot be empty", file=sys.stderr)
@@ -502,7 +742,15 @@ def cmd_enhancements(args):
         else:
             print(f"ERROR: FX '{chosen_name}' toggle failed for this device", file=sys.stderr)
             return 1
+
     if args.delete_fx:
+        # delete-fx:
+        #   Removes the association for this device GUID from the FX bucket in the INI.
+        #
+        # Matching/disambiguation follows the same rules as enable/disable-fx.
+        #
+        # Output:
+        #   {"fxDeleted": {"id","name","fx_name", ...info...}}
         desired = (args.delete_fx or "").strip()
         if not desired:
             print("ERROR: FX name cannot be empty", file=sys.stderr)
@@ -559,9 +807,28 @@ def cmd_enhancements(args):
             msg = info if isinstance(info, str) else (info.get("reason") if isinstance(info, dict) else "unknown")
             print(f"ERROR: delete-fx failed: {msg}", file=sys.stderr)
             return 1
-    # === EXISTING: Main toggle operations (MODIFIED: learn fallback) ===
+
+    # === Main toggle operations (vendor-only at runtime) ===
     if args.learn:
-        # First attempt: run standard learn flow (prompts inside vendor_db)
+        # learn (main):
+        #   Manual learning flow where the user toggles "Audio Enhancements" in the
+        #   Windows UI while we capture registry snapshots.
+        #
+        # Retry logic:
+        #   Some drivers create their vendor keys only after the first toggle. So if
+        #   we cannot detect a clean DWORD flip, we:
+        #     - check if a vendor entry is now available (vendorAvailable),
+        #     - ask the user to toggle again and retry capture,
+        #     - re-check after the retry.
+        #
+        # Output JSON:
+        #   - {"vendorLearned": {...}} if we successfully wrote/updated an INI entry
+        #   - {"vendorAvailable": {...}} if a usable vendor method exists but no new
+        #     section was written by this learn attempt
+        #
+        # Exit codes:
+        #   0 learn succeeded or vendor method available
+        #   1 learn failed
         ok, info = _learn_vendor_from_discovery_and_write_ini(
             target,
             ini_path=getattr(args, "vendor_ini", None) or _vendor_ini_default_path(),
@@ -614,10 +881,15 @@ def cmd_enhancements(args):
         # Nothing found after retry
         print("ERROR: No DWORD flip found and no vendor method became available after a retry. Learn failed.", file=sys.stderr)
         return 1
+
     enable = True if args.enable else False
+
+    # Runtime policy: vendor-only. If we don't have a learned/known vendor method,
+    # we do not attempt Windows Disable_SysFx toggles here (those exist for diagnostics/learn).
     if not _enhancements_supported(target["id"], target["flow"]):
         print("ERROR: No vendor toggle available for this device. Use --learn to teach a vendor method.", file=sys.stderr)
         return 1
+
     ok, verified_by, state = _apply_enhancements(
         target["id"], target["flow"], enable,
         prefer_hklm=args.prefer_hklm,
@@ -629,6 +901,8 @@ def cmd_enhancements(args):
         return 0
     print("ERROR: vendor toggle failed.", file=sys.stderr)
     return 1
+
+
 def cmd_get_enhancements(args):
     """
     Get current enhancements enabled/disabled state from vendor methods only.
@@ -640,6 +914,19 @@ def cmd_get_enhancements(args):
         "enhancementsEnabled": true|false|null
       }
     """
+    # get-enhancements:
+    #   Vendor-only, fast query intended for GUI labels and scripts.
+    #
+    # Behavior note:
+    #   If a vendor method exists for the device but the read is inconclusive,
+    #   we "default-assume enabled" (True). This is primarily for UI friendliness:
+    #   many drivers omit explicit disable markers when enabled, and treating "unknown"
+    #   as disabled would make the UI feel wrong.
+    #
+    # Exit codes:
+    #   0 success
+    #   3 not found
+    #   4 ambiguous / --index out of range
     devices = list_devices(include_all=False)
     matches = find_devices_by_selector(
         devices,
@@ -686,6 +973,8 @@ def cmd_get_enhancements(args):
         "enhancementsEnabled": state,
     }))
     return 0
+
+
 def cmd_get_device_state(args):
     """
     Return a combined view of device state for GUI:
@@ -707,6 +996,24 @@ def cmd_get_device_state(args):
         ]
       }
     """
+    # get-device-state:
+    #   One-stop, read-only call designed for the GUI so it doesn't need to call
+    #   multiple commands for labels and menu state.
+    #
+    # Composition:
+    #   - Volume/mute: COM read (accurate; no artificial sleeps).
+    #   - Listen: fast registry probe (Capture only).
+    #   - Enhancements: fast vendor INI-driven read (vendor-only).
+    #   - FX list + per-FX states: INI-driven list + fast state reads.
+    #
+    # Defaults for UI friendliness:
+    #   If vendor/FX state is inconclusive but an entry exists, we default-assume True
+    #   (enabled). Many drivers store explicit "disabled" markers only.
+    #
+    # Exit codes:
+    #   0 success
+    #   3 not found
+    #   4 ambiguous / --index out of range
     import time as _t
     devices = list_devices(include_all=False)
     matches = find_devices_by_selector(
@@ -814,7 +1121,23 @@ def cmd_get_device_state(args):
     }
     print(json.dumps(result))
     return 0
+
+
 def cmd_diag_sysfx(args):
+    # diag-sysfx:
+    #   Diagnostic command intended for troubleshooting and development.
+    #   It compares:
+    #     - live Windows enhancement state via PropertyStore (endpoint property)
+    #     - live Windows enhancement state via PolicyConfig COM
+    #     - learned vendor toggle state (if any INI entry exists)
+    #
+    # This helps explain mismatches between Windows-reported SysFX state and
+    # vendor registry toggles a driver actually uses.
+    #
+    # Exit codes:
+    #   0 success
+    #   3 not found
+    #   4 ambiguous / --index out of range
     devices = list_devices(include_all=False)
     matches = find_devices_by_selector(devices, dev_id=args.id, name_substr=args.name, flow=args.flow, regex=args.regex)
     if not matches:
@@ -847,7 +1170,25 @@ def cmd_diag_sysfx(args):
         "vendor_toggle_status": {vend_tag or "None Found": vend_state}
     }, indent=2))
     return 0
+
+
 def cmd_discover_enhancements(args):
+    # discover-enhancements:
+    #   Interactive diagnostic/discovery workflow (manual UI toggling):
+    #     - user sets Enhancements enabled -> snapshot A
+    #     - user sets Enhancements disabled -> snapshot B
+    #     - tool diffs registry values under MMDevices (HKCU/HKLM, FxProperties/Properties)
+    #     - generates a human-readable report and a JSON bundle for debugging/sharing
+    #     - optionally appends a suggested vendor INI snippet
+    #
+    # Output:
+    #   - prints report text
+    #   - writes TXT and JSON to output-dir (default cwd)
+    #
+    # Exit codes:
+    #   0 success
+    #   3 not found
+    #   4 ambiguous / --index out of range
     devices = list_devices(include_all=False)
     matches = find_devices_by_selector(devices, dev_id=args.id, name_substr=args.name, flow=args.flow, regex=args.regex)
     if not matches:
@@ -904,6 +1245,8 @@ def cmd_discover_enhancements(args):
     except Exception as e:
         print(f"ERROR: failed to write JSON bundle: {e}", file=sys.stderr)
     if getattr(args, "ini_snippet", None):
+        # Best-effort INI snippet generation for simple DWORD flips; meant as a hint
+        # for manual integration into vendor_toggles.ini.
         snippet, picked = _build_vendor_ini_snippet(target, snapA, snapB, diffs)
         if snippet:
             try:
@@ -920,7 +1263,22 @@ def cmd_discover_enhancements(args):
     print(f"  TXT  -> {txt_path}")
     print(f"  JSON -> {json_path}")
     return 0
+
+
 def cmd_wait(args):
+    # wait:
+    #   Poll for a device to appear as an ACTIVE endpoint until timeout.
+    #   This is used by automation scripts that need to wait for a USB device,
+    #   headset docking, driver restart, etc.
+    #
+    # Behavior:
+    #   - checks only active endpoints (consistent with all mutating commands)
+    #   - sleeps 0.5s between polls
+    #
+    # Exit codes:
+    #   0 found (prints {"found": <device-dict>})
+    #   3 timeout
+    #   4 ambiguous / --index out of range
     deadline = time.time() + args.timeout
     while time.time() < deadline:
         devices = list_devices(include_all=False)
@@ -944,13 +1302,32 @@ def cmd_wait(args):
         time.sleep(0.5)
     print("ERROR: timeout waiting for device", file=sys.stderr)
     return 3
+
+
 def build_parser():
+    # Build the argparse tree.
+    #
+    # The GUI depends on these commands and their JSON shapes remaining stable,
+    # because the GUI treats the CLI as its "backend".
+    #
+    # Subcommand groups:
+    #   - device listing and selection helpers (list, wait)
+    #   - default endpoint control (set-default)
+    #   - endpoint volume/mute (set-volume, get-volume)
+    #   - Listen checkbox control (listen, get-listen)
+    #   - Enhancements vendor control + FX subsystem (enhancements, get-enhancements, get-device-state)
+    #   - diagnostics and discovery (diag-sysfx, diag-mmdevices, discover-enhancements)
+    #   - internal helper for elevation (vendor-ini-append)
     p = argparse.ArgumentParser(prog="audioctl", description="Windows audio control CLI (pycaw-based)")
     sub = p.add_subparsers(dest="cmd", required=True)
+
+    # --- list ---
     p_list = sub.add_parser("list", help="List devices")
     p_list.add_argument("--all", action="store_true", help="Include disabled/disconnected")
     p_list.add_argument("--json", action="store_true")
     p_list.set_defaults(func=cmd_list)
+
+    # --- set-default ---
     p_sd = sub.add_parser("set-default", help="Set default playback/recording devices (Admin might be required)")
     p_sd.add_argument("--playback-id")
     p_sd.add_argument("--playback-name")
@@ -963,6 +1340,8 @@ def build_parser():
     p_sd.add_argument("--index", type=int)
     p_sd.add_argument("--regex", action="store_true")
     p_sd.set_defaults(func=cmd_set_default)
+
+    # --- volume/mute ---
     p_sv = sub.add_parser("set-volume", help="Set endpoint volume (render or capture) or mute/unmute")
     p_sv.add_argument("--id")
     p_sv.add_argument("--name")
@@ -974,6 +1353,7 @@ def build_parser():
     p_sv.add_argument("--regex", action="store_true")
     p_sv.add_argument("--json", action="store_true", help="Output JSON on success (default) and minimized text on error")
     p_sv.set_defaults(func=cmd_set_volume)
+
     p_gv = sub.add_parser("get-volume", help="Get endpoint volume and mute state (render or capture)")
     p_gv.add_argument("--id")
     p_gv.add_argument("--name")
@@ -981,6 +1361,8 @@ def build_parser():
     p_gv.add_argument("--index", type=int)
     p_gv.add_argument("--regex", action="store_true")
     p_gv.set_defaults(func=cmd_get_volume)
+
+    # --- listen ---
     p_ls = sub.add_parser("listen", help="Enable/disable 'Listen to this device' (capture only)")
     p_ls.add_argument("--id", help="Device ID for the capture device.")
     p_ls.add_argument("--name", help="Substring of the device name for the capture device.")
@@ -992,12 +1374,15 @@ def build_parser():
     p_ls.add_argument("--regex", action="store_true")
     p_ls.add_argument("--json", action="store_true", help="Output JSON on success (default) and minimized text on error")
     p_ls.set_defaults(func=cmd_listen)
+
     p_gl = sub.add_parser("get-listen", help="Get 'Listen to this device' enabled/disabled state for a capture device")
     p_gl.add_argument("--id", help="Device ID for the capture device.")
     p_gl.add_argument("--name", help="Substring or regex of the device name")
     p_gl.add_argument("--index", type=int)
     p_gl.add_argument("--regex", action="store_true")
     p_gl.set_defaults(func=cmd_get_listen)
+
+    # --- enhancements / FX subsystem ---
     p_fx = sub.add_parser("enhancements", help="Enable/disable 'Audio Enhancements' (SysFX) on a device")
     p_fx.add_argument("--id", help="Endpoint ID")
     p_fx.add_argument("--name", help="Substring or regex of the endpoint name")
@@ -1025,6 +1410,8 @@ def build_parser():
     p_fx.add_argument("--delete-fx", metavar="FX_NAME",
                       help="Delete a learned audio effect for this device")
     p_fx.set_defaults(func=cmd_enhancements)
+
+    # --- vendor-only state queries ---
     p_ge = sub.add_parser(
         "get-enhancements",
         help="Get current enhancements enabled/disabled state for a device (vendor-only)"
@@ -1035,6 +1422,7 @@ def build_parser():
     p_ge.add_argument("--index", type=int)
     p_ge.add_argument("--regex", action="store_true")
     p_ge.set_defaults(func=cmd_get_enhancements)
+
     p_gds = sub.add_parser(
         "get-device-state",
         help="Get current state for a device (volume, mute, listen, enhancements, FX) for GUI"
@@ -1046,6 +1434,8 @@ def build_parser():
     p_gds.add_argument("--regex", action="store_true")
     p_gds.add_argument("--vendor-ini", help="Optional vendor INI path for FX lookup")
     p_gds.set_defaults(func=cmd_get_device_state)
+
+    # --- diagnostics ---
     p_dx = sub.add_parser(
         "diag-sysfx",
         help="Dump live Enhancements state (COM, PropertyStore, vendor toggles)"
@@ -1056,6 +1446,7 @@ def build_parser():
     p_dx.add_argument("--index", type=int)
     p_dx.add_argument("--regex", action="store_true")
     p_dx.set_defaults(func=cmd_diag_sysfx)
+
     p_dm = sub.add_parser("diag-mmdevices", help="Dump all MMDevices values for an endpoint (debug)")
     p_dm.add_argument("--id")
     p_dm.add_argument("--name")
@@ -1063,6 +1454,8 @@ def build_parser():
     p_dm.add_argument("--index", type=int)
     p_dm.add_argument("--regex", action="store_true")
     p_dm.set_defaults(func=cmd_diag_mmdevices)
+
+    # --- discovery (interactive report generation) ---
     p_learn = sub.add_parser("discover-enhancements", help="Interactively learn how Enhancements toggles for a device")
     p_learn.add_argument("--id")
     p_learn.add_argument("--name")
@@ -1072,6 +1465,8 @@ def build_parser():
     p_learn.add_argument("--output-dir", help="Where to write the TXT/JSON report (default: current directory)")
     p_learn.add_argument("--ini-snippet", help="Write a suggested vendor INI section to this path (append).")
     p_learn.set_defaults(func=cmd_discover_enhancements)
+
+    # --- wait ---
     p_w = sub.add_parser("wait", help="Wait for device to appear")
     p_w.add_argument("--id")
     p_w.add_argument("--name")
@@ -1080,12 +1475,28 @@ def build_parser():
     p_w.add_argument("--index", type=int)
     p_w.add_argument("--regex", action="store_true")
     p_w.set_defaults(func=cmd_wait)
+
     # Hidden helper: elevated INI append (used by GUI to write into Program Files)
+    # The GUI can write a "work order" JSON file and then run this subcommand via
+    # an elevated process to perform the actual append when permissions require it.
     p_vi = sub.add_parser("vendor-ini-append", help=argparse.SUPPRESS)
     p_vi.add_argument("--work", required=True, help=argparse.SUPPRESS)  # path to JSON work order
     p_vi.set_defaults(func=cmd_vendor_ini_append)
     return p
+
+
 def cmd_diag_mmdevices(args):
+    # diag-mmdevices:
+    #   Debug dump of all MMDevices registry values for an endpoint.
+    #
+    # This is primarily used for learn/discovery troubleshooting:
+    # it reveals the raw keys/values that changed (or didn't) so we can
+    # determine how a driver encodes "enhancements" and FX toggles.
+    #
+    # Exit codes:
+    #   0 success
+    #   3 not found
+    #   4 ambiguous / --index out of range
     devices = list_devices(include_all=False)
     matches = find_devices_by_selector(devices, dev_id=args.id, name_substr=args.name, flow=args.flow, regex=args.regex)
     if not matches:
@@ -1112,7 +1523,28 @@ def cmd_diag_mmdevices(args):
     dump = _dump_mmdevices_all_values(target["id"])
     print(json.dumps({"id": target["id"], "name": target["name"], "flow": target["flow"], "mmdevices": dump}, indent=2))
     return 0
+
+
 def cmd_vendor_ini_append(args):
+    # vendor-ini-append (hidden):
+    #   Internal helper used by the GUI to write/append learned INI entries when
+    #   the INI path is in a protected location (e.g., Program Files).
+    #
+    # The GUI writes a "work order" JSON file with the intended operation, then
+    # launches this subcommand elevated. This keeps the normal GUI process
+    # non-elevated while still supporting admin-required writes.
+    #
+    # Supported work kinds:
+    #   - "main": append a main Enhancements vendor toggle section
+    #   - "fx":   append an FX section
+    #
+    # Error handling:
+    #   - PermissionError: user didn't elevate or path is protected
+    #   - FileExistsError: treated as a benign "already exists" result
+    #
+    # Exit codes:
+    #   0 success (including "exists")
+    #   1 failure (bad work order / write failure)
     try:
         with open(args.work, "r", encoding="utf-8") as f:
             work = json.load(f)
@@ -1171,17 +1603,31 @@ def cmd_vendor_ini_append(args):
     except Exception as e:
         print(f"ERROR: failed to append INI: {e}", file=sys.stderr)
         return 1
+
+
 def main(argv=None):
+    # Entry point for CLI usage and for "double-click / no args" GUI launching.
+    #
+    # If invoked with no args (and argv is None), we try to start the GUI.
+    # The import is lazy so that:
+    #   - CLI usage does not require tkinter,
+    #   - and import-time side effects in the GUI module don't affect CLI runs.
     if argv is None and len(sys.argv) <= 1:
         try:
             from .gui import launch_gui  # Lazy import only if we actually need the GUI
             return launch_gui()
         except Exception as e:
             print(f"ERROR: GUI failed to start: {e}", file=sys.stderr)
+
     # NOTE: Do NOT call CoInitialize/CoUninitialize here anymore.
     # Each low-level helper in devices.py performs its own COM init/cleanup.
+    # This avoids COM apartment lifetime bugs when multiple commands run inside
+    # one Python process (and makes the CLI safe when called repeatedly by the GUI).
     parser = build_parser()
     args = parser.parse_args(argv)
+
+    # Centralized validation for mutually exclusive flag sets.
+    # (We duplicate some checks inside commands too so direct calls remain safe.)
     if args.cmd == "listen":
         if args.enable and args.disable:
             print("ERROR: specify only one of --enable or --disable", file=sys.stderr)
@@ -1190,6 +1636,7 @@ def main(argv=None):
             print("ERROR: specify --enable or --disable", file=sys.stderr)
             return 1
         args.enable = True if args.enable else False
+
     if args.cmd == "enhancements":
         ops_count = (
             int(bool(getattr(args, "enable", False))) +
@@ -1204,6 +1651,7 @@ def main(argv=None):
         if ops_count != 1:
             print("ERROR: specify exactly one of --enable, --disable, --learn, --learn-fx, --enable-fx, --disable-fx, or --list-fx", file=sys.stderr)
             return 1
+
     if args.cmd == "set-volume":
         if (args.mute or args.unmute) and args.level is not None:
             print("ERROR: Cannot specify both --level and --mute/--unmute", file=sys.stderr)
@@ -1211,6 +1659,7 @@ def main(argv=None):
         if not (args.mute or args.unmute or args.level is not None):
             print("ERROR: Must specify --level or --mute/--unmute", file=sys.stderr)
             return 1
+
     try:
         rc = args.func(args)
     except KeyboardInterrupt:

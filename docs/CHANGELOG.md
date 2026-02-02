@@ -1,6 +1,23 @@
 # AUDIOCTL.PY CHANGELOG
 
-## v1.4.7.1 - [Current]
+## v1.4.7.2 - [Current]
+Date: 2026-02-02
+
+### Improvements
+- **Code readability / maintainability (comment-only):**
+  - Added extensive, human-readable inline comments across all Python modules to document intent, control flow, and debugging guidance.
+  - Clarified the CLI command patterns (device selection rules, GUI-order `--index` behavior, JSON output shapes, and verification fallbacks).
+  - Expanded documentation around Windows COM lifecycle handling, GC-guarded raw vtable usage, and why interface definitions are cached.
+  - Documented the GUI’s subprocess-based design (CLI as single source of truth), background state caching (`get-device-state`), context menu label logic, and guided learn workflows.
+  - Documented lazy logging initialization, log path resolution, crash/exception hook behavior, and `faulthandler` usage for native crash diagnostics.
+  - Documented `vendor_toggles.ini` schema and semantics (main vs FX, multi-write behavior, per-write device scoping rules, caching strategy, and learn/merge/delete logic).
+
+### Behavioral Changes
+- None. Comments/documentation only; runtime behavior and CLI/GUI surfaces are unchanged.
+
+---
+
+## v1.4.7.1
 Date: 2026-01-19
 
 ### New Features
@@ -423,6 +440,7 @@ Date: 2026-01-19
 - **Basic Enumeration:** Listed playback (Render) and recording (Capture) devices using `IMMDeviceEnumerator` with `DEVICE_STATE_ACTIVE` only.
 - **“Listen” Toggle (Admin):** Initial registry-based enable/disable of “Listen to this device” for capture endpoints (admin required).
 - **Admin Check:** `is_admin` helper added to warn when elevation is required.
+
 
 
 

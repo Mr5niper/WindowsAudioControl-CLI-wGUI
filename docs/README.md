@@ -1,38 +1,44 @@
 # Windows Audio Control CLI + GUI
 ## audioctl.exe (pycaw/comtypes-based)
-[List devices](#list-devices)
+
+A Windows audio control utility with a scriptable CLI and an optional GUI. You can:
+
+- **Automate common tasks:** list devices, set default playback/recording endpoints, adjust volume, mute/unmute, toggle “Listen to this device,” and control Enhancements.
+- **Learn vendor toggles:** “Learn Enhancements” and “Learn FX” observe what Windows/drivers change in the registry for a specific device, then store those rules so audioctl can reproduce the same toggle later.
+- **Control individual effects (FX):** once learned, per-effect toggles (e.g., BassBoost, Loudness) can be enabled/disabled on demand, even when the driver does not provide a direct API.
+- **Query state safely:** fast, read-only commands return current volume, mute, listen, enhancements, and FX state for scripts, hotkeys, and status UIs.
+- **Use the GUI when convenient:** the GUI provides context-aware right-click actions and guided learn workflows, while still using the CLI underneath as the source of truth.
+
+audioctl is designed to be CLI-first for repeatability and automation; the GUI is a helper layer on top.
+
+---
+[Quick Start](#quick-start)
 <BR>
-[Set default endpoints](#set-default-devices-cli)
+[Command Map (Full Tree)](#command-map-full-tree)
 <BR>
-[Adjust volume / mute](#set-volume-or-muteunmute-cli)
+[List Devices](#list-devices)
 <BR>
-[Listen to this device](#listen-to-this-device-capture-only-cli)
+[Set Default Endpoints](#set-default-devices-cli)
 <BR>
-[Audio enhancements](#audio-enhancements-sysfx--vendor-toggles-cli)
+[Adjust Volume / Mute](#set-volume-or-muteunmute-cli)
 <BR>
-[Wait for a device](#wait-for-a-device-to-appear-cli)
+[Listen To This Device](#listen-to-this-device-capture-only-cli)
+<BR>
+[Audio Enhancements](#audio-enhancements-sysfx--vendor-toggles-cli)
+<BR>
+[Query Helpers (Read‑Only)](#query-helpers-readonly)
+<BR>
+[Diagnostic Discovery](#diagnostics--discovery-optional-readonly)
+<BR>
+[Wait For A Device](#wait-for-a-device-to-appear-cli)
+<BR>
+[General Exit Codes](#general-exit-codes)
 <BR>
 [Troubleshooting](#troubleshooting)
 <BR>
 [GUI (Graphical User Interface)](#gui-graphical-user-interface)
 <BR>
 
-Additional quick links:
-- [Why audioctl (CLI‑first)](#why-audioctl-clifirst)
-- [Command map (full tree)](#command-map-full-tree)
-- [Query helpers (read‑only)](#query-helpers-readonly)
-
----
-
-# Why audioctl (CLI‑first)
-Audio that actually obeys you. audioctl puts industrial‑grade Windows audio control behind a clean, scriptable CLI, then layers a friendly GUI on top. You can:
-- Script everything: list devices, set defaults, set volume/mute, flip “Listen,” and toggle Enhancements, reliably and repeatably.
-- Teach your driver new tricks: our “Learn Enhancements” and “Learn FX” capture exactly what your device changes in the registry so audioctl can reproduce it, every time.
-- Control effects precisely: once learned, per‑effect toggles (FX) like BassBoost or Loudness can be enabled/disabled on demand, even if your driver doesn’t expose a native API.
-- Trust it in automation: fast read‑only commands give you state (volume, mute, listen, enhancements, per‑effect) without side effects, perfect for validation, automated testing, hotkeys, and scripts.
-- Enjoy a better GUI: right‑click a device and you’ll see context‑aware actions with live state (including FX). Learn flows are guided, non-blocking, and safe.  While the engine remains CLI‑first.
-
-Bottom line: audioctl is CLI‑first for power and reliability. The GUI is a great assistant; the CLI is the authority.
 
 ---
 

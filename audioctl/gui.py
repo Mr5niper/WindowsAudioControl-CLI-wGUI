@@ -1,4 +1,21 @@
 # audioctl/gui.py
+#
+# GUI philosophy (important):
+# ---------------------------
+# This Tkinter GUI is intentionally a *thin front-end* over the CLI.
+# It shells out to `audioctl` commands as subprocesses and consumes JSON.
+#
+# Why we do this instead of importing/using the COM/registry layer directly:
+# - COM stability / lifetime: pycaw+comtypes and raw vtable PropertyStore calls are
+#   sensitive to COM apartment lifetime and to Python GC timing. The CLI wraps each
+#   low-level operation in its own COM init/cleanup, so the GUI can stay "pure Tk"
+#   and avoid long-lived COM objects in the UI process.
+# - Single source of truth: CLI behavior and JSON schemas are the contract used
+#   both by scripts and the GUI. The GUI stays in sync by calling the same commands.
+# - Frozen vs source mode: in a PyInstaller build `sys.executable` is the bundled
+#   exe. In source mode we invoke `python -m audioctl`. Centralizing the subprocess
+#   calls prevents a lot of environment-specific bugs.
+# ---------------------------
 import sys
 import io
 import time
@@ -13,6 +30,7 @@ import os
 from .logging_setup import resource_path, _log, _log_exc, _log_path
 from .compat import is_admin
 # GUI uses only CLI commands; it does not import low-level device helpers directly.
+# This keeps COM usage and raw registry/vtable interactions confined to the CLI layer.
 from .vendor_db import (
     _vendor_ini_default_path,
     _load_vendor_db_split,  # NEW
@@ -20,27 +38,65 @@ from .vendor_db import (
 # --- BEGIN: Non-blocking Learn runner (main Enhancements) ---
 import threading
 def _build_cli_cmd(args_list):
+    # Build the command line used to run the CLI.
+    #
+    # Frozen exe (PyInstaller):
+    #   - sys.executable is the packaged audioctl.exe; we run it directly.
+    #
+    # Source mode:
+    #   - run module form (`python -m audioctl`) to ensure imports resolve the same
+    #     way as normal CLI usage and to avoid path issues.
+    #
+    # NOTE: Centralizing this logic is important because the GUI must behave the
+    # same in both environments.
     # Same behavior as run_audioctl for building the command
     if getattr(sys, "frozen", False):
         return [sys.executable] + args_list
     else:
         return [sys.executable, "-m", "audioctl"] + args_list
 class LearnRunner:
+    # LearnRunner solves a very specific GUI problem:
+    #
+    # The CLI "learn" flows are interactive (they print a prompt and wait on stdin).
+    # If we ran them synchronously in the Tk thread, the UI would freeze.
+    #
+    # So we:
+    #   - run the CLI as a subprocess in the background,
+    #   - stream its stdout/stderr without blocking,
+    #   - detect prompt text and expose "Continue" buttons,
+    #   - optionally auto-confirm the CLI safety prompt (I UNDERSTAND) when allowed.
+    #
+    # Implementation note:
+    # We read the streams character-by-character (bufsize=0) because prompts may be
+    # printed without newline terminators; line-based reads would miss them.
     PATTERN_CONFIRM = re.compile(r"I UNDERSTAND")  # literal appears in the prompt text
+    # Snapshot prompt markers printed by the CLI during learn:
+    # - "snapshot A" is the "enabled" capture point
+    # - "snapshot B" is the "disabled" capture point
     PATTERN_A = re.compile(r"When ready, press Enter to capture snapshot A", re.IGNORECASE)
     PATTERN_B = re.compile(r"When ready, press Enter to capture snapshot B", re.IGNORECASE)
     def __init__(self, args_list, on_output, on_state, confirmed=False):
         self.args_list = args_list
         self.on_output = on_output or (lambda _t: None)
         self.on_state = on_state or (lambda _s: None)
+        # confirmed=True means we set AUDIOCTL_LEARN_CONFIRMED=1 so the CLI skips its
+        # "type I UNDERSTAND" prompt. The GUI shows its own warning UI instead.
         self.confirmed = bool(confirmed)
         self.proc = None
+        # Internal state flags that tell the GUI which "Continue" button should be enabled.
         self._waiting_a = False
         self._waiting_b = False
+        # Auto-confirm is only sent once (first prompt occurrence) to avoid spamming stdin.
         self._sent_confirm = False
+        # Collected output is kept so we can parse the final JSON summary after the process exits.
         self.collected_out = []
         self.collected_err = []
     def start(self):
+        # Start the subprocess in a way that supports interactive stdin.
+        # We keep stdout/stderr piped so we can:
+        #  - display learn progress,
+        #  - detect prompts,
+        #  - parse the final JSON object emitted by the CLI.
         env = os.environ.copy()
         if self.confirmed:
             env["AUDIOCTL_LEARN_CONFIRMED"] = "1"
@@ -57,13 +113,17 @@ class LearnRunner:
             env=env,
         )
         self.on_state("started")
+        # Read stdout/stderr concurrently so neither pipe can block the child process.
         threading.Thread(target=self._read_stream, args=(self.proc.stdout, True), daemon=True).start()
         threading.Thread(target=self._read_stream, args=(self.proc.stderr, False), daemon=True).start()
         threading.Thread(target=self._waiter, daemon=True).start()
     def _waiter(self):
+        # Wait for completion off the Tk thread; report a simple state back to GUI.
         rc = self.proc.wait()
         self.on_state("done" if rc == 0 else "error")
     def _read_stream(self, stream, is_stdout):
+        # Read stream one character at a time so we can detect prompts even if the CLI
+        # prints them without a trailing newline.
         buf = ""
         while True:
             ch = stream.read(1)
@@ -82,6 +142,7 @@ class LearnRunner:
         if buf:
             self._handle_text(buf, is_stdout)
     def _handle_text(self, text, is_stdout):
+        # Store output for later parsing and forward it to the GUI's output callback.
         try:
             if is_stdout:
                 self.collected_out.append(text)
@@ -94,6 +155,9 @@ class LearnRunner:
     def _scan_for_prompts(self, text):
         t = text if isinstance(text, str) else str(text or "")
         # Auto-confirm (only on first attempt)
+        # This is the CLI safety gate in learn modes ("type I UNDERSTAND").
+        # The GUI uses this to avoid blocking the workflow if the user already
+        # confirmed via the GUI warning dialog.
         if (not self.confirmed) and (not self._sent_confirm) and self.PATTERN_CONFIRM.search(t):
             try:
                 self.proc.stdin.write("I UNDERSTAND\n")
@@ -113,6 +177,7 @@ class LearnRunner:
             self.on_state("waiting_snapshot_b")
             return
     def continue_snapshot_a(self):
+        # Simulate pressing Enter at the "capture snapshot A" prompt.
         if self._waiting_a and self.proc and self.proc.stdin:
             try:
                 self.proc.stdin.write("\n")
@@ -121,6 +186,7 @@ class LearnRunner:
                 pass
             self._waiting_a = False
     def continue_snapshot_b(self):
+        # Simulate pressing Enter at the "capture snapshot B" prompt.
         if self._waiting_b and self.proc and self.proc.stdin:
             try:
                 self.proc.stdin.write("\n")
@@ -129,6 +195,7 @@ class LearnRunner:
                 pass
             self._waiting_b = False
     def terminate(self):
+        # Best-effort cancellation hook used when the user closes the learn UI.
         try:
             if self.proc and self.proc.poll() is None:
                 self.proc.terminate()
@@ -138,6 +205,11 @@ class LearnRunner:
 def run_audioctl(args_list, capture_json=False, expect_ok=True):
     """
     Run 'audioctl' CLI as a subprocess.
+
+    Why subprocess:
+    - The CLI is our authority for COM/registry interaction; it manages COM init/cleanup per call.
+    - The GUI stays stable by avoiding direct COM usage in the Tk process.
+
     args_list: list of strings, e.g. ["list", "--json"]
     capture_json: if True, parse stdout as JSON and return the object
     expect_ok: if True, raise RuntimeError on non-zero exit codes
@@ -145,6 +217,9 @@ def run_audioctl(args_list, capture_json=False, expect_ok=True):
       - If capture_json=False: (rc, stdout_text, stderr_text)
       - If capture_json=True: parsed JSON object
     """
+    # Frozen build vs source:
+    # - In a PyInstaller build, sys.executable is audioctl.exe and should be run directly.
+    # - In source/dev, run `python -m audioctl` so imports resolve in-package.
     if getattr(sys, "frozen", False):
         exe = sys.executable
         cmd = [exe] + args_list
@@ -156,6 +231,9 @@ def run_audioctl(args_list, capture_json=False, expect_ok=True):
         _dbg(f"GUI run_audioctl: {shlex.join(cmd)}")
     except Exception:
         pass
+    # stdout/stderr are captured so the GUI can:
+    # - parse JSON from stdout
+    # - display meaningful error details from stderr
     proc = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
@@ -184,7 +262,12 @@ def run_audioctl(args_list, capture_json=False, expect_ok=True):
     return rc, out, err
 def run_audioctl_quick_json(args_list, timeout=0.75):
     """
-    Fast one-shot CLI call with timeout. Returns parsed JSON or None on failure.
+    Fast one-shot CLI call with timeout.
+
+    Used primarily for UI freshness (context menu labels). We do *not* want to
+    block the UI waiting on a slow/hung driver call; instead we:
+      - enforce a small timeout
+      - return None on failure
     """
     if getattr(sys, "frozen", False):
         cmd = [sys.executable] + args_list
@@ -210,6 +293,13 @@ def run_audioctl_quick_json(args_list, timeout=0.75):
 def run_audioctl_interactive(args_list, prompt_patterns, expect_ok=True):
     """
     Run 'audioctl' CLI as a subprocess, line-by-line.
+
+    This is used for interactive CLI flows where the CLI prints a prompt
+    on stdout and waits for Enter on stdin. We:
+      - read stdout line-by-line
+      - when a known prompt substring appears, show a messagebox to the user
+      - then write "\n" to the subprocess stdin to continue
+
     prompt_patterns: list of (substring, title, custom_message) tuples.
       - substring: text to look for in a stdout line.
       - title: window title for the messagebox.
@@ -228,7 +318,8 @@ def run_audioctl_interactive(args_list, prompt_patterns, expect_ok=True):
         _dbg("GUI run_audioctl_interactive: " + shlex.join(cmd))
     except Exception:
         pass
-    # IMPORTANT: open stdin for writing
+    # IMPORTANT: open stdin for writing.
+    # Without stdin=PIPE we couldn't "press Enter" to advance prompts.
     proc = subprocess.Popen(
         cmd,
         stdin=subprocess.PIPE,
@@ -256,7 +347,7 @@ def run_audioctl_interactive(args_list, prompt_patterns, expect_ok=True):
                     messagebox.showinfo(title, msg_text)
                 except Exception:
                     pass
-                # Simulate pressing Enter
+                # Simulate pressing Enter (unblocks the CLI input()).
                 try:
                     proc.stdin.write("\n")
                 except Exception:
@@ -283,7 +374,7 @@ def run_audioctl_interactive(args_list, prompt_patterns, expect_ok=True):
 class AudioGUI:
     def __init__(self, root):
         self.root = root
-        self.root.title("Mr5niper's Audio Control  v1.4.7.1  01-19-2026")
+        self.root.title("Mr5niper's Audio Control  v1.4.7.2  02-02-2026")
         # Style and theme
         style = ttk.Style(self.root)
         try:
@@ -309,15 +400,24 @@ class AudioGUI:
             style.map("Treeview.Heading", background=[], relief=[], foreground=[])
         except Exception:
             pass
-        # Variables
+        # Variables / core GUI state:
+        # - include_all: whether to include disabled/disconnected endpoints in list output.
+        # - print_cmd: whether to echo the equivalent CLI commands for actions.
+        # - devices: current list from `audioctl list --json`.
+        # - item_to_device: Treeview item id -> device dict (used to resolve selection).
         self.include_all = tk.BooleanVar(value=False)
         self.print_cmd = tk.BooleanVar(value=False)
         self.devices = []
         self.item_to_device = {}
         # NEW: cache for per-device state (get-device-state JSON)
         # Key: device_id, Value: state dict from CLI
+        #
+        # This keeps the context menu responsive: we can render "Mute vs Unmute",
+        # "Enable vs Disable Listen", Enhancements state, and FX list without
+        # a blocking subprocess call on every right click.
         self.device_state_cache = {}
         # NEW: flag to suppress auto-refresh while in our own modal workflows
+        # (learn flows involve interactive prompts; refreshing during them is noisy and risky).
         self._in_modal_operation = False
         # Layout
         self.container = ttk.Frame(self.root, padding=10)
@@ -338,11 +438,14 @@ class AudioGUI:
             variable=self.print_cmd
         )
         self.chk_print_cmd.pack(side="left", padx=(10, 0))
+        # Hard runtime suppression flag used during learn flows to keep console output clean.
         self._suppress_cli_prints = False
         if not is_admin():
             admin_lbl = ttk.Label(self.topbar, text="Note: Some actions may require Administrator", foreground="#CC6600")
             admin_lbl.pack(side="right")
         # Treeview
+        # We insert group rows ("Playback", "Recording") and then device rows under them.
+        # Group rows are treated as non-selectable to avoid mis-targeted actions.
         columns = ("Index", "Name", "Flow", "Defaults", "ID")
         self.tree = ttk.Treeview(
             self.container,
@@ -371,7 +474,8 @@ class AudioGUI:
             self.tree.tag_configure("group", foreground="#202020")
         except Exception:
             pass
-        # Remove indicator element
+        # Remove indicator element (cosmetic): we don't want expand/collapse affordances
+        # for group rows; the view is always grouped and open by default.
         try:
             style.layout("Treeview.Item", [
                 ('Treeitem.padding', {
@@ -396,6 +500,8 @@ class AudioGUI:
         self.menu.add_separator()
         self.menu.add_command(label="Set Volume...", command=self.on_set_volume)
         self.menu.add_command(label="Mute/Unmute", command=self.on_toggle_mute)
+        # We store indices of dynamic items so we can update labels later with entryconfig()
+        # without rebuilding the entire menu.
         self.mute_menu_index = self.menu.index("end")
         self.menu.add_separator()
         self.listen_menu_default_label = "Toggle Listen (capture only)"
@@ -413,6 +519,8 @@ class AudioGUI:
         self.learn_menu_index = self.menu.index("end")
         # Track dynamically added FX menu items
         self._dynamic_fx_menu_items = []
+        # _pending_enh remembers what enhancements state/support we believed when building the menu.
+        # This avoids confusing "toggle" logic if the user clicks after state changed.
         self._pending_enh = None
         # Prevent overlapping menu builds (avoid racing CLI calls)
         self._menu_build_in_progress = False
@@ -431,6 +539,7 @@ class AudioGUI:
     def is_group_row(self, iid):
         return iid not in self.item_to_device
     def on_left_click(self, event):
+        # Prevent selecting group header rows and prevent header-click behaviors.
         region = self.tree.identify_region(event.x, event.y)
         if region == "heading":
             return "break"
@@ -440,6 +549,8 @@ class AudioGUI:
         if self.is_group_row(iid):
             return "break"
     def on_select_change(self, event):
+        # If a group row gets selected (e.g., via keyboard navigation), redirect
+        # selection to the first child device row, since only devices are actionable.
         sel = self.tree.selection()
         if not sel:
             return
@@ -472,6 +583,7 @@ class AudioGUI:
         try:
             from .logging_setup import _dbg
             _dbg("GUI: refresh_devices begin")
+            # Phase 1: pull the device list via CLI to keep the GUI COM-free.
             # Build CLI args: audioctl list [--all] --json
             args = ["list", "--json"]
             if self.include_all.get():
@@ -517,6 +629,8 @@ class AudioGUI:
             self.adjust_layout_to_content()
             self.root.after_idle(self.adjust_layout_to_content)
             _dbg("GUI: refresh_devices end (list/tree built)")
+            # Phase 2: background-fill state cache via get-device-state.
+            # We do this incrementally (one device at a time) so the UI remains responsive.
             # NEW: start incremental background state population
             self._schedule_state_population()
         except Exception as e:
@@ -525,7 +639,14 @@ class AudioGUI:
     def _schedule_state_population(self):
         """
         Start or restart incremental population of device_state_cache.
-        Runs on the Tk event loop, one device at a time, to keep UI responsive.
+
+        Why incremental:
+        - get-device-state can do COM reads and registry probes; running it for every
+          device synchronously would freeze the UI.
+        - Tk's event loop stays responsive when we schedule one device per tick.
+
+        Note: We clear the cache on each refresh so we never mix old state from devices
+        that may have disappeared or changed.
         """
         # Reset cache and queue
         self.device_state_cache.clear()
@@ -535,8 +656,9 @@ class AudioGUI:
         self.root.after(10, self._populate_next_device_state)
     def _populate_next_device_state(self):
         """
-        Process one device from the queue: call get-device-state
-        and cache it. Then reschedule itself until the queue is empty.
+        Process one device from the queue:
+        - call get-device-state and cache it
+        - reschedule until queue is empty
         """
         q = getattr(self, "_state_queue", None)
         if not q:
@@ -618,6 +740,11 @@ class AudioGUI:
         self.root.geometry(f"{int(w)}x{int(h)}")
         self.root.minsize(int(min(w, scr_w - margin)), int(min(h, scr_h - margin)))
     def maybe_print_cli(self, cmd_str: str):
+        # Print the equivalent CLI command for a GUI action.
+        #
+        # We suppress printing during learn flows because learn is interactive and
+        # already produces a lot of prompt output; echoing commands mid-flow is noisy
+        # and can confuse users (especially when run from a console).
         # Hard suppression: never print while a learn flow is running
         if getattr(self, "_suppress_cli_prints", False):
             return
@@ -627,6 +754,9 @@ class AudioGUI:
             except Exception:
                 pass
     def _suspend_print_cli_and_disable_checkbox(self):
+        # During learn flows, we temporarily disable "Print CLI commands" and force it off.
+        # This keeps interactive output clean and prevents command spam while the GUI is
+        # driving stdin prompts.
         # Save current checkbox value
         try:
             self._prev_print_cmd_val = bool(self.print_cmd.get())
@@ -645,6 +775,7 @@ class AudioGUI:
         # HARD suppression (blocks any attempt to print via maybe_print_cli)
         self._suppress_cli_prints = True
     def _restore_print_cli_checkbox(self):
+        # Restore checkbox and printing state after learn completes/cancels.
         # Restore checkbox and printing state
         try:
             self.print_cmd.set(bool(getattr(self, "_prev_print_cmd_val", False)))
@@ -665,8 +796,11 @@ class AudioGUI:
     def _ensure_device_state_entry(self, dev_id, flow):
         """
         Return a mutable state dict for a device in device_state_cache.
-        If not present, create a minimal entry so we can update fields
-        (mute, listen, enhancements, FX) based on GUI actions.
+
+        Why:
+        After we perform an action (mute/listen/enhancements/fx), we update the cache
+        immediately so the next context menu open shows correct labels even before
+        the next background refresh completes.
         """
         st = self.device_state_cache.get(dev_id)
         if not isinstance(st, dict):
@@ -685,6 +819,9 @@ class AudioGUI:
             st["availableFX"] = []
         return st
     def _refresh_menu_state_async(self, d):
+        # This is an asynchronous menu refresh helper (not always used).
+        # It exists to avoid blocking UI while still updating menu labels based on
+        # the CLI's aggregated `get-device-state` command.
         # d: device dict for the selection
         def worker():
             try:
@@ -706,7 +843,7 @@ class AudioGUI:
                         ls = st.get("listenEnabled", None)
                         listen_label = "Disable Listen" if ls is True else "Enable Listen" if ls is False else self.listen_menu_default_label
                         self.menu.entryconfig(self.listen_menu_index, label=listen_label, state="normal")
-                    # Enhancements
+                    # Enhancements (vendor-only): if None, there is no learned vendor method and we disable the action.
                     enh = st.get("enhancementsEnabled", None)
                     if enh is True:
                         self.menu.entryconfig(self.enh_menu_index, label="Disable Enhancements", state="normal")
@@ -717,7 +854,7 @@ class AudioGUI:
                     else:
                         self.menu.entryconfig(self.enh_menu_index, label="Enhancements (no vendor toggle)", state="disabled")
                         self._pending_enh = {"id": d["id"], "flow": d["flow"], "current": None, "supported": False}
-                    # FX submenu: rebuild with latest states
+                    # FX submenu: rebuild with latest states (INI-driven effect list with per-effect states)
                     try:
                         self.fx_menu.delete(0, "end")
                     except Exception:
@@ -749,6 +886,11 @@ class AudioGUI:
         threading.Thread(target=worker, daemon=True).start()
     def show_menu_for_item(self, event, iid=None):
         try:
+            # Context menu rendering strategy:
+            # 1) Use cached device_state_cache first so menu labels appear immediately.
+            # 2) Then do a single fast `get-device-state` call (timeout-limited) to
+            #    refresh labels right before showing the menu (reduces stale labels).
+            #
             # Prevent overlapping menu builds caused by rapid clicks
             if self._menu_build_in_progress:
                 return
@@ -807,7 +949,8 @@ class AudioGUI:
             else:
                 self.menu.entryconfig(self.listen_menu_index, label=self.listen_menu_default_label, state="disabled")
     
-            # Main enhancements toggle – use combined state (enhancementsEnabled)
+            # Main enhancements toggle – vendor-only. If CLI reports None, we disable the action.
+            # _pending_enh is stored so the click handler knows what state we based the label on.
             self._pending_enh = None
             enh_label = self.enh_menu_default_label
             current_enh_state = None
@@ -868,7 +1011,8 @@ class AudioGUI:
                 self.fx_menu.add_command(label="No effects available", state="disabled")
                 self.menu.entryconfig(self.fx_cascade_index, state="disabled")
     
-            # Refresh this device's state BEFORE posting the menu (single fast CLI call)
+            # Refresh this device's state BEFORE posting the menu (single fast CLI call).
+            # This reduces stale labels if the background cache hasn't populated yet or state changed.
             try:
                 if d:
                     st = run_audioctl_quick_json(
@@ -973,6 +1117,8 @@ class AudioGUI:
             self.show_menu_for_item(event, iid=iid)
         self.root.after(50, _open_menu_later)
     def on_set_default(self):
+        # set-default may require admin depending on system policy/driver.
+        # After success, we refresh the list so default flags update immediately.
         d = self.get_selected_device()
         if not d:
             return
@@ -1004,6 +1150,8 @@ class AudioGUI:
             messagebox.showerror("Error", f"Failed to set default:\n{e}")
             self.set_status("Failed to set default")
     def on_set_volume(self):
+        # Volume dialog uses a synced entry + slider so users can be precise but fast.
+        # Initial value is read via `get-volume` to reflect current device state.
         d = self.get_selected_device()
         if not d:
             return
@@ -1033,7 +1181,7 @@ class AudioGUI:
                     final = level
                 self.set_status(f"Volume set to {final}% for: {d['name']}")
                 _log(f"GUI action: set-volume success via CLI id={d['id']} name={d['name']} level={final}")
-                # Update cached volume for this device only
+                # Update cached volume for this device only so the menu stays accurate.
                 st = self._ensure_device_state_entry(d["id"], d["flow"])
                 st["volume"] = final
             else:
@@ -1046,6 +1194,9 @@ class AudioGUI:
             messagebox.showerror("Error", f"Failed to set volume:\n{e}")
             self.set_status("Failed to set volume")
     def on_toggle_mute(self):
+        # Mute toggle flow:
+        # - Query current mute state via `get-volume` so we know whether to send --mute or --unmute.
+        # - This avoids ambiguous "toggle" behavior if we don't know the actual state.
         d = self.get_selected_device()
         if not d:
             return
@@ -1097,6 +1248,8 @@ class AudioGUI:
             messagebox.showerror("Error", f"Failed to toggle mute:\n{e}")
             self.set_status("Failed to change mute state")
     def on_toggle_listen(self):
+        # Listen is Capture-only by Windows design; Render devices cannot be "listened to".
+        # We also query current state first to decide enable/disable deterministically.
         d = self.get_selected_device()
         if not d:
             return
@@ -1159,6 +1312,12 @@ class AudioGUI:
             messagebox.showerror("Error", f"Failed to toggle Listen:\n{e}")
             self.set_status("Failed to toggle Listen")
     def on_toggle_enhancements(self):
+        # Enhancements toggling is vendor-only at runtime.
+        # If the CLI reports enhancementsEnabled=None, it means no learned vendor method
+        # applies to this device (so we disable and instruct the user to learn).
+        #
+        # We prefer _pending_enh (captured during menu build) so we toggle from a
+        # consistent reference state even if things changed while the menu was open.
         d = self.get_selected_device()
         if not d:
             return
@@ -1208,6 +1367,7 @@ class AudioGUI:
             if enh:
                 state = enh.get("enabled", enable)
                 state_txt = "enabled" if state else "disabled"
+                # verifiedBy indicates which vendor method verified the change (e.g. vendor:<ini-section>).
                 verified_by = enh.get("verifiedBy", "vendor")
                 _log(f"Enhancements toggle via CLI for {d['name']} ({d['id']}): final={state_txt} via {verified_by}")
                 self.set_status(f"Enhancements {state_txt} for: {d['name']}")
@@ -1232,6 +1392,13 @@ class AudioGUI:
             messagebox.showerror("Error", f"Failed to toggle Enhancements:\n{e}")
             self.set_status("Failed to toggle Enhancements")
     def on_learn_enhancements(self):
+        # Learn flow entrypoint:
+        # This is a chooser that allows learning either:
+        #  - the main Enhancements vendor toggle, or
+        #  - a specific FX (effect) toggle
+        #
+        # Both ultimately delegate to the CLI interactive learn flows so the COM/registry
+        # discovery logic stays in one place.
         d = self.get_selected_device()
         if not d:
             return
@@ -1297,7 +1464,7 @@ class AudioGUI:
                 values=self._load_fx_names_for_combo()
             )
             fx_entry_widget.pack(side="left")
-            # Refresh the list each time the dropdown is opened
+            # Refresh the list each time the dropdown is opened (vendor_toggles.ini may have changed).
             try:
                 fx_entry_widget.configure(postcommand=lambda: fx_entry_widget.configure(values=self._load_fx_names_for_combo()))
             except Exception:
@@ -1356,6 +1523,10 @@ class AudioGUI:
             self.set_status("Learn failed")
     def _open_main_learn_dialog(self, d):
         self._in_modal_operation = True
+        # This variant runs the learn flow non-blocking using LearnRunner:
+        # - keep Tk alive (no frozen window),
+        # - expose Continue(A)/Continue(B) buttons that write Enter to stdin,
+        # - parse the final JSON emitted by the CLI to show a single success/failure popup.
         # Toplevel controller
         top = tk.Toplevel(self.root)
         top.title("Learn Enhancements (Non-blocking)")
@@ -1383,7 +1554,9 @@ class AudioGUI:
         btn_b.grid(row=1, column=1, sticky="w", padx=(0, 6))
         btn_cancel.grid(row=1, column=2, sticky="e", padx=(0, 6))
         btn_retry.grid(row=1, column=3, sticky="e")
-        # Single GUI confirmation (non-blocking design)
+        # Single GUI confirmation (non-blocking design).
+        # We warn once here; then LearnRunner can set AUDIOCTL_LEARN_CONFIRMED so
+        # the CLI doesn't ask the user to type I UNDERSTAND again.
         try:
             ini_path = _vendor_ini_default_path()
         except Exception:
@@ -1426,7 +1599,10 @@ class AudioGUI:
                     btn_a.configure(state="disabled")
                     btn_b.configure(state="disabled")
                     btn_retry.configure(state="disabled")
-                    # Parse final JSON (if any)
+                    # Parse final JSON (if any).
+                    # The CLI emits a JSON object at the end with either:
+                    #   - vendorLearned: learned and wrote/updated the INI
+                    #   - vendorAvailable: a method exists but may not have written a new section
                     out_text = "".join(runner.collected_out)
                     info = None
                     try:
@@ -1461,7 +1637,7 @@ class AudioGUI:
                                 )
                         except Exception:
                             pass
-                        # Refresh on success
+                        # Refresh on success so Enhancements actions become enabled immediately.
                         self.refresh_devices()
                     else:
                         try:
@@ -1515,8 +1691,13 @@ class AudioGUI:
         """
         Delegate 'Learn Enhancements' (main) to the CLI interactive flow:
           audioctl enhancements --id "<id>" --flow <Flow> --learn
-        Use popup prompts (like FX) and handle repeat passes automatically.
-        Skip CLI confirmation by setting AUDIOCTL_LEARN_CONFIRMED=1 (GUI shows its own warning).
+
+        Key behavior:
+        - GUI shows the warning once, then sets AUDIOCTL_LEARN_CONFIRMED=1 so the CLI
+          does not request the "I UNDERSTAND" confirmation again.
+        - run_audioctl_interactive watches stdout prompts and "presses Enter" for the user.
+        - We parse the final JSON out of mixed stdout text (prompts + JSON) by scanning
+          backwards for a balanced JSON object containing vendorLearned/vendorAvailable.
         """
         from .logging_setup import _log
         try:
@@ -1658,9 +1839,11 @@ class AudioGUI:
         """
         Delegate FX learn to the existing interactive CLI flow:
           audioctl enhancements --learn-fx "<FX_NAME>" ...
-        GUI reads prompts from stdout and shows them in messageboxes,
-        then sends Enter to stdin.
-        Now handles second A/B pass (A2/B2) prompts as well.
+
+        Why prompt ordering matters:
+        FX learn is a two-pass A/B (A,B then A2,B2). We match the second-pass prompts
+        first because those lines can appear later and are more specific; ordering
+        reduces the chance of matching the wrong pattern when text is similar.
         """
         from .logging_setup import _log
         try:
@@ -1782,7 +1965,7 @@ class AudioGUI:
         frm = ttk.Frame(top, padding=12)
         frm.pack(fill="both", expand=True)
         ttk.Label(frm, text=device_name, anchor="w").grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 8))
-        # Query current volume via CLI
+        # Query current volume via CLI so the dialog starts at the real device level.
         initial = 50
         try:
             data = run_audioctl(
@@ -1794,6 +1977,7 @@ class AudioGUI:
         except Exception:
             pass
         v = tk.IntVar(value=initial)
+        # Two-way sync between entry and slider must avoid feedback loops.
         syncing = {"entry": False, "scale": False}
         def _validate(P):
             if P == "":
@@ -1857,6 +2041,12 @@ class AudioGUI:
     def on_toggle_fx_live(self, fx_name, current_state):
         """
         Toggle an FX via CLI, based on the state we saw when the menu was built.
+
+        FX toggles are executed through `audioctl enhancements` sub-operations:
+          --enable-fx / --disable-fx
+
+        On success we update the cached FX state so the menu reflects the change
+        immediately.
         current_state: True (enabled), False (disabled), or None (unknown).
         """
         d = self.get_selected_device()
@@ -1912,6 +2102,7 @@ class AudioGUI:
             _log(f"GUI action: toggle-fx via CLI exception id={d['id']} name={d['name']} fx={fx_name} err={e}")
     def _load_fx_names_for_combo(self):
         # Returns a sorted list of unique FX names from vendor_toggles.ini
+        # Used only to suggest names for the learn dialog; it does not toggle anything.
         try:
             ini_path = _vendor_ini_default_path()
             db = _load_vendor_db_split(ini_path)
@@ -1941,6 +2132,11 @@ class AudioGUI:
                     break
         combo.bind("<KeyRelease>", on_keyrelease, add="+")
 def launch_gui():
+    # GUI bootstrap:
+    # - loads icon (best-effort)
+    # - installs safe shutdown hooks
+    # - routes Tk callback exceptions into our log file so crashes are diagnosable
+    #   even when launched without a console (double-clicked EXE).
     _log("launch_gui: creating Tk root")
     root = tk.Tk()
     try:
@@ -1970,6 +2166,7 @@ def launch_gui():
     except Exception:
         pass
     def _tk_report_callback_exception(exc, val, tb):
+        # Tk normally swallows callback exceptions; we log them and show a dialog with the log path.
         try:
             _log_exc("TK CALLBACK EXCEPTION", (exc, val, tb))
         except Exception:
@@ -1989,5 +2186,4 @@ def launch_gui():
         _log_exc("MAINLOOP EXCEPTION")
     _log("launch_gui: mainloop exited")
     return 0
-
 
