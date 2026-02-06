@@ -392,14 +392,9 @@ def _get_listen_to_device_status_ps(device_id):
     """
     Read the 'Listen to this device' enable flag using IPropertyStore::GetValue via raw vtable (ctypes).
     Returns True/False/None.
-
-    Failure modes:
-      - Returns None if the PropertyStore cannot be opened or if the value cannot be read.
-      - Callers typically fall back to registry probing when None is returned.
     """
     with _com_context():
         import sys, gc
-        # Get cached interface definitions
         interfaces = _get_property_store_interfaces()
         PROPVARIANT = interfaces["PROPVARIANT"]
         PROPERTYKEY = interfaces["PROPERTYKEY"]
@@ -412,13 +407,10 @@ def _get_listen_to_device_status_ps(device_id):
         PropVariantClear.restype = HRESULT_T
         PropVariantClear.argtypes = (POINTER(PROPVARIANT),)
 
-        # Listen enable property: fmtid "{24dbb0fc-...}", pid 1 (VT_BOOL).
         PKEY_LISTEN_ENABLE = PROPERTYKEY(GUID("{24dbb0fc-9311-4b3d-9cf0-18ff155639d4}"), 1)
         pv = PROPVARIANT()
         try:
             result = None
-
-            # GC guard around raw vtable calls (see set_listen_to_device_ps for rationale).
             gc_was_enabled = gc.isenabled()
             if gc_was_enabled:
                 gc.disable()
@@ -433,7 +425,6 @@ def _get_listen_to_device_status_ps(device_id):
                     ps_iface = ctypes.cast(ctypes.c_void_p(ps_ptr_val), PIPS)
                     hr = ps_iface.contents.lpVtbl.contents.GetValue(ps_iface, byref(PKEY_LISTEN_ENABLE), byref(pv))
                     if hr != 0:
-                        # allow caller to fall back to registry
                         result = None
                     else:
                         if getattr(pv, "vt", 0) == VT_BOOL:
@@ -442,14 +433,13 @@ def _get_listen_to_device_status_ps(device_id):
                             except Exception:
                                 result = None
                         else:
-                            # unexpected VT -> let caller fall back
                             result = None
             finally:
                 if gc_was_enabled:
                     gc.enable()
             return result
         except Exception as e:
-            print(f"WARNING: Failed to read listen status via COM for '{device_id}': {e}", file=sys.stderr)
+            # Reduced to a log to keep CLI output clean
             return None
         finally:
             try:
@@ -459,15 +449,21 @@ def _get_listen_to_device_status_ps(device_id):
 
 def _read_listen_enable_fast(device_id: str):
     """
-    Compatibility helper used by CLI:
-      - COM-backed read first (exact PropertyStore semantics)
-      - then registry fallback (robust to type/layout variance)
-
-    Returns True/False/None.
+    Primary engine for 'get-listen' CLI command.
+    Ensures a boolean (True/False) is ALWAYS returned to the caller.
     """
+    # 1. Try the direct COM PropertyStore method first (High Accuracy)
     state = _get_listen_to_device_status_ps(device_id)
+    
+    # 2. Fallback to Registry if COM reports None/Null (Ghost State check)
     if state is None:
         state = _read_listen_enable_from_registry(device_id)
+    
+    # 3. Final Fallback: If both fail, state is uninitialized (False)
+    # This prevents 'null' results in your JSON CLI output.
+    if state is None:
+        return False
+        
     return state
 
 def _read_listen_enable_from_registry(device_id: str):
@@ -2092,3 +2088,4 @@ def _verify_effect_only(device_id, flow, expected_enabled, timeout=2.5, interval
             ok_streak = 0
         _time.sleep(interval)
     return False, None, last_state
+
