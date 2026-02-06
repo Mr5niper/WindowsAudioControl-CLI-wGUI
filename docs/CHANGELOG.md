@@ -1,5 +1,25 @@
 # AUDIOCTL.PY CHANGELOG
 
+## v1.4.7.3 - [In Validation]
+Date: 2026-02-06
+Branch: `Develop`
+
+### Fixes
+- **Ghost State Mitigation (Issue #26):**
+  - Resolved an issue where `get-listen` would return `null` on fresh Windows installations or uninitialized devices.
+  - Implemented a definitive `False` fallback in `_read_listen_enable_fast` to ensure a stable boolean return for automated test sequences.
+- **CLI/Device Engine Accuracy:**
+  - Ported high-accuracy raw vtable polling methods from earlier GUI versions directly into the core `devices.py` engine.
+  - Isolated "Listen" polling logic within the CLI process to prevent cross-thread Garbage Collection (GC) interference and access violations.
+
+### Improvements
+- **Automation Reliability:**
+  - Guaranteed consistent JSON output shapes for all "get" commands, ensuring downstream scripts never encounter unexpected `null` types during device state queries.
+- **Validation Hardening:**
+  - Added logic to treat uninitialized PropertyStore values as `False` by default, aligning the tool's behavior with the actual state of the Windows Audio subsystem.
+
+---
+
 ## v1.4.7.2 - [Current]
 Date: 2026-02-02
 
@@ -440,6 +460,7 @@ Date: 2026-01-19
 - **Basic Enumeration:** Listed playback (Render) and recording (Capture) devices using `IMMDeviceEnumerator` with `DEVICE_STATE_ACTIVE` only.
 - **“Listen” Toggle (Admin):** Initial registry-based enable/disable of “Listen to this device” for capture endpoints (admin required).
 - **Admin Check:** `is_admin` helper added to warn when elevation is required.
+
 
 
 
