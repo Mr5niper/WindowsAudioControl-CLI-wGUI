@@ -18,7 +18,6 @@
 #   - raw MMDevices snapshot collection and diff helpers
 # This module uses those raw snapshots/diffs to decide what to write/read for a
 # specific driver/device, and persists that decision into vendor_toggles.ini.
-
 import os
 import re
 import configparser
@@ -80,6 +79,150 @@ def _parse_bin_hex(text: str) -> bytes:
         return b""
     return bytes.fromhex(t)
 
+# --- Heuristic FX matching helpers (pattern + registry signature) ---
+def _fx_pattern_match(entry: dict, device_name: str) -> bool:
+    """
+    Regex match against entry['device_name_pattern'] (case-insensitive).
+    Returns False if no pattern, no name, or invalid regex.
+    """
+    pat = (entry.get("device_name_pattern") or "").strip()
+    if not pat or not device_name:
+        return False
+    try:
+        return re.search(pat, device_name, re.IGNORECASE) is not None
+    except Exception:
+        return False
+
+def _fx_signature_matches_legacy(entry: dict, device_id: str, flow: str) -> bool:
+    """
+    Legacy (single DWORD) FX spoof verification:
+      - read current DWORD from registry (prefer entry subkey if present, else try both)
+      - confirm current value equals enable or disable payload
+    """
+    val_name = (entry.get("value_name") or "").strip().lower()
+    if not val_name:
+        return False
+    try:
+        en_val = int(entry.get("enable", entry.get("dword_enable")))
+        di_val = int(entry.get("disable", entry.get("dword_disable")))
+    except Exception:
+        return False
+
+    # Determine which subkeys to probe (try learned subkey first if present)
+    subkeys = []
+    subkey = (entry.get("subkey") or "").strip()
+    if subkey:
+        subkeys.append("Properties" if subkey.lower().startswith("prop") else "FxProperties")
+    subkeys.extend(["FxProperties", "Properties"])
+
+    seen = set()
+    for subk in subkeys:
+        if subk in seen:
+            continue
+        seen.add(subk)
+        base = _endpoint_base_path(device_id, flow, subk)
+        if not base:
+            continue
+        # Read both hives cheaply; if both readable and disagree, prefer newest key.
+        cu_val, cu_typ = _fast_read_one("HKCU", base, val_name)
+        lm_val, lm_typ = _fast_read_one("HKLM", base, val_name)
+        cu_state = None
+        lm_state = None
+        if cu_typ == winreg.REG_DWORD:
+            try:
+                v = int(cu_val)
+                if v == en_val or v == di_val:
+                    cu_state = v
+            except Exception:
+                cu_state = None
+        if lm_typ == winreg.REG_DWORD:
+            try:
+                v = int(lm_val)
+                if v == en_val or v == di_val:
+                    lm_state = v
+            except Exception:
+                lm_state = None
+
+        if cu_state is not None and lm_state is None:
+            return True
+        if lm_state is not None and cu_state is None:
+            return True
+        if cu_state is not None and lm_state is not None:
+            if cu_state == lm_state:
+                return True
+            # Disagree: prefer most recently written key (same heuristic as fast reads)
+            tcu = _fast_key_lastwrite("HKCU", base)
+            tlm = _fast_key_lastwrite("HKLM", base)
+            if isinstance(tcu, int) and isinstance(tlm, int):
+                return True  # both are valid signatures; whichever is newest is "real"
+            return True
+    return False
+
+def _fx_signature_matches_multi(entry: dict, device_id: str, flow: str) -> bool:
+    """
+    Multi-write FX spoof verification:
+      - for applicable writes (universal + write{i}_devices for this guid),
+        check that current registry value matches either enable or disable payload
+        with the correct type.
+      - require quorum_threshold fraction to match to avoid ghost FX.
+    """
+    writes_all = entry.get("writes") or []
+    if not writes_all:
+        return False
+    guid_lc = _guid_of(device_id)
+    writes = [w for w in writes_all if _write_applies_to_guid(w, guid_lc)]
+    if not writes:
+        return False
+
+    try:
+        qt = float(entry.get("quorum_threshold", 0.60))
+    except Exception:
+        qt = 0.60
+    qt = max(0.50, min(0.95, qt))
+
+    ok = 0
+    total = 0
+    for w in writes:
+        subk = (w.get("subkey") or "").strip() or "FxProperties"
+        name = (w.get("name") or "").strip().lower()
+        if not name:
+            continue
+        base = _endpoint_base_path(device_id, flow, subk)
+        if not base:
+            continue
+        total += 1
+
+        # Read both hives; accept match in either.
+        cu_val, cu_typ = _fast_read_one("HKCU", base, name)
+        lm_val, lm_typ = _fast_read_one("HKLM", base, name)
+
+        # enable signature
+        if _value_equals(w.get("enable"), w.get("type_enable"), cu_val, cu_typ) or \
+           _value_equals(w.get("enable"), w.get("type_enable"), lm_val, lm_typ):
+            ok += 1
+            continue
+        # disable signature
+        if _value_equals(w.get("disable"), w.get("type_disable"), cu_val, cu_typ) or \
+           _value_equals(w.get("disable"), w.get("type_disable"), lm_val, lm_typ):
+            ok += 1
+            continue
+
+    if total <= 0:
+        return False
+    return (ok / float(total)) >= qt
+
+def _fx_entry_spoof_applies(entry: dict, device_id: str, flow: str, device_name: str) -> bool:
+    """
+    True if:
+      - device_name_pattern matches device_name AND
+      - registry signature indicates this entry is likely applicable to this endpoint.
+    """
+    if not _fx_pattern_match(entry, device_name):
+        return False
+    if entry.get("multi_write"):
+        return _fx_signature_matches_multi(entry, device_id, flow)
+    return _fx_signature_matches_legacy(entry, device_id, flow)
+
 def _key_tuple(rec):
     # Snapshot records are keyed by (hive, flow, subkey, name). That identity is
     # stable across snapshots and is what we diff when learning.
@@ -96,12 +239,10 @@ def _build_fx_multiwrite_from_snapshots(target, snapA, snapB):
     Build a comprehensive multi-write plan from two snapshots (A=enabled, B=disabled).
     Includes both FxProperties and Properties under HKCU/HKLM for the endpoint GUID.
     Each write contains enable/disable raw values and per-side types.
-
     Why multi-write exists:
       Some drivers toggle an effect by changing multiple keys and types (including REG_BINARY
       blobs). Reproducing the UI behavior requires replaying the set of writes, not just one
       DWORD.
-
     Returns a list of write dicts: {
       'hive','subkey','name',
       'type_enable','type_disable',
@@ -174,7 +315,6 @@ def _vendor_ini_default_path():
     Return a default vendor_toggles.ini path:
     - Prefer next to the EXE (or module) if writable.
     - Otherwise, fall back to a user-writable location under %LOCALAPPDATA%\audioctl\vendor_toggles.ini.
-
     Why:
       The EXE directory may be under Program Files (not writable without elevation).
       Learn flows need to append/update the INI, so we prefer a per-user writable location
@@ -190,14 +330,17 @@ def _vendor_ini_default_path():
             return True
         except Exception:
             return False
+
     try:
         base = _exe_dir()
     except Exception:
         base = os.getcwd()
+
     preferred_dir = base
     preferred_path = os.path.join(preferred_dir, "vendor_toggles.ini")
     if _is_writable_dir(preferred_dir):
         return preferred_path
+
     # Fallback to user-writable location
     local = os.environ.get("LOCALAPPDATA")
     if not local:
@@ -221,7 +364,6 @@ def _load_vendor_db_split(ini_path=None):
     Load vendor toggles from INI. Returns dict with 'main' and 'fx' lists.
     Uses a lightweight cache keyed by (absolute path, mtime) so we don't
     re-parse or re-fail on a missing file for every CLI call.
-
     INI schema summary (debugger-oriented):
       MAIN entry (type default is main):
         - [section]
@@ -231,14 +373,12 @@ def _load_vendor_db_split(ini_path=None):
         - flows = Render,Capture
         - subkey = FxProperties or Properties (learned location)
         - devices = comma-separated endpoint GUIDs (required)
-
       FX entry (legacy single DWORD):
         - type = fx
         - fx_name
         - value_name / dword_enable / dword_disable
         - hives / flows (optional filters)
         - devices list required
-
       FX entry (multi_write):
         - type = fx
         - fx_name
@@ -266,6 +406,7 @@ def _load_vendor_db_split(ini_path=None):
     except OSError:
         exists = False
         mtime = None
+
     # If file does not exist, cache and return empty DB
     if not exists:
         if (_VENDOR_DB_CACHE.get("path") == path and
@@ -276,10 +417,12 @@ def _load_vendor_db_split(ini_path=None):
         _VENDOR_DB_CACHE["mtime"] = None
         _VENDOR_DB_CACHE["data"] = {"main": [], "fx": []}
         return _VENDOR_DB_CACHE["data"]
+
     # If path and mtime match cache, reuse parsed DB
     if (_VENDOR_DB_CACHE.get("path") == path and
             _VENDOR_DB_CACHE.get("mtime") == mtime):
         return _VENDOR_DB_CACHE.get("data") or {"main": [], "fx": []}
+
     # Otherwise parse INI fresh (same logic as before)
     cfg = configparser.ConfigParser()
     entries = {"main": [], "fx": []}
@@ -291,6 +434,7 @@ def _load_vendor_db_split(ini_path=None):
         _VENDOR_DB_CACHE["mtime"] = mtime
         _VENDOR_DB_CACHE["data"] = entries
         return entries
+
     for sec in cfg.sections():
         try:
             entry_type = cfg.get(sec, "type", fallback="main").strip().lower()
@@ -408,6 +552,7 @@ def _load_vendor_db_split(ini_path=None):
                     entries["main"].append(entry)
         except Exception:
             continue
+
     # Update cache with newly parsed DB
     _VENDOR_DB_CACHE["path"] = path
     _VENDOR_DB_CACHE["mtime"] = mtime
@@ -435,7 +580,6 @@ def _vendor_entry_applies(entry, device_id, flow):
     - Checks devices membership and flows
     - HKCU only (per your environment)
     - Probes both FxProperties and Properties for value_name
-
     Why we probe for existence:
       Some drivers only create the relevant value after the user toggles the setting
       once in the Windows UI. This avoids writing to a "learned but not initialized"
@@ -475,11 +619,9 @@ def _set_vendor_entry_state(entry, device_id, flow, enable):
     r"""
     Write vendor entry DWORD to desired value across configured hives.
     Uses MAIN 'subkey' (where it came from) exactly.
-
     Scope rule:
       We write to the learned location (FxProperties vs Properties) recorded in the INI
       so we don't guess at runtime.
-
     Admin note:
       HKLM writes typically require Administrator privileges.
     """
@@ -555,7 +697,6 @@ def _append_fx_ini_entry_multi(ini_path, section_name, fx_name, device_name, wri
       write{i}_enable = <value>       ; int for DWORD, text for SZ, 'hex:..' for binary
       write{i}_disable = <value>
       ; optional: flows/hives to scope listing (not used for multi-write operations)
-
     Multi-write notes:
       - Some drivers require multiple writes to reproduce an effect toggle.
       - write{i}_devices is optional and implements per-write scoping:
@@ -618,6 +759,7 @@ def _read_vendor_entry_state(entry, device_id, flow):
     # values can represent one effect state.
     if entry.get("type") == "fx" and entry.get("multi_write"):
         return _read_decider_state(entry, device_id, flow)
+
     # MAIN (enhancements) or legacy single-DWORD FX
     val_name = (entry.get("value_name") or "").strip().lower()
     if not val_name:
@@ -627,6 +769,7 @@ def _read_vendor_entry_state(entry, device_id, flow):
     base = _endpoint_base_path(device_id, flow, subkey)
     if not base:
         return None
+
     # Prefer HKCU, then HKLM if HKCU missing
     hive_order = []
     configured = entry.get("hives") or []
@@ -642,6 +785,7 @@ def _read_vendor_entry_state(entry, device_id, flow):
         "HKCU": winreg.HKEY_CURRENT_USER,
         "HKLM": winreg.HKEY_LOCAL_MACHINE,
     }
+
     # Accept either key naming for enable/disable
     try:
         en = int(entry.get("enable"))
@@ -652,6 +796,7 @@ def _read_vendor_entry_state(entry, device_id, flow):
             di = int(entry.get("dword_disable"))
         except Exception:
             return None
+
     for hname in hive_order:
         hive = hive_map.get(hname)
         if hive is None:
@@ -679,7 +824,6 @@ def _read_vendor_entry_state(entry, device_id, flow):
 def _verify_vendor_entry(entry, device_id, flow, expected_enabled, timeout=2.5, interval=0.2, consecutive=2):
     """
     Poll the same vendor DWORD until it reflects expected_enabled for 'consecutive' reads or timeout.
-
     Why consecutive reads:
       Some drivers update multiple keys asynchronously; requiring the same answer
       multiple times avoids transient states being reported as final.
@@ -956,8 +1100,8 @@ def _fast_read_vendor_entry_state(entry, device_id, flow):
                     times[hn] = _fast_key_lastwrite(hn, base)
                     continue
                 try:
-                    t_en = _reg_name_to_type(w.get("type_enable"))
-                    t_di = _reg_name_to_type(w.get("type_disable"))
+                    _ = _reg_name_to_type(w.get("type_enable"))
+                    _ = _reg_name_to_type(w.get("type_disable"))
                 except Exception:
                     states[hn] = None
                     times[hn] = _fast_key_lastwrite(hn, base)
@@ -989,6 +1133,7 @@ def _fast_read_vendor_entry_state(entry, device_id, flow):
                     pass
                 return s_rec
             return None
+
         # MAIN / legacy single-DWORD (heuristic: compare hives, use newer key)
         val_name = (entry.get("value_name") or "").strip().lower()
         subkey = (entry.get("subkey") or "FxProperties").strip()
@@ -1267,7 +1412,6 @@ def _cleanup_conflicting_toggles(ini_path, section_name, guid_lc, keep_idx, keep
     Ensure guid_lc is NOT listed on any other toggle in this bucket that has
     the same identity (hive/subkey/name) but different payload than keep_write.
     keep_idx is the index of the write we want to keep for this GUID.
-
     Why:
       A bucket can hold multiple devices. If two write blocks have the same identity
       but different payload, attaching a GUID to both would make toggling ambiguous.
@@ -1383,7 +1527,6 @@ def _collect_registry_samples(device_id, repeats=3, delay=0.15):
     """
     Collect several registry-only samples for the current device state to filter UI noise.
     repeats >= 1; delay in seconds between samples.
-
     Why:
       Registry dumps are noisy during UI operations; sampling lets us keep only stable keys
       for FX learning (reduces false positives).
@@ -1404,7 +1547,6 @@ def _stable_registry_map(samples):
       key -> {'type': typ, 'value': dataRaw} only if the key's type and value are identical
       across ALL samples. Keys that change (type OR dataRaw) are dropped.
     Keys are tuples: (hive, flow, subkey, name).
-
     This is the core noise-filtering step for FX learn: it removes keys that fluctuate
     for reasons unrelated to the specific effect toggle.
     """
@@ -1438,7 +1580,6 @@ def _build_fx_multiwrite_from_stable_maps(target, stableA, stableB):
     - Type must match and value must differ
     - Encode values into INI-friendly forms (int/str/'hex:..')
     - Order results so the first write (decider) is the most stable-looking signal
-
     Scoring preference:
       FxProperties + DWORD 0/1 flips are treated as stronger signals than REG_BINARY changes.
     """
@@ -1496,11 +1637,9 @@ def _build_fx_multiwrite_from_stable_maps(target, stableA, stableB):
 def _learn_vendor_from_discovery_and_write_ini(target, ini_path=None, prefer_hkcu=True):
     """
     Manual learn using discovery flow.
-
     Safety/UX:
       Requires explicit confirmation ("I UNDERSTAND") unless AUDIOCTL_LEARN_CONFIRMED=1 is set
       (GUI uses the env var after showing its own warning dialog).
-
     Learn behavior:
       - Captures A/B snapshots (user sets enabled, then disabled)
       - Chooses a candidate DWORD flip and records the subkey where it occurred
@@ -1700,7 +1839,6 @@ def _perform_multi_writes(entry, device_id, flow, enable):
     """
     Write all applicable toggles (universal + for this GUID).
     Returns True if ALL applicable writes succeeded; False otherwise.
-
     Notes:
       - Multi-write FX can include HKLM writes; those may require Administrator privileges.
       - We treat any failed applicable write as a failure because partial application
@@ -1937,11 +2075,9 @@ def _delete_fx_for_guid(fx_name, device_id, ini_path=None):
       - Keep write blocks even if they end up with empty devices (applies to nobody); runtime ignores them
       - If no devices remain in the bucket (section devices empty), we leave the section; the loader will ignore it
     Returns (True, info_dict) or (False, reason_str)
-
     Delete semantics (important):
       We remove GUID associations rather than deleting the whole FX bucket. Buckets
       can be shared between multiple devices and keep useful learned history.
-
       If a write block was universal (no write{i}_devices line), delete converts it
       into an explicit scoped list of remaining devices so the removed GUID is excluded.
       Empty write{i}_devices lines are preserved intentionally (they mean "applies to nobody").
@@ -2080,12 +2216,10 @@ def _delete_fx_for_guid(fx_name, device_id, ini_path=None):
 def _learn_fx_and_write_ini(target, fx_name, snapA, snapB, ini_path=None, prefer_hkcu=True, snapA2=None, snapB2=None):
     """
     Learn an FX toggle from captured snapshots.
-
     Two-pass behavior:
       If snapA2/snapB2 is provided, that second pair is treated as authoritative.
       The first A/B is used to prime/initialize driver state (many drivers create keys
       or stabilize values only after first toggle).
-
     Multi-write merge behavior:
       - If an identical identity+payload already exists in the bucket, append this GUID
         to that write's write{i}_devices.
@@ -2273,35 +2407,52 @@ def _learn_fx_and_write_ini(target, fx_name, snapA, snapB, ini_path=None, prefer
         "dword_disable": dword_disable
     }
 
-def _list_fx_for_device(device_id, flow, ini_path=None):
-    """List all available FX for a device (INI-only, devices membership). Returns [{'fx_name','entry'}]."""
+def _list_fx_for_device(device_id, flow, ini_path=None, device_name=None):
+    """
+    List all available FX for a device.
+
+    Matching (read-only; does NOT modify INI):
+      1) Direct GUID membership in section 'devices' (fast)
+      2) If device_name provided: pattern match + registry signature match ("spoof")
+    Returns [{'fx_name','entry'}]
+    """
     db = _load_vendor_db_split(ini_path)
     guid = _extract_endpoint_guid_from_device_id(device_id)
     if not guid:
         return []
     out = []
     for entry in db.get("fx") or []:
-        devs = set((entry.get("devices") or []))
-        if devs and guid.lower() in {d.lower() for d in devs}:
+        devs = {d.lower() for d in (entry.get("devices") or [])}
+        if devs and guid.lower() in devs:
             e = dict(entry)
             e["source"] = "ini"
             out.append({"fx_name": entry.get("fx_name"), "entry": e})
+            continue
+        # Spoofing path (requires caller-provided name)
+        if device_name:
+            try:
+                if _fx_entry_spoof_applies(entry, device_id, flow, device_name):
+                    e = dict(entry)
+                    e["source"] = "ini"
+                    e["_matchedBy"] = "pattern+signature"
+                    out.append({"fx_name": entry.get("fx_name"), "entry": e})
+            except Exception:
+                continue
     return out
 
-def _find_fx_for_device(device_id, flow, fx_name, ini_path=None):
-    """Find FX entries matching device and effect name. INI entries only, devices membership enforced."""
-    db = _load_vendor_db_split(ini_path)
-    guid = _extract_endpoint_guid_from_device_id(device_id)
-    if not guid:
-        return []
+def _find_fx_for_device(device_id, flow, fx_name, ini_path=None, device_name=None):
+    """
+    Find FX entries matching device and effect name.
+    Uses same match rules as _list_fx_for_device (GUID or spoof if device_name provided).
+    """
     fx_lc = str(fx_name or "").strip().lower()
+    if not fx_lc:
+        return []
+    lst = _list_fx_for_device(device_id, flow, ini_path=ini_path, device_name=device_name)
     matches = []
-    for entry in db.get("fx") or []:
-        devs = set((entry.get("devices") or []))
-        if not devs or guid.lower() not in {d.lower() for d in devs}:
-            continue
-        if (entry.get("fx_name", "").strip().lower() == fx_lc):
-            e = dict(entry)
+    for item in lst:
+        if (item.get("fx_name") or "").strip().lower() == fx_lc:
+            e = dict(item.get("entry") or {})
             e["source"] = "ini"
             matches.append(e)
     return matches
@@ -2311,7 +2462,6 @@ def _apply_enhancements(device_id, flow, enable, prefer_hklm=False, allow_univer
     Vendor-only policy:
       1) Try vendor toggles: INI vendors only (per-device).
       2) If no vendor match, return failure (no Windows fallback).
-
     Runtime contract:
       Returns (False, "no-vendor-method", None) when no applicable vendor entry is known.
     """
@@ -2340,7 +2490,6 @@ def _enhancements_supported(device_id, flow):
     Returns True if any vendor entry applies:
       - INI vendors only, per-device.
     Returns False otherwise. No Windows checks.
-
     This is a membership check used by CLI/GUI to decide if a device has a learned vendor method.
     """
     try:
@@ -2356,18 +2505,17 @@ def _enhancements_supported(device_id, flow):
         return False
     return False
 
-def _apply_fx(device_id, flow, fx_name, enable, ini_path=None):
+def _apply_fx(device_id, flow, fx_name, enable, ini_path=None, device_name=None):
     """
     Toggle a learned FX effect (INI-only).
     - If the FX entry is multi_write, apply all configured writes for the target state.
     - Otherwise, legacy single-DWORD behavior.
     Returns (success, verified_by, final_state).
-
     Verification:
       - multi_write: read back state using decider/quorum logic after writing
       - legacy: poll the single learned DWORD until stable
     """
-    entries = _find_fx_for_device(device_id, flow, fx_name, ini_path)
+    entries = _find_fx_for_device(device_id, flow, fx_name, ini_path, device_name=device_name)
     if not entries:
         return False, None, None
     entry = entries[0]
