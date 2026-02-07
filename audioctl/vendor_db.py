@@ -37,7 +37,6 @@ from .devices import (
     _short_settle,
     _dump_mmdevices_all_values,
 )
-
 # --- Helpers for multi-write FX entries ---
 # Registry encoding helpers:
 #   INI stores types symbolically (REG_DWORD/REG_SZ/REG_BINARY) and stores values in
@@ -50,7 +49,6 @@ def _reg_type_to_name(typ: int) -> str:
     if typ == winreg.REG_SZ:    return "REG_SZ"
     if typ == winreg.REG_BINARY:return "REG_BINARY"
     return f"REG_{typ}"
-
 def _reg_name_to_type(name: str) -> int:
     nm = (name or "").strip().upper()
     if nm == "REG_DWORD":  return winreg.REG_DWORD
@@ -58,13 +56,11 @@ def _reg_name_to_type(name: str) -> int:
     if nm == "REG_BINARY": return winreg.REG_BINARY
     # Fallback; unsupported types will be ignored gracefully
     raise ValueError(f"Unsupported registry type: {name}")
-
 def _format_bin_hex(data_hex_no_prefix: str) -> str:
     # REG_BINARY values are stored in INI in "hex:aa,bb,cc" form (human-readable but exact).
     """Return 'hex:' form for INI readability from raw hex (no prefix)."""
     h = data_hex_no_prefix or ""
     return "hex:" + ",".join(h[i:i+2] for i in range(0, len(h), 2))
-
 def _parse_bin_hex(text: str) -> bytes:
     """
     Accepts:
@@ -79,7 +75,6 @@ def _parse_bin_hex(text: str) -> bytes:
     if t == "":
         return b""
     return bytes.fromhex(t)
-
 # --- Device-name -> GUID bucket mapping (for INI readability; case-insensitive) ---
 def _canon_device_name(name: str) -> str:
     """Canonicalize a friendly name for bucketing (case-insensitive)."""
@@ -87,7 +82,6 @@ def _canon_device_name(name: str) -> str:
         return (name or "").strip().casefold()
     except Exception:
         return (name or "").strip().lower()
-
 def _name_bucket_id(name: str) -> str:
     """
     Stable bucket id derived from canonicalized name.
@@ -98,7 +92,6 @@ def _name_bucket_id(name: str) -> str:
     canon = _canon_device_name(name)
     h = hashlib.sha1(canon.encode("utf-8", "replace")).hexdigest()[:8]
     return h
-
 def _append_guid_to_name_bucket(ini_path: str, section_name: str, device_name: str, guid_lc: str):
     """
     Maintain per-section device name buckets:
@@ -114,13 +107,11 @@ def _append_guid_to_name_bucket(ini_path: str, section_name: str, device_name: s
     key_name = f"name_{bid}"
     key_guids = f"guids_{bid}"
     sec_hdr = f"[{section_name}]"
-
     try:
         with open(ini_path, "r", encoding="utf-8", errors="replace") as f:
             lines = f.read().splitlines(keepends=True)
     except FileNotFoundError:
         lines = []
-
     # Locate section
     sec_start = None
     sec_end = len(lines)
@@ -133,7 +124,6 @@ def _append_guid_to_name_bucket(ini_path: str, section_name: str, device_name: s
             else:
                 sec_end = i
                 break
-
     if sec_start is None:
         # Section missing: create minimal section (best-effort)
         new = []
@@ -146,22 +136,18 @@ def _append_guid_to_name_bucket(ini_path: str, section_name: str, device_name: s
         with open(ini_path, "w", encoding="utf-8", errors="replace") as f:
             f.writelines(lines)
         return
-
     # Find existing name_<id> and guids_<id>
     name_idx = None
     guids_idx = None
     existing_guids = None
-
     re_name = re.compile(rf"^\s*{re.escape(key_name)}\s*=\s*(.*)$", re.IGNORECASE)
     re_guids = re.compile(rf"^\s*{re.escape(key_guids)}\s*=\s*(.*)$", re.IGNORECASE)
-
     for i in range(sec_start + 1, sec_end):
         m = re_name.match(lines[i])
         if m:
             name_idx = i
             # keep first-seen display name; do not overwrite (human readability)
             break
-
     for i in range(sec_start + 1, sec_end):
         m = re_guids.match(lines[i])
         if m:
@@ -169,7 +155,6 @@ def _append_guid_to_name_bucket(ini_path: str, section_name: str, device_name: s
             txt = (m.group(1) or "").strip()
             existing_guids = [x.strip().lower() for x in txt.split(",") if x.strip()]
             break
-
     # Ensure name_<id> exists
     if name_idx is None:
         insert_at = sec_end
@@ -180,7 +165,6 @@ def _append_guid_to_name_bucket(ini_path: str, section_name: str, device_name: s
         sec_end += 1
         if insert_at <= sec_end:
             sec_end += 0
-
     # Ensure guids_<id> contains guid
     if existing_guids is None:
         # create guids line
@@ -202,10 +186,8 @@ def _append_guid_to_name_bucket(ini_path: str, section_name: str, device_name: s
                     lines.insert(insert_at, "\n")
                     insert_at += 1
                 lines.insert(insert_at, new_line)
-
     with open(ini_path, "w", encoding="utf-8", errors="replace") as f:
         f.writelines(lines)
-
 # --- Heuristic FX matching helpers (pattern + registry signature) ---
 def _fx_pattern_match(entry: dict, device_name: str) -> bool:
     """
@@ -219,7 +201,6 @@ def _fx_pattern_match(entry: dict, device_name: str) -> bool:
         return re.search(pat, device_name, re.IGNORECASE) is not None
     except Exception:
         return False
-
 def _fx_signature_matches_legacy(entry: dict, device_id: str, flow: str) -> bool:
     """
     Legacy (single DWORD) FX spoof verification:
@@ -281,7 +262,6 @@ def _fx_signature_matches_legacy(entry: dict, device_id: str, flow: str) -> bool
                 return True  # both are valid signatures; whichever is newest is "real"
             return True
     return False
-
 def _fx_signature_matches_multi(entry: dict, device_id: str, flow: str) -> bool:
     """
     Multi-write FX spoof verification:
@@ -329,7 +309,6 @@ def _fx_signature_matches_multi(entry: dict, device_id: str, flow: str) -> bool:
     if total <= 0:
         return False
     return (ok / float(total)) >= qt
-
 def _fx_entry_spoof_applies(entry: dict, device_id: str, flow: str, device_name: str) -> bool:
     """
     True if:
@@ -419,13 +398,11 @@ def _key_tuple(rec):
     # Snapshot records are keyed by (hive, flow, subkey, name). That identity is
     # stable across snapshots and is what we diff when learning.
     return (str(rec.get("hive")), str(rec.get("flow")), str(rec.get("subkey")), str(rec.get("name")))
-
 def _index_registry_list(lst):
     idx = {}
     for e in (lst or []):
         idx[_key_tuple(e)] = e
     return idx
-
 def _build_fx_multiwrite_from_snapshots(target, snapA, snapB):
     """
     Build a comprehensive multi-write plan from two snapshots (A=enabled, B=disabled).
@@ -487,7 +464,6 @@ def _build_fx_multiwrite_from_snapshots(target, snapA, snapB):
             "disable": v_disable,
         })
     return writes
-
 # --- Lightweight vendor DB cache (path + mtime -> parsed data) ---
 # Cache key:
 #   - absolute INI path
@@ -501,7 +477,6 @@ _VENDOR_DB_CACHE = {
     "mtime": None,
     "data": {"main": [], "fx": []},
 }
-
 def _vendor_ini_default_path():
     """
     Return a default vendor_toggles.ini path:
@@ -522,17 +497,14 @@ def _vendor_ini_default_path():
             return True
         except Exception:
             return False
-
     try:
         base = _exe_dir()
     except Exception:
         base = os.getcwd()
-
     preferred_dir = base
     preferred_path = os.path.join(preferred_dir, "vendor_toggles.ini")
     if _is_writable_dir(preferred_dir):
         return preferred_path
-
     # Fallback to user-writable location
     local = os.environ.get("LOCALAPPDATA")
     if not local:
@@ -550,7 +522,6 @@ def _vendor_ini_default_path():
     except Exception:
         pass
     return os.path.join(fallback_dir, "vendor_toggles.ini")
-
 def _load_vendor_db_split(ini_path=None):
     r"""
     Load vendor toggles from INI. Returns dict with 'main' and 'fx' lists.
@@ -598,7 +569,6 @@ def _load_vendor_db_split(ini_path=None):
     except OSError:
         exists = False
         mtime = None
-
     # If file does not exist, cache and return empty DB
     if not exists:
         if (_VENDOR_DB_CACHE.get("path") == path and
@@ -609,12 +579,10 @@ def _load_vendor_db_split(ini_path=None):
         _VENDOR_DB_CACHE["mtime"] = None
         _VENDOR_DB_CACHE["data"] = {"main": [], "fx": []}
         return _VENDOR_DB_CACHE["data"]
-
     # If path and mtime match cache, reuse parsed DB
     if (_VENDOR_DB_CACHE.get("path") == path and
             _VENDOR_DB_CACHE.get("mtime") == mtime):
         return _VENDOR_DB_CACHE.get("data") or {"main": [], "fx": []}
-
     # Otherwise parse INI fresh (same logic as before)
     cfg = configparser.ConfigParser()
     entries = {"main": [], "fx": []}
@@ -626,7 +594,6 @@ def _load_vendor_db_split(ini_path=None):
         _VENDOR_DB_CACHE["mtime"] = mtime
         _VENDOR_DB_CACHE["data"] = entries
         return entries
-
     for sec in cfg.sections():
         try:
             entry_type = cfg.get(sec, "type", fallback="main").strip().lower()
@@ -744,13 +711,11 @@ def _load_vendor_db_split(ini_path=None):
                     entries["main"].append(entry)
         except Exception:
             continue
-
     # Update cache with newly parsed DB
     _VENDOR_DB_CACHE["path"] = path
     _VENDOR_DB_CACHE["mtime"] = mtime
     _VENDOR_DB_CACHE["data"] = entries
     return entries
-
 def _endpoint_fx_key(device_id, flow):
     guid = _extract_endpoint_guid_from_device_id(device_id)
     if not guid:
@@ -760,11 +725,9 @@ def _endpoint_fx_key(device_id, flow):
     # HKCU/HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\{Render|Capture}\{GUID}\FxProperties
     key_path = rf"SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\{flow_name}\{guid}\FxProperties"
     return flow_name, key_path
-
 def _guid_of(device_id):
     g = _extract_endpoint_guid_from_device_id(device_id)
     return (g or "").strip().lower()
-
 def _vendor_entry_applies(entry, device_id, flow):
     r"""
     Return True if this MAIN entry applies to this endpoint AND the configured value
@@ -806,7 +769,6 @@ def _vendor_entry_applies(entry, device_id, flow):
         except OSError:
             pass
     return False
-
 def _set_vendor_entry_state(entry, device_id, flow, enable):
     r"""
     Write vendor entry DWORD to desired value across configured hives.
@@ -832,7 +794,6 @@ def _set_vendor_entry_state(entry, device_id, flow, enable):
         except OSError:
             continue
     return ok
-
 def _append_fx_ini_entry(ini_path, section_name, fx_name, device_name,
                          value_name, dword_enable, dword_disable,
                          flows, hives, notes):
@@ -868,7 +829,6 @@ def _append_fx_ini_entry(ini_path, section_name, fx_name, device_name,
     ]
     with open(ini_path, "a", encoding="utf-8", errors="replace") as f:
         f.write("\n".join(lines) + "\n")
-
 def _append_fx_ini_entry_multi(ini_path, section_name, fx_name, device_name, writes, notes=""):
     r"""
     Append an FX multi-write section. Raises ValueError if section exists.
@@ -936,7 +896,6 @@ def _append_fx_ini_entry_multi(ini_path, section_name, fx_name, device_name, wri
     lines.append("devices = ")
     with open(ini_path, "a", encoding="utf-8", errors="replace") as f:
         f.write("\n".join(lines) + "\n")
-
 def _read_vendor_entry_state(entry, device_id, flow):
     r"""
     Return True if current state equals 'enable' value, False if equals 'disable', None otherwise.
@@ -1008,7 +967,6 @@ def _read_vendor_entry_state(entry, device_id, flow):
         if v == di:
             return False
     return None
-
 def _verify_vendor_entry(entry, device_id, flow, expected_enabled, timeout=2.5, interval=0.2, consecutive=2):
     """
     Poll the same vendor DWORD until it reflects expected_enabled for 'consecutive' reads or timeout.
@@ -1030,7 +988,6 @@ def _verify_vendor_entry(entry, device_id, flow, expected_enabled, timeout=2.5, 
             ok_streak = 0
         time.sleep(interval)
     return False, last
-
 def _try_vendor_first(device_id, flow, enable, ini_path=None):
     """
     Try MAIN vendor entries from INI first.
@@ -1053,7 +1010,6 @@ def _try_vendor_first(device_id, flow, enable, ini_path=None):
         except Exception:
             continue
     return False, None, None
-
 def _find_first_vendor_entry(device_id, flow, ini_path=None):
     """
     Return the first MAIN vendor entry that BOTH lists this endpoint (devices membership)
@@ -1080,12 +1036,10 @@ def _find_first_vendor_entry(device_id, flow, ini_path=None):
         except Exception:
             continue
     return None
-
 def _entries_identical_main(a, b):
     return (a.get("value_name","").strip().lower() == b.get("value_name","").strip().lower()
             and int(a.get("enable", -999)) == int(b.get("enable", -999))
             and int(a.get("disable", -999)) == int(b.get("disable", -999)))
-
 def _entries_identical_fx(a, b):
     # For dedupe, ignore fx_name differences; rely on writes or value_name/dwords
     if a.get("multi_write") and b.get("multi_write"):
@@ -1122,7 +1076,6 @@ def _entries_identical_fx(a, b):
     ae, ad = _ed_pair(a)
     be, bd = _ed_pair(b)
     return (a_val == b_val) and (ae == be) and (ad == bd)
-
 def _norm_write_item(w):
     # Normalize a single write item for canonical identity
     return (
@@ -1134,7 +1087,6 @@ def _norm_write_item(w):
         str(w.get("enable") or ""),
         str(w.get("disable") or ""),
     )
-
 def _fx_canonical_key_from_writes(writes, decider_index, quorum_threshold):
     # Build a canonical tuple for multi-write FX
     nw = sorted((_norm_write_item(w) for w in (writes or [])))
@@ -1148,18 +1100,15 @@ def _fx_canonical_key_from_writes(writes, decider_index, quorum_threshold):
         qt = 0.60
     # freeze into a tuple
     return ("fx-multi", tuple(nw), di, round(qt, 6))
-
 def _fx_canonical_key_single(value_name, enable, disable):
     # Canonical tuple for legacy/single-DWORD FX
     return ("fx-single",
             (str(value_name or "").strip().lower(),),
             int(enable), int(disable))
-
 def _canonical_section_name_from_key(key_tuple):
     # Stable section name: fx_ + first 16 hex of sha1 over repr(key_tuple)
     h = hashlib.sha1(repr(key_tuple).encode("utf-8", "replace")).hexdigest()[:16]
     return f"fx_{h}"
-
 def _write_applies_to_guid(w, guid_lc: str) -> bool:
     """
     True if this toggle applies to guid_lc.
@@ -1177,7 +1126,6 @@ def _write_applies_to_guid(w, guid_lc: str) -> bool:
         return guid_lc in {x.strip().lower() for x in devs}
     except Exception:
         return False
-
 # --- FAST, SINGLE-PROBE READ HELPERS (no fallbacks, no COM) ---
 # These are used by the GUI to poll state quickly without COM calls.
 # When HKCU and HKLM disagree, we use key last-write time as a heuristic to prefer
@@ -1196,7 +1144,6 @@ def _fast_read_one(hive_name: str, base_path: str, value_name: str):
             return (val, typ)
     except OSError:
         return (None, None)
-
 def _fast_key_lastwrite(hive_name: str, base_path: str):
     """
     Return the registry key last-write time (as an integer) for the given hive/base.
@@ -1213,7 +1160,6 @@ def _fast_key_lastwrite(hive_name: str, base_path: str):
                 return None
     except OSError:
         return None
-
 def _value_equals(expected, expected_type_name, actual_val, actual_typ):
     """
     Type-aware equality check for single-probe comparisons.
@@ -1239,7 +1185,6 @@ def _value_equals(expected, expected_type_name, actual_val, actual_typ):
             return False
     # Not comparable or wrong type
     return False
-
 def _fast_read_vendor_entry_state(entry, device_id, flow):
     """
     FAST state read (True/False/None) driven by learned scope.
@@ -1395,7 +1340,6 @@ def _fast_read_vendor_entry_state(entry, device_id, flow):
         return None
     except Exception:
         return None
-
 def _fast_get_enhancements_state(device_id, flow):
     """
     FAST state for MAIN enhancement: find the matching MAIN entry for this device and probe it.
@@ -1405,7 +1349,6 @@ def _fast_get_enhancements_state(device_id, flow):
     if not e:
         return None
     return _fast_read_vendor_entry_state(e, device_id, flow)
-
 def _append_guid_to_section(ini_path, section_name, guid_lc):
     """
     Append guid_lc to the 'devices' line of [section_name] in-place.
@@ -1473,7 +1416,6 @@ def _append_guid_to_section(ini_path, section_name, guid_lc):
                 lines.insert(insert_at, new_line)
     with open(ini_path, "w", encoding="utf-8", errors="replace") as f:
         f.writelines(lines)
-
 def _append_guid_to_write_devices(ini_path, section_name, write_index, guid_lc):
     """
     Ensure write{write_index}_devices contains guid_lc.
@@ -1526,7 +1468,292 @@ def _append_guid_to_write_devices(ini_path, section_name, write_index, guid_lc):
                 lines[devices_idx] = new_line
     with open(ini_path, "w", encoding="utf-8", errors="replace") as f:
         f.writelines(lines)
-
+def _remove_guid_from_write_devices(ini_path, section_name, write_index, guid_lc):
+    """
+    Remove guid_lc from write{write_index}_devices.
+    If the devices line becomes empty, keep it as an empty list (applies to nobody).
+    (We do NOT delete the line; empty means 'no devices', not 'universal'.)
+    """
+    try:
+        with open(ini_path, "r", encoding="utf-8", errors="replace") as f:
+            lines = f.read().splitlines(keepends=True)
+    except FileNotFoundError:
+        return
+    sec_hdr = f"[{section_name}]"
+    sec_start = None
+    sec_end = len(lines)
+    for i, line in enumerate(lines):
+        s = line.strip()
+        if s.startswith("[") and s.endswith("]"):
+            if sec_start is None:
+                if s.lower() == sec_hdr.lower():
+                    sec_start = i
+            else:
+                sec_end = i
+                break
+    if sec_start is None:
+        return
+    key_pat = re.compile(rf"^\s*write{write_index}_devices\s*=\s*(.*)$", re.IGNORECASE)
+    for i in range(sec_start + 1, sec_end):
+        m = key_pat.match(lines[i])
+        if not m:
+            continue
+        txt = m.group(1).strip()
+        cur = [x.strip().lower() for x in txt.split(",") if x.strip()] if txt else []
+        cur = [x for x in cur if x != guid_lc.lower()]
+        # Keep the line; empty means 'applies to nobody'
+        new_line = f"write{write_index}_devices = {','.join(cur)}\n" if cur else f"write{write_index}_devices = \n"
+        lines[i] = new_line
+        break
+    with open(ini_path, "w", encoding="utf-8", errors="replace") as f:
+        f.writelines(lines)
+def _find_write_index_by_payload(ini_path, section_name, w):
+    """
+    Find write{i} index in section by full identity+payload match.
+    Returns i or None.
+    """
+    db = _load_vendor_db_split(ini_path)
+    target = None
+    for e in (db.get("fx") or []):
+        if e.get("name") == section_name:
+            target = e
+            break
+    if not target:
+        return None
+    def _same(a, b):
+        return (
+            (a.get("hive","").upper() == b.get("hive","").upper()) and
+            (str(a.get("subkey","")).strip().lower() == str(b.get("subkey","")).strip().lower()) and
+            (str(a.get("name","")).strip().lower() == str(b.get("name","")).strip().lower()) and
+            (str(a.get("type_enable","")).upper() == str(b.get("type_enable","")).upper()) and
+            (str(a.get("type_disable","")).upper() == str(b.get("type_disable","")).upper()) and
+            (str(a.get("enable","")).strip() == str(b.get("enable","")).strip()) and
+            (str(a.get("disable","")).strip() == str(b.get("disable","")).strip())
+        )
+    for idx, cw in enumerate(target.get("writes") or [], start=1):
+        if _same(cw, w):
+            return idx
+    return None
+def _cleanup_conflicting_toggles(ini_path, section_name, guid_lc, keep_idx, keep_write):
+    """
+    Ensure guid_lc is NOT listed on any other toggle in this bucket that has
+    the same identity (hive/subkey/name) but different payload than keep_write.
+    keep_idx is the index of the write we want to keep for this GUID.
+    Why:
+      A bucket can hold multiple devices. If two write blocks have the same identity
+      but different payload, attaching a GUID to both would make toggling ambiguous.
+    """
+    db = _load_vendor_db_split(ini_path)
+    target = None
+    for e in (db.get("fx") or []):
+        if e.get("name") == section_name:
+            target = e
+            break
+    if not target:
+        return
+    def _same_identity(a, b):
+        return (
+            (a.get("hive","").upper() == b.get("hive","").upper()) and
+            (str(a.get("subkey","")).strip().lower() == str(b.get("subkey","")).strip().lower()) and
+            (str(a.get("name","")).strip().lower() == str(b.get("name","")).strip().lower())
+        )
+    for idx, cw in enumerate(target.get("writes") or [], start=1):
+        if idx == keep_idx:
+            continue
+        if _same_identity(cw, keep_write):
+            # remove guid from this conflicting toggle
+            _remove_guid_from_write_devices(ini_path, section_name, idx, guid_lc)
+def _sanitize_ini_section_name(value_name: str):
+    # e.g. "{1da5d803-...},5" -> "vendor_{1da5d803-...},5"
+    base = re.sub(r'[^A-Za-z0-9_,\-{}]+', "_", value_name)
+    return f"vendor_{base}"
+def _append_vendor_ini_entry_if_missing(ini_path, section_name, value_name, dword_enable, dword_disable,
+                                        flows="Render,Capture", hives="HKCU,HKLM", notes="", subkey="FxProperties"):
+    """
+    Append a vendor INI section to ini_path only if it does not already exist.
+    Records 'subkey' so fast reads/writes hit the exact learned spot.
+    """
+    cfg = configparser.ConfigParser()
+    try:
+        if os.path.exists(ini_path):
+            cfg.read(ini_path, encoding="utf-8")
+    except Exception:
+        pass
+    if cfg.has_section(section_name):
+        return "exists"
+    try:
+        ini_dir = os.path.dirname(ini_path)
+        if ini_dir:
+            os.makedirs(ini_dir, exist_ok=True)
+    except Exception:
+        pass
+    subkey_norm = "Properties" if str(subkey or "").strip().lower().startswith("prop") else "FxProperties"
+    lines = []
+    lines.append("")
+    lines.append(f"[{section_name}]")
+    lines.append(f"value_name = {str(value_name).strip().lower()}")
+    lines.append(f"dword_enable = {int(dword_enable)}")
+    lines.append(f"dword_disable = {int(dword_disable)}")
+    lines.append(f"hives = {hives}")
+    lines.append(f"flows = {flows}")
+    lines.append(f"subkey = {subkey_norm}")  # record learned scope
+    if notes:
+        lines.append(f"notes = {notes}")
+    lines.append("devices = ")
+    text = "\n".join(lines) + "\n"
+    with open(ini_path, "a", encoding="utf-8", errors="replace") as f:
+        f.write(text)
+    return "appended"
+def _build_vendor_ini_snippet(target, snapA, snapB, diffs, section_name=None):
+    """
+    Build a suggested vendor INI section based on DWORD flips observed.
+    Records the actual subkey (FxProperties or Properties) where the flip occurred.
+    """
+    cands = []
+    for f in diffs.get("dword_flips", []):
+        name = str(f.get("name",""))
+        subkey = str(f.get("subkey",""))
+        hive = str(f.get("hive",""))
+        if not (name.startswith("{") and "}" in name and "," in name):
+            continue
+        # Keep both FxProperties and Properties; pick the first reliable change
+        before = int(f.get("before"))
+        after  = int(f.get("after"))
+        cands.append({
+            "hive": hive, "flow": None, "subkey": subkey, "name": name,
+            "before": before, "after": after
+        })
+    if not cands:
+        return None, None
+    # Prefer HKCU candidates; keep original order otherwise (first reliable)
+    cands.sort(key=lambda x: (0 if x["hive"] == "HKCU" else 1))
+    pick = cands[0]
+    dword_enable  = int(pick["before"])
+    dword_disable = int(pick["after"])
+    picked_subkey = pick.get("subkey") if pick.get("subkey") in ("FxProperties", "Properties") else "FxProperties"
+    if not section_name:
+        base = re.sub(r'[^A-Za-z0-9_,\-{}]+', "_", pick["name"])
+        section_name = f"vendor_{base}"
+    notes = f"Auto-learned (manual UI) on '{target.get('name')}' ({target.get('flow')}). A=enabled,B=disabled."
+    snippet = []
+    snippet.append(f"[{section_name}]")
+    snippet.append(f"value_name = {pick['name']}")
+    snippet.append(f"dword_enable = {dword_enable}")
+    snippet.append(f"dword_disable = {dword_disable}")
+    snippet.append("hives = HKCU,HKLM")
+    snippet.append("flows = Render,Capture")
+    snippet.append(f"subkey = {picked_subkey}")  # where it came from
+    snippet.append(f"notes = {notes}")
+    snippet.append("devices = ")
+    return "\n".join(snippet) + "\n", pick
+def _collect_registry_samples(device_id, repeats=3, delay=0.15):
+    """
+    Collect several registry-only samples for the current device state to filter UI noise.
+    repeats >= 1; delay in seconds between samples.
+    Why:
+      Registry dumps are noisy during UI operations; sampling lets us keep only stable keys
+      for FX learning (reduces false positives).
+    """
+    samples = []
+    for i in range(max(1, int(repeats))):
+        try:
+            samples.append(_dump_mmdevices_all_values(device_id))
+        except Exception:
+            samples.append([])
+        if i + 1 < repeats:
+            _short_settle(delay)
+    return samples
+def _stable_registry_map(samples):
+    """
+    From a list of registry dumps (lists of rec dicts), build a stability map:
+      key -> {'type': typ, 'value': dataRaw} only if the key's type and value are identical
+      across ALL samples. Keys that change (type OR dataRaw) are dropped.
+    Keys are tuples: (hive, flow, subkey, name).
+    This is the core noise-filtering step for FX learn: it removes keys that fluctuate
+    for reasons unrelated to the specific effect toggle.
+    """
+    if not samples:
+        return {}
+    counts = {}
+    total = len(samples)
+    for lst in samples:
+        for rec in (lst or []):
+            k = (str(rec.get("hive")), str(rec.get("flow")), str(rec.get("subkey")), str(rec.get("name")).lower())
+            typ = rec.get("type")
+            val = rec.get("dataRaw")
+            if k not in counts:
+                counts[k] = {"ok": True, "type": typ, "value": val, "seen": 1}
+            else:
+                same = (counts[k]["type"] == typ) and (counts[k]["value"] == val)
+                if same:
+                    counts[k]["seen"] += 1
+                else:
+                    counts[k]["ok"] = False
+    out = {}
+    for k, info in counts.items():
+        if info["ok"] and info["seen"] == total:
+            out[k] = {"type": info["type"], "value": info["value"]}
+    return out
+def _build_fx_multiwrite_from_stable_maps(target, stableA, stableB):
+    """
+    Build multi-write entries from stability-filtered maps:
+    - Only include keys present in both maps
+    - Type must match and value must differ
+    - Encode values into INI-friendly forms (int/str/'hex:..')
+    - Order results so the first write (decider) is the most stable-looking signal
+    Scoring preference:
+      FxProperties + DWORD 0/1 flips are treated as stronger signals than REG_BINARY changes.
+    """
+    writes = []
+    both = set(stableA.keys()) & set(stableB.keys())
+    for k in sorted(both):
+        ta = stableA[k]["type"]; tb = stableB[k]["type"]
+        va = stableA[k]["value"]; vb = stableB[k]["value"]
+        if ta != tb or va == vb:
+            continue
+        hive, flow, subkey, name = k
+        def _encode(typ, raw):
+            if typ == winreg.REG_DWORD:
+                try: return int(raw)
+                except Exception: return None
+            if typ == winreg.REG_SZ:
+                try: return str(raw)
+                except Exception: return None
+            if typ == winreg.REG_BINARY:
+                return _format_bin_hex(str(raw or ""))
+            return None
+        en = _encode(ta, va)
+        di = _encode(tb, vb)
+        if en is None or di is None:
+            continue
+        writes.append({
+            "hive": hive,
+            "subkey": subkey,
+            "name": name,
+            "type_enable": _reg_type_to_name(ta),
+            "type_disable": _reg_type_to_name(tb),
+            "enable": en,
+            "disable": di,
+        })
+    # Prefer stable indicators first => decider_index=1 picks the best
+    def _score(w):
+        score = 0
+        if str(w.get("subkey") or "").startswith("FxProperties"):
+            score += 3
+        te = (w["type_enable"] or "").upper()
+        td = (w["type_disable"] or "").upper()
+        if te == "REG_DWORD" and td == "REG_DWORD":
+            score += 3
+            try:
+                if {int(w["enable"]), int(w["disable"])} == {0, 1}:
+                    score += 2
+            except Exception:
+                pass
+        if te == "REG_BINARY" and td == "REG_BINARY":
+            score -= 1
+        return score
+    writes.sort(key=_score, reverse=True)
+    return writes
 def _learn_vendor_from_discovery_and_write_ini(target, ini_path=None, prefer_hkcu=True):
     """
     Manual learn using discovery flow.
@@ -1630,7 +1857,6 @@ I UNDERSTAND
         "dword_enable": dword_enable,
         "dword_disable": dword_disable
     }
-
 def _learn_vendor_and_write_ini(target, ini_path=None):
     """
     Auto-learn a vendor DWORD toggle for target {'id','name','flow'}.
@@ -1717,7 +1943,6 @@ Type exactly: I UNDERSTAND
         "dword_enable": dword_enable,
         "dword_disable": dword_disable
     }
-
 def _get_enhancements_status_any(device_id, flow):
     """
     Best-effort read for display (GUI/labels), vendor-only.
@@ -1733,7 +1958,6 @@ def _get_enhancements_status_any(device_id, flow):
     except Exception:
         pass
     return None
-
 def _endpoint_base_path(device_id, flow, subkey):
     guid = _extract_endpoint_guid_from_device_id(device_id)
     if not guid:
@@ -1742,7 +1966,6 @@ def _endpoint_base_path(device_id, flow, subkey):
     # Base path pattern (for reference):
     # HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Render\{GUID}\FxProperties
     return rf"SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\{flow_name}\{guid}\{subkey}"
-
 def _perform_multi_writes(entry, device_id, flow, enable):
     """
     Write all applicable toggles (universal + for this GUID).
@@ -1795,7 +2018,6 @@ def _perform_multi_writes(entry, device_id, flow, enable):
             ok_all = False
             continue
     return ok_all
-
 def _read_decider_state(entry, device_id, flow):
     # Multi-write readback:
     # - First attempt quorum decision (fraction of applicable writes that agree).
@@ -1886,11 +2108,9 @@ def _read_decider_state(entry, device_id, flow):
         if s is not None:
             return s
     return None
-
 def _dump_mmdevices_all_values_for_fx_learn(device_id):
     # Deprecated in favor of _dump_mmdevices_all_values from devices.py
     return _dump_mmdevices_all_values(device_id)
-
 def _find_fx_bucket_section_name(ini_path, fx_name):
     cfg = configparser.ConfigParser()
     try:
@@ -1908,13 +2128,11 @@ def _find_fx_bucket_section_name(ini_path, fx_name):
         except Exception:
             continue
     return None
-
 def _canonical_fx_bucket_name(fx_name):
     import hashlib
     key = (fx_name or "").strip().lower()
     h = hashlib.sha1(key.encode("utf-8", "replace")).hexdigest()[:16]
     return f"fx_{h}"
-
 def _append_new_write_to_section(ini_path, section_name, write_dict, guid_lc):
     """
     Append a new write{i}_* block (with write{i}_devices = {guid}) and bump write_count.
@@ -1974,7 +2192,6 @@ def _append_new_write_to_section(ini_path, section_name, write_dict, guid_lc):
         lines.insert(sec_start + 1, f"write_count = {new_idx}\n")
     with open(ini_path, "w", encoding="utf-8", errors="replace") as f:
         f.writelines(lines)
-
 def _delete_fx_for_guid(fx_name, device_id, ini_path=None):
     """
     Remove associations for 'fx_name' for the specific device GUID from vendor_toggles.ini:
@@ -2120,7 +2337,6 @@ def _delete_fx_for_guid(fx_name, device_id, ini_path=None):
         "writesAffected": writes_changed,
         "remainingDevices": new_devices,
     }
-
 def _learn_fx_and_write_ini(target, fx_name, snapA, snapB, ini_path=None, prefer_hkcu=True, snapA2=None, snapB2=None):
     """
     Learn an FX toggle from captured snapshots.
@@ -2339,7 +2555,6 @@ def _learn_fx_and_write_ini(target, fx_name, snapA, snapB, ini_path=None, prefer
         "dword_enable": dword_enable,
         "dword_disable": dword_disable
     }
-
 def _list_fx_for_device(device_id, flow, ini_path=None, device_name=None):
     """
     List all available FX for a device.
@@ -2368,7 +2583,6 @@ def _list_fx_for_device(device_id, flow, ini_path=None, device_name=None):
         except Exception:
             continue
     return out
-
 def _find_fx_for_device(device_id, flow, fx_name, ini_path=None, device_name=None):
     """
     Find FX entries matching device and effect name.
@@ -2385,7 +2599,6 @@ def _find_fx_for_device(device_id, flow, fx_name, ini_path=None, device_name=Non
             e["source"] = "ini"
             matches.append(e)
     return matches
-
 def _apply_enhancements(device_id, flow, enable, prefer_hklm=False, allow_universal_scan=False, vendor_ini_path=None):
     """
     Vendor-only policy:
@@ -2416,7 +2629,6 @@ def _apply_enhancements(device_id, flow, enable, prefer_hklm=False, allow_univer
         except Exception:
             continue
     return False, "no-vendor-method", None
-
 def _enhancements_supported(device_id, flow):
     """
     Returns True if any vendor entry applies:
@@ -2436,7 +2648,6 @@ def _enhancements_supported(device_id, flow):
     except Exception:
         return False
     return False
-
 def _apply_fx(device_id, flow, fx_name, enable, ini_path=None, device_name=None):
     """
     Toggle a learned FX effect (INI-only).
