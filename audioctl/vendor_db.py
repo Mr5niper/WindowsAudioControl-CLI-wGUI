@@ -274,9 +274,11 @@ def _fx_signature_matches_multi(entry: dict, device_id: str, flow: str) -> bool:
     if not writes_all:
         return False
     guid_lc = _guid_of(device_id)
-    writes = [w for w in writes_all if _write_applies_to_guid(w, guid_lc)]
-    if not writes:
-        return False
+    # IMPORTANT (FX universality):
+    # Do NOT require write{i}_devices membership for matching.
+    # Registry signature is truth: if the value exists for THIS GUID and matches
+    # enable/disable payload, the write can be considered compatible.
+    writes = list(writes_all)
     try:
         qt = float(entry.get("quorum_threshold", 0.60))
     except Exception:
@@ -309,6 +311,31 @@ def _fx_signature_matches_multi(entry: dict, device_id: str, flow: str) -> bool:
     if total <= 0:
         return False
     return (ok / float(total)) >= qt
+
+def _fx_write_matches_this_guid_now(w: dict, device_id: str, flow: str) -> bool:
+    """
+    Return True if this write's target value exists for this GUID and matches either
+    enable or disable signature (HKCU/HKLM), meaning it's safe/meaningful to apply.
+    """
+    try:
+        subk = (w.get("subkey") or "").strip() or "FxProperties"
+        name = (w.get("name") or "").strip().lower()
+        if not name:
+            return False
+        base = _endpoint_base_path(device_id, flow, subk)
+        if not base:
+            return False
+        cu_val, cu_typ = _fast_read_one("HKCU", base, name)
+        lm_val, lm_typ = _fast_read_one("HKLM", base, name)
+        if _value_equals(w.get("enable"), w.get("type_enable"), cu_val, cu_typ) or \
+           _value_equals(w.get("enable"), w.get("type_enable"), lm_val, lm_typ):
+            return True
+        if _value_equals(w.get("disable"), w.get("type_disable"), cu_val, cu_typ) or \
+           _value_equals(w.get("disable"), w.get("type_disable"), lm_val, lm_typ):
+            return True
+    except Exception:
+        return False
+    return False
 def _fx_entry_spoof_applies(entry: dict, device_id: str, flow: str, device_name: str) -> bool:
     """
     True if:
@@ -1967,8 +1994,13 @@ def _perform_multi_writes(entry, device_id, flow, enable):
     guid_lc = _guid_of(device_id)
     ok_all = True
     for w in entry.get("writes") or []:
+        # IMPORTANT (FX universality):
+        # For applying, we still respect explicit per-GUID scoping IF it includes us.
+        # But if it doesn't include us, we can still apply IF the write's value exists
+        # for this GUID and matches a known signature right now.
         if not _write_applies_to_guid(w, guid_lc):
-            continue
+            if not _fx_write_matches_this_guid_now(w, device_id, flow):
+                continue
         hive_name = (w.get("hive") or "").upper()
         hive = winreg.HKEY_LOCAL_MACHINE if hive_name == "HKLM" else winreg.HKEY_CURRENT_USER
         subk = (w.get("subkey") or "").strip()
