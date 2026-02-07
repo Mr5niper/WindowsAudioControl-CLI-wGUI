@@ -23,6 +23,7 @@ import re
 import configparser
 import time
 import winreg
+import hashlib
 from .compat import is_admin
 from .logging_setup import _exe_dir
 from .devices import (
@@ -79,6 +80,132 @@ def _parse_bin_hex(text: str) -> bytes:
         return b""
     return bytes.fromhex(t)
 
+# --- Device-name -> GUID bucket mapping (for INI readability; case-insensitive) ---
+def _canon_device_name(name: str) -> str:
+    """Canonicalize a friendly name for bucketing (case-insensitive)."""
+    try:
+        return (name or "").strip().casefold()
+    except Exception:
+        return (name or "").strip().lower()
+
+def _name_bucket_id(name: str) -> str:
+    """
+    Stable bucket id derived from canonicalized name.
+    Used to generate INI keys:
+      name_<id>  = <original device name>
+      guids_<id> = {guid1},{guid2}
+    """
+    canon = _canon_device_name(name)
+    h = hashlib.sha1(canon.encode("utf-8", "replace")).hexdigest()[:8]
+    return h
+
+def _append_guid_to_name_bucket(ini_path: str, section_name: str, device_name: str, guid_lc: str):
+    """
+    Maintain per-section device name buckets:
+      name_<id>  = <device_name>
+      guids_<id> = {guid},{guid2}
+    - bucket id derived from canonicalized device_name (case-insensitive)
+    - one bucket can contain multiple GUIDs (same name reused across endpoints)
+    - does not remove anything; only adds/updates in-place
+    """
+    if not ini_path or not section_name or not device_name or not guid_lc:
+        return
+    bid = _name_bucket_id(device_name)
+    key_name = f"name_{bid}"
+    key_guids = f"guids_{bid}"
+    sec_hdr = f"[{section_name}]"
+
+    try:
+        with open(ini_path, "r", encoding="utf-8", errors="replace") as f:
+            lines = f.read().splitlines(keepends=True)
+    except FileNotFoundError:
+        lines = []
+
+    # Locate section
+    sec_start = None
+    sec_end = len(lines)
+    for i, line in enumerate(lines):
+        s = line.strip()
+        if s.startswith("[") and s.endswith("]"):
+            if sec_start is None:
+                if s.lower() == sec_hdr.lower():
+                    sec_start = i
+            else:
+                sec_end = i
+                break
+
+    if sec_start is None:
+        # Section missing: create minimal section (best-effort)
+        new = []
+        if lines and not lines[-1].endswith(("\n", "\r")):
+            new.append("\n")
+        new.append(f"{sec_hdr}\n")
+        new.append(f"{key_name} = {device_name}\n")
+        new.append(f"{key_guids} = {guid_lc}\n")
+        lines.extend(new)
+        with open(ini_path, "w", encoding="utf-8", errors="replace") as f:
+            f.writelines(lines)
+        return
+
+    # Find existing name_<id> and guids_<id>
+    name_idx = None
+    guids_idx = None
+    existing_guids = None
+
+    re_name = re.compile(rf"^\s*{re.escape(key_name)}\s*=\s*(.*)$", re.IGNORECASE)
+    re_guids = re.compile(rf"^\s*{re.escape(key_guids)}\s*=\s*(.*)$", re.IGNORECASE)
+
+    for i in range(sec_start + 1, sec_end):
+        m = re_name.match(lines[i])
+        if m:
+            name_idx = i
+            # keep first-seen display name; do not overwrite (human readability)
+            break
+
+    for i in range(sec_start + 1, sec_end):
+        m = re_guids.match(lines[i])
+        if m:
+            guids_idx = i
+            txt = (m.group(1) or "").strip()
+            existing_guids = [x.strip().lower() for x in txt.split(",") if x.strip()]
+            break
+
+    # Ensure name_<id> exists
+    if name_idx is None:
+        insert_at = sec_end
+        if insert_at > 0 and not lines[insert_at - 1].endswith(("\n", "\r")):
+            lines.insert(insert_at, "\n")
+            insert_at += 1
+        lines.insert(insert_at, f"{key_name} = {device_name}\n")
+        sec_end += 1
+        if insert_at <= sec_end:
+            sec_end += 0
+
+    # Ensure guids_<id> contains guid
+    if existing_guids is None:
+        # create guids line
+        insert_at = sec_end
+        if insert_at > 0 and not lines[insert_at - 1].endswith(("\n", "\r")):
+            lines.insert(insert_at, "\n")
+            insert_at += 1
+        lines.insert(insert_at, f"{key_guids} = {guid_lc}\n")
+    else:
+        if guid_lc.lower() not in {g.lower() for g in existing_guids}:
+            existing_guids.append(guid_lc.lower())
+            new_val = ",".join(sorted(set(existing_guids)))
+            new_line = f"{key_guids} = {new_val}\n"
+            if guids_idx is not None:
+                lines[guids_idx] = new_line
+            else:
+                insert_at = sec_end
+                if insert_at > 0 and not lines[insert_at - 1].endswith(("\n", "\r")):
+                    lines.insert(insert_at, "\n")
+                    insert_at += 1
+                lines.insert(insert_at, new_line)
+
+    with open(ini_path, "w", encoding="utf-8", errors="replace") as f:
+        f.writelines(lines)
+
 # --- Heuristic FX matching helpers (pattern + registry signature) ---
 def _fx_pattern_match(entry: dict, device_name: str) -> bool:
     """
@@ -107,14 +234,12 @@ def _fx_signature_matches_legacy(entry: dict, device_id: str, flow: str) -> bool
         di_val = int(entry.get("disable", entry.get("dword_disable")))
     except Exception:
         return False
-
     # Determine which subkeys to probe (try learned subkey first if present)
     subkeys = []
     subkey = (entry.get("subkey") or "").strip()
     if subkey:
         subkeys.append("Properties" if subkey.lower().startswith("prop") else "FxProperties")
     subkeys.extend(["FxProperties", "Properties"])
-
     seen = set()
     for subk in subkeys:
         if subk in seen:
@@ -142,7 +267,6 @@ def _fx_signature_matches_legacy(entry: dict, device_id: str, flow: str) -> bool
                     lm_state = v
             except Exception:
                 lm_state = None
-
         if cu_state is not None and lm_state is None:
             return True
         if lm_state is not None and cu_state is None:
@@ -173,13 +297,11 @@ def _fx_signature_matches_multi(entry: dict, device_id: str, flow: str) -> bool:
     writes = [w for w in writes_all if _write_applies_to_guid(w, guid_lc)]
     if not writes:
         return False
-
     try:
         qt = float(entry.get("quorum_threshold", 0.60))
     except Exception:
         qt = 0.60
     qt = max(0.50, min(0.95, qt))
-
     ok = 0
     total = 0
     for w in writes:
@@ -191,11 +313,9 @@ def _fx_signature_matches_multi(entry: dict, device_id: str, flow: str) -> bool:
         if not base:
             continue
         total += 1
-
         # Read both hives; accept match in either.
         cu_val, cu_typ = _fast_read_one("HKCU", base, name)
         lm_val, lm_typ = _fast_read_one("HKLM", base, name)
-
         # enable signature
         if _value_equals(w.get("enable"), w.get("type_enable"), cu_val, cu_typ) or \
            _value_equals(w.get("enable"), w.get("type_enable"), lm_val, lm_typ):
@@ -206,7 +326,6 @@ def _fx_signature_matches_multi(entry: dict, device_id: str, flow: str) -> bool:
            _value_equals(w.get("disable"), w.get("type_disable"), lm_val, lm_typ):
             ok += 1
             continue
-
     if total <= 0:
         return False
     return (ok / float(total)) >= qt
@@ -759,7 +878,6 @@ def _read_vendor_entry_state(entry, device_id, flow):
     # values can represent one effect state.
     if entry.get("type") == "fx" and entry.get("multi_write"):
         return _read_decider_state(entry, device_id, flow)
-
     # MAIN (enhancements) or legacy single-DWORD FX
     val_name = (entry.get("value_name") or "").strip().lower()
     if not val_name:
@@ -769,7 +887,6 @@ def _read_vendor_entry_state(entry, device_id, flow):
     base = _endpoint_base_path(device_id, flow, subkey)
     if not base:
         return None
-
     # Prefer HKCU, then HKLM if HKCU missing
     hive_order = []
     configured = entry.get("hives") or []
@@ -785,7 +902,6 @@ def _read_vendor_entry_state(entry, device_id, flow):
         "HKCU": winreg.HKEY_CURRENT_USER,
         "HKLM": winreg.HKEY_LOCAL_MACHINE,
     }
-
     # Accept either key naming for enable/disable
     try:
         en = int(entry.get("enable"))
@@ -796,7 +912,6 @@ def _read_vendor_entry_state(entry, device_id, flow):
             di = int(entry.get("dword_disable"))
         except Exception:
             return None
-
     for hname in hive_order:
         hive = hive_map.get(hname)
         if hive is None:
@@ -931,8 +1046,6 @@ def _entries_identical_fx(a, b):
     ae, ad = _ed_pair(a)
     be, bd = _ed_pair(b)
     return (a_val == b_val) and (ae == be) and (ad == bd)
-
-import hashlib
 
 def _norm_write_item(w):
     # Normalize a single write item for canonical identity
@@ -1133,7 +1246,6 @@ def _fast_read_vendor_entry_state(entry, device_id, flow):
                     pass
                 return s_rec
             return None
-
         # MAIN / legacy single-DWORD (heuristic: compare hives, use newer key)
         val_name = (entry.get("value_name") or "").strip().lower()
         subkey = (entry.get("subkey") or "FxProperties").strip()
@@ -1697,6 +1809,11 @@ I UNDERSTAND
     for e in (db.get("main") or []):
         if _entries_identical_main(e, candidate):
             _append_guid_to_section(ini_path, e.get("name"), guid_lc)
+            # Also record device name -> guid bucket mapping (readability, dedupe by name)
+            try:
+                _append_guid_to_name_bucket(ini_path, e.get("name"), name, guid_lc)
+            except Exception:
+                pass
             return True, {
                 "iniPath": ini_path,
                 "section": e.get("name"),
@@ -1716,6 +1833,11 @@ I UNDERSTAND
         )
         # Ensure devices list exists and contains this GUID
         _append_guid_to_section(ini_path, section_name, guid_lc)
+        # Also record device name -> guid bucket mapping (readability, dedupe by name)
+        try:
+            _append_guid_to_name_bucket(ini_path, section_name, name, guid_lc)
+        except Exception:
+            pass
     except PermissionError as e:
         return False, f"Permission denied writing INI: {ini_path}. Run as Administrator. {e}"
     except OSError as e:
@@ -1793,6 +1915,11 @@ Type exactly: I UNDERSTAND
             flows="Render,Capture", hives="HKCU,HKLM", notes=notes
         )
         _append_guid_to_section(ini_path, section_name, guid_lc)
+        # Also record device name -> guid bucket mapping (readability, dedupe by name)
+        try:
+            _append_guid_to_name_bucket(ini_path, section_name, name, guid_lc)
+        except Exception:
+            pass
     except PermissionError as e:
         return False, f"Permission denied writing INI: {ini_path}. Run as Administrator. {e}"
     except OSError as e:
@@ -2280,6 +2407,11 @@ def _learn_fx_and_write_ini(target, fx_name, snapA, snapB, ini_path=None, prefer
                 seed, notes=notes
             )
             _append_guid_to_section(ini_path, section_name, guid_lc)
+            # Also record device name -> guid bucket mapping (readability, dedupe by name)
+            try:
+                _append_guid_to_name_bucket(ini_path, section_name, target["name"], guid_lc)
+            except Exception:
+                pass
             return True, {
                 "iniPath": ini_path,
                 "section": section_name,
@@ -2332,6 +2464,11 @@ def _learn_fx_and_write_ini(target, fx_name, snapA, snapB, ini_path=None, prefer
                     _cleanup_conflicting_toggles(ini_path, bucket, guid_lc, new_idx, new_w)
         # Ensure bucket devices includes this GUID (for discovery)
         _append_guid_to_section(ini_path, bucket, guid_lc)
+        # Also record device name -> guid bucket mapping (readability, dedupe by name)
+        try:
+            _append_guid_to_name_bucket(ini_path, bucket, target["name"], guid_lc)
+        except Exception:
+            pass
         return True, {
             "iniPath": ini_path,
             "section": bucket,
@@ -2363,6 +2500,11 @@ def _learn_fx_and_write_ini(target, fx_name, snapA, snapB, ini_path=None, prefer
     for e in (db.get("fx") or []):
         if not e.get("multi_write") and _entries_identical_fx(e, candidate):
             _append_guid_to_section(ini_path, e.get("name"), guid_lc)
+            # Also record device name -> guid bucket mapping (readability, dedupe by name)
+            try:
+                _append_guid_to_name_bucket(ini_path, e.get("name"), target["name"], guid_lc)
+            except Exception:
+                pass
             return True, {
                 "iniPath": ini_path,
                 "section": e.get("name"),
@@ -2380,11 +2522,21 @@ def _learn_fx_and_write_ini(target, fx_name, snapA, snapB, ini_path=None, prefer
             flows="Render,Capture", hives=hives, notes=notes2
         )
         _append_guid_to_section(ini_path, section_name, guid_lc)
+        # Also record device name -> guid bucket mapping (readability, dedupe by name)
+        try:
+            _append_guid_to_name_bucket(ini_path, section_name, target["name"], guid_lc)
+        except Exception:
+            pass
     except ValueError as e:
         msg = str(e or "").lower()
         if "already exists" in msg:
             try:
                 _append_guid_to_section(ini_path, section_name, guid_lc)
+                # Also record device name -> guid bucket mapping (readability, dedupe by name)
+                try:
+                    _append_guid_to_name_bucket(ini_path, section_name, target["name"], guid_lc)
+                except Exception:
+                    pass
                 return True, {
                     "iniPath": ini_path,
                     "section": section_name,
@@ -2410,7 +2562,6 @@ def _learn_fx_and_write_ini(target, fx_name, snapA, snapB, ini_path=None, prefer
 def _list_fx_for_device(device_id, flow, ini_path=None, device_name=None):
     """
     List all available FX for a device.
-
     Matching (read-only; does NOT modify INI):
       1) Direct GUID membership in section 'devices' (fast)
       2) If device_name provided: pattern match + registry signature match ("spoof")
