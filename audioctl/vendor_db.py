@@ -320,7 +320,6 @@ def _fx_entry_spoof_applies(entry: dict, device_id: str, flow: str, device_name:
     if entry.get("multi_write"):
         return _fx_signature_matches_multi(entry, device_id, flow)
     return _fx_signature_matches_legacy(entry, device_id, flow)
-
 def _fx_entry_signature_applies(entry: dict, device_id: str, flow: str) -> bool:
     """
     Signature-only applicability check for THIS device_id/flow (live registry read).
@@ -332,7 +331,6 @@ def _fx_entry_signature_applies(entry: dict, device_id: str, flow: str) -> bool:
         return _fx_signature_matches_legacy(entry, device_id, flow)
     except Exception:
         return False
-
 def _main_entry_signature_applies(entry: dict, device_id: str, flow: str) -> bool:
     """
     Signature-only applicability check for MAIN enhancements toggle (live registry read).
@@ -372,7 +370,6 @@ def _main_entry_signature_applies(entry: dict, device_id: str, flow: str) -> boo
         return False
     except Exception:
         return False
-
 def _fx_candidate_by_guid_or_pattern(entry: dict, guid_lc: str, device_name: str) -> bool:
     """
     Fast candidate filter:
@@ -393,7 +390,6 @@ def _fx_candidate_by_guid_or_pattern(entry: dict, guid_lc: str, device_name: str
         return False
     except Exception:
         return False
-
 def _key_tuple(rec):
     # Snapshot records are keyed by (hive, flow, subkey, name). That identity is
     # stable across snapshots and is what we diff when learning.
@@ -1012,27 +1008,20 @@ def _try_vendor_first(device_id, flow, enable, ini_path=None):
     return False, None, None
 def _find_first_vendor_entry(device_id, flow, ini_path=None):
     """
-    Return the first MAIN vendor entry that BOTH lists this endpoint (devices membership)
-    AND actually exists under HKCU for this endpoint (FxProperties/Properties).
-    If none exist (rare), fall back to first membership-only entry.
+    Signature-truth selector for MAIN enhancements:
+    Return the first MAIN entry whose registry signature matches THIS endpoint NOW.
+    No GUID gating. No name gating. Registry decides.
     """
     db = _load_vendor_db_split(ini_path)
-    guid = _extract_endpoint_guid_from_device_id(device_id)
-    if not guid:
-        return None
     main_entries = db.get("main") or []
     flow_name = "Render" if str(flow).lower().startswith("r") else "Capture"
-    # 1) Prefer entries that actually exist in registry for this endpoint
-    for entry in main_entries:
-        if _vendor_entry_applies(entry, device_id, flow_name) and _main_entry_signature_applies(entry, device_id, flow_name):
-            return entry
-    # 2) Fallback: first membership-only match (old behavior)
     for entry in main_entries:
         try:
-            devs = set((entry.get("devices") or []))
-            if devs and guid.lower() in {d.lower() for d in devs}:
-                if not entry.get("flows") or flow_name in entry["flows"]:
-                    return entry
+            # flow filter (cheap)
+            if entry.get("flows") and flow_name not in entry["flows"]:
+                continue
+            if _main_entry_signature_applies(entry, device_id, flow_name):
+                return entry
         except Exception:
             continue
     return None
@@ -2607,28 +2596,22 @@ def _apply_enhancements(device_id, flow, enable, prefer_hklm=False, allow_univer
     Runtime contract:
       Returns (False, "no-vendor-method", None) when no applicable vendor entry is known.
     """
-    db = _load_vendor_db_split(vendor_ini_path)
-    guid = _extract_endpoint_guid_from_device_id(device_id)
-    if not guid:
+    # Registry-truth apply:
+    # 1) Select the matching MAIN entry by signature NOW.
+    entry = _find_first_vendor_entry(device_id, flow, ini_path=(vendor_ini_path or _vendor_ini_default_path()))
+    if not entry:
         return False, "no-vendor-method", None
-    for entry in db.get("main") or []:
-        try:
-            devs = set((entry.get("devices") or []))
-            if not devs or guid.lower() not in {d.lower() for d in devs}:
-                continue
-            if entry.get("flows") and ("Render" if str(flow).lower().startswith("r") else "Capture") not in entry["flows"]:
-                continue
-            # Fail fast: only allow apply when signature fits THIS endpoint now.
-            if not _main_entry_signature_applies(entry, device_id, flow):
-                continue
-            wrote = _set_vendor_entry_state(entry, device_id, flow, enable)
-            if wrote:
-                ok, st = _verify_vendor_entry(entry, device_id, flow, enable, timeout=2.5, interval=0.2, consecutive=2)
-                if ok:
-                    return True, f"vendor:{entry['name']}", st
-        except Exception:
-            continue
-    return False, "no-vendor-method", None
+    # 2) Write using that entry.
+    try:
+        wrote = _set_vendor_entry_state(entry, device_id, flow, enable)
+        if not wrote:
+            return False, "no-vendor-method", None
+        ok, st = _verify_vendor_entry(entry, device_id, flow, enable, timeout=2.5, interval=0.2, consecutive=2)
+        if ok:
+            return True, f"vendor:{entry['name']}", st
+        return False, "no-vendor-method", st
+    except Exception:
+        return False, "no-vendor-method", None
 def _enhancements_supported(device_id, flow):
     """
     Returns True if any vendor entry applies:
@@ -2636,18 +2619,12 @@ def _enhancements_supported(device_id, flow):
     Returns False otherwise. No Windows checks.
     This is a membership check used by CLI/GUI to decide if a device has a learned vendor method.
     """
+    # Registry-truth support check: supported iff some MAIN entry signature matches NOW.
     try:
-        db = _load_vendor_db_split(_vendor_ini_default_path())
-        guid = _extract_endpoint_guid_from_device_id(device_id)
-        if not guid:
-            return False
-        for entry in db.get("main") or []:
-            devs = set((entry.get("devices") or []))
-            if devs and guid.lower() in {d.lower() for d in devs}:
-                return True
+        e = _find_first_vendor_entry(device_id, flow, ini_path=_vendor_ini_default_path())
+        return bool(e)
     except Exception:
         return False
-    return False
 def _apply_fx(device_id, flow, fx_name, enable, ini_path=None, device_name=None):
     """
     Toggle a learned FX effect (INI-only).
