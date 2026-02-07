@@ -342,6 +342,79 @@ def _fx_entry_spoof_applies(entry: dict, device_id: str, flow: str, device_name:
         return _fx_signature_matches_multi(entry, device_id, flow)
     return _fx_signature_matches_legacy(entry, device_id, flow)
 
+def _fx_entry_signature_applies(entry: dict, device_id: str, flow: str) -> bool:
+    """
+    Signature-only applicability check for THIS device_id/flow (live registry read).
+    This is the truth check. It does not use device name or GUID membership.
+    """
+    try:
+        if entry.get("multi_write"):
+            return _fx_signature_matches_multi(entry, device_id, flow)
+        return _fx_signature_matches_legacy(entry, device_id, flow)
+    except Exception:
+        return False
+
+def _main_entry_signature_applies(entry: dict, device_id: str, flow: str) -> bool:
+    """
+    Signature-only applicability check for MAIN enhancements toggle (live registry read).
+    Requires that the entry's value_name exists for this endpoint and equals either
+    enable or disable value.
+    """
+    try:
+        val_name = (entry.get("value_name") or "").strip().lower()
+        if not val_name:
+            return False
+        # learned subkey (FxProperties vs Properties)
+        subkey = (entry.get("subkey") or "FxProperties").strip()
+        base = _endpoint_base_path(device_id, flow, subkey)
+        if not base:
+            return False
+        try:
+            en_val = int(entry.get("enable", entry.get("dword_enable")))
+            di_val = int(entry.get("disable", entry.get("dword_disable")))
+        except Exception:
+            return False
+        # Read HKCU then HKLM (same policy as _read_vendor_entry_state)
+        for hive_name in ("HKCU", "HKLM"):
+            hive = winreg.HKEY_CURRENT_USER if hive_name == "HKCU" else winreg.HKEY_LOCAL_MACHINE
+            try:
+                with winreg.OpenKey(hive, base, 0, winreg.KEY_READ) as key:
+                    val, typ = winreg.QueryValueEx(key, val_name)
+            except OSError:
+                continue
+            if typ != winreg.REG_DWORD:
+                continue
+            try:
+                v = int(val)
+            except Exception:
+                continue
+            if v == en_val or v == di_val:
+                return True
+        return False
+    except Exception:
+        return False
+
+def _fx_candidate_by_guid_or_pattern(entry: dict, guid_lc: str, device_name: str) -> bool:
+    """
+    Fast candidate filter:
+      - GUID is in entry.devices OR
+      - device_name_pattern matches (if device_name provided and pattern present)
+    This is NOT truth; it only narrows candidates. Truth is signature check.
+    """
+    try:
+        devs = {d.lower() for d in (entry.get("devices") or [])}
+        if guid_lc and devs and guid_lc in devs:
+            return True
+        pat = (entry.get("device_name_pattern") or "").strip()
+        if device_name and pat:
+            try:
+                return re.search(pat, device_name, re.IGNORECASE) is not None
+            except Exception:
+                return False
+        return False
+    except Exception:
+        return False
+
 def _key_tuple(rec):
     # Snapshot records are keyed by (hive, flow, subkey, name). That identity is
     # stable across snapshots and is what we diff when learning.
@@ -968,7 +1041,10 @@ def _try_vendor_first(device_id, flow, enable, ini_path=None):
     main_entries = db.get("main") or []
     for entry in main_entries:
         try:
-            if _vendor_entry_applies(entry, device_id, flow):
+            # Fail-fast: still require GUID membership for selecting candidates quickly,
+            # but truth is signature. This prevents false "supported" when the value
+            # doesn't exist for this endpoint.
+            if _vendor_entry_applies(entry, device_id, flow) and _main_entry_signature_applies(entry, device_id, flow):
                 wrote = _set_vendor_entry_state(entry, device_id, flow, enable)
                 if wrote:
                     ok, st = _verify_vendor_entry(entry, device_id, flow, enable, timeout=2.5, interval=0.2, consecutive=2)
@@ -992,7 +1068,7 @@ def _find_first_vendor_entry(device_id, flow, ini_path=None):
     flow_name = "Render" if str(flow).lower().startswith("r") else "Capture"
     # 1) Prefer entries that actually exist in registry for this endpoint
     for entry in main_entries:
-        if _vendor_entry_applies(entry, device_id, flow_name):
+        if _vendor_entry_applies(entry, device_id, flow_name) and _main_entry_signature_applies(entry, device_id, flow_name):
             return entry
     # 2) Fallback: first membership-only match (old behavior)
     for entry in main_entries:
@@ -1450,301 +1526,6 @@ def _append_guid_to_write_devices(ini_path, section_name, write_index, guid_lc):
                 lines[devices_idx] = new_line
     with open(ini_path, "w", encoding="utf-8", errors="replace") as f:
         f.writelines(lines)
-
-def _remove_guid_from_write_devices(ini_path, section_name, write_index, guid_lc):
-    """
-    Remove guid_lc from write{write_index}_devices.
-    If the devices line becomes empty, keep it as an empty list (applies to nobody).
-    (We do NOT delete the line; empty means 'no devices', not 'universal'.)
-    """
-    try:
-        with open(ini_path, "r", encoding="utf-8", errors="replace") as f:
-            lines = f.read().splitlines(keepends=True)
-    except FileNotFoundError:
-        return
-    sec_hdr = f"[{section_name}]"
-    sec_start = None
-    sec_end = len(lines)
-    for i, line in enumerate(lines):
-        s = line.strip()
-        if s.startswith("[") and s.endswith("]"):
-            if sec_start is None:
-                if s.lower() == sec_hdr.lower():
-                    sec_start = i
-            else:
-                sec_end = i
-                break
-    if sec_start is None:
-        return
-    key_pat = re.compile(rf"^\s*write{write_index}_devices\s*=\s*(.*)$", re.IGNORECASE)
-    for i in range(sec_start + 1, sec_end):
-        m = key_pat.match(lines[i])
-        if not m:
-            continue
-        txt = m.group(1).strip()
-        cur = [x.strip().lower() for x in txt.split(",") if x.strip()] if txt else []
-        cur = [x for x in cur if x != guid_lc.lower()]
-        # Keep the line; empty means 'applies to nobody'
-        new_line = f"write{write_index}_devices = {','.join(cur)}\n" if cur else f"write{write_index}_devices = \n"
-        lines[i] = new_line
-        break
-    with open(ini_path, "w", encoding="utf-8", errors="replace") as f:
-        f.writelines(lines)
-
-def _find_write_index_by_payload(ini_path, section_name, w):
-    """
-    Find write{i} index in section by full identity+payload match.
-    Returns i or None.
-    """
-    db = _load_vendor_db_split(ini_path)
-    target = None
-    for e in (db.get("fx") or []):
-        if e.get("name") == section_name:
-            target = e
-            break
-    if not target:
-        return None
-    def _same(a, b):
-        return (
-            (a.get("hive","").upper() == b.get("hive","").upper()) and
-            (str(a.get("subkey","")).strip().lower() == str(b.get("subkey","")).strip().lower()) and
-            (str(a.get("name","")).strip().lower() == str(b.get("name","")).strip().lower()) and
-            (str(a.get("type_enable","")).upper() == str(b.get("type_enable","")).upper()) and
-            (str(a.get("type_disable","")).upper() == str(b.get("type_disable","")).upper()) and
-            (str(a.get("enable","")).strip() == str(b.get("enable","")).strip()) and
-            (str(a.get("disable","")).strip() == str(b.get("disable","")).strip())
-        )
-    for idx, cw in enumerate(target.get("writes") or [], start=1):
-        if _same(cw, w):
-            return idx
-    return None
-
-def _cleanup_conflicting_toggles(ini_path, section_name, guid_lc, keep_idx, keep_write):
-    """
-    Ensure guid_lc is NOT listed on any other toggle in this bucket that has
-    the same identity (hive/subkey/name) but different payload than keep_write.
-    keep_idx is the index of the write we want to keep for this GUID.
-    Why:
-      A bucket can hold multiple devices. If two write blocks have the same identity
-      but different payload, attaching a GUID to both would make toggling ambiguous.
-    """
-    db = _load_vendor_db_split(ini_path)
-    target = None
-    for e in (db.get("fx") or []):
-        if e.get("name") == section_name:
-            target = e
-            break
-    if not target:
-        return
-    def _same_identity(a, b):
-        return (
-            (a.get("hive","").upper() == b.get("hive","").upper()) and
-            (str(a.get("subkey","")).strip().lower() == str(b.get("subkey","")).strip().lower()) and
-            (str(a.get("name","")).strip().lower() == str(b.get("name","")).strip().lower())
-        )
-    for idx, cw in enumerate(target.get("writes") or [], start=1):
-        if idx == keep_idx:
-            continue
-        if _same_identity(cw, keep_write):
-            # remove guid from this conflicting toggle
-            _remove_guid_from_write_devices(ini_path, section_name, idx, guid_lc)
-
-def _sanitize_ini_section_name(value_name: str):
-    # e.g. "{1da5d803-...},5" -> "vendor_{1da5d803-...},5"
-    base = re.sub(r'[^A-Za-z0-9_,\-{}]+', "_", value_name)
-    return f"vendor_{base}"
-
-def _append_vendor_ini_entry_if_missing(ini_path, section_name, value_name, dword_enable, dword_disable,
-                                        flows="Render,Capture", hives="HKCU,HKLM", notes="", subkey="FxProperties"):
-    """
-    Append a vendor INI section to ini_path only if it does not already exist.
-    Records 'subkey' so fast reads/writes hit the exact learned spot.
-    """
-    cfg = configparser.ConfigParser()
-    try:
-        if os.path.exists(ini_path):
-            cfg.read(ini_path, encoding="utf-8")
-    except Exception:
-        pass
-    if cfg.has_section(section_name):
-        return "exists"
-    try:
-        ini_dir = os.path.dirname(ini_path)
-        if ini_dir:
-            os.makedirs(ini_dir, exist_ok=True)
-    except Exception:
-        pass
-    subkey_norm = "Properties" if str(subkey or "").strip().lower().startswith("prop") else "FxProperties"
-    lines = []
-    lines.append("")
-    lines.append(f"[{section_name}]")
-    lines.append(f"value_name = {str(value_name).strip().lower()}")
-    lines.append(f"dword_enable = {int(dword_enable)}")
-    lines.append(f"dword_disable = {int(dword_disable)}")
-    lines.append(f"hives = {hives}")
-    lines.append(f"flows = {flows}")
-    lines.append(f"subkey = {subkey_norm}")  # record learned scope
-    if notes:
-        lines.append(f"notes = {notes}")
-    lines.append("devices = ")
-    text = "\n".join(lines) + "\n"
-    with open(ini_path, "a", encoding="utf-8", errors="replace") as f:
-        f.write(text)
-    return "appended"
-
-def _build_vendor_ini_snippet(target, snapA, snapB, diffs, section_name=None):
-    """
-    Build a suggested vendor INI section based on DWORD flips observed.
-    Records the actual subkey (FxProperties or Properties) where the flip occurred.
-    """
-    cands = []
-    for f in diffs.get("dword_flips", []):
-        name = str(f.get("name",""))
-        subkey = str(f.get("subkey",""))
-        hive = str(f.get("hive",""))
-        if not (name.startswith("{") and "}" in name and "," in name):
-            continue
-        # Keep both FxProperties and Properties; pick the first reliable change
-        before = int(f.get("before"))
-        after  = int(f.get("after"))
-        cands.append({
-            "hive": hive, "flow": None, "subkey": subkey, "name": name,
-            "before": before, "after": after
-        })
-    if not cands:
-        return None, None
-    # Prefer HKCU candidates; keep original order otherwise (first reliable)
-    cands.sort(key=lambda x: (0 if x["hive"] == "HKCU" else 1))
-    pick = cands[0]
-    dword_enable  = int(pick["before"])
-    dword_disable = int(pick["after"])
-    picked_subkey = pick.get("subkey") if pick.get("subkey") in ("FxProperties", "Properties") else "FxProperties"
-    if not section_name:
-        base = re.sub(r'[^A-Za-z0-9_,\-{}]+', "_", pick["name"])
-        section_name = f"vendor_{base}"
-    notes = f"Auto-learned (manual UI) on '{target.get('name')}' ({target.get('flow')}). A=enabled,B=disabled."
-    snippet = []
-    snippet.append(f"[{section_name}]")
-    snippet.append(f"value_name = {pick['name']}")
-    snippet.append(f"dword_enable = {dword_enable}")
-    snippet.append(f"dword_disable = {dword_disable}")
-    snippet.append("hives = HKCU,HKLM")
-    snippet.append("flows = Render,Capture")
-    snippet.append(f"subkey = {picked_subkey}")  # where it came from
-    snippet.append(f"notes = {notes}")
-    snippet.append("devices = ")
-    return "\n".join(snippet) + "\n", pick
-
-def _collect_registry_samples(device_id, repeats=3, delay=0.15):
-    """
-    Collect several registry-only samples for the current device state to filter UI noise.
-    repeats >= 1; delay in seconds between samples.
-    Why:
-      Registry dumps are noisy during UI operations; sampling lets us keep only stable keys
-      for FX learning (reduces false positives).
-    """
-    samples = []
-    for i in range(max(1, int(repeats))):
-        try:
-            samples.append(_dump_mmdevices_all_values(device_id))
-        except Exception:
-            samples.append([])
-        if i + 1 < repeats:
-            _short_settle(delay)
-    return samples
-
-def _stable_registry_map(samples):
-    """
-    From a list of registry dumps (lists of rec dicts), build a stability map:
-      key -> {'type': typ, 'value': dataRaw} only if the key's type and value are identical
-      across ALL samples. Keys that change (type OR dataRaw) are dropped.
-    Keys are tuples: (hive, flow, subkey, name).
-    This is the core noise-filtering step for FX learn: it removes keys that fluctuate
-    for reasons unrelated to the specific effect toggle.
-    """
-    if not samples:
-        return {}
-    counts = {}
-    total = len(samples)
-    for lst in samples:
-        for rec in (lst or []):
-            k = (str(rec.get("hive")), str(rec.get("flow")), str(rec.get("subkey")), str(rec.get("name")).lower())
-            typ = rec.get("type")
-            val = rec.get("dataRaw")
-            if k not in counts:
-                counts[k] = {"ok": True, "type": typ, "value": val, "seen": 1}
-            else:
-                same = (counts[k]["type"] == typ) and (counts[k]["value"] == val)
-                if same:
-                    counts[k]["seen"] += 1
-                else:
-                    counts[k]["ok"] = False
-    out = {}
-    for k, info in counts.items():
-        if info["ok"] and info["seen"] == total:
-            out[k] = {"type": info["type"], "value": info["value"]}
-    return out
-
-def _build_fx_multiwrite_from_stable_maps(target, stableA, stableB):
-    """
-    Build multi-write entries from stability-filtered maps:
-    - Only include keys present in both maps
-    - Type must match and value must differ
-    - Encode values into INI-friendly forms (int/str/'hex:..')
-    - Order results so the first write (decider) is the most stable-looking signal
-    Scoring preference:
-      FxProperties + DWORD 0/1 flips are treated as stronger signals than REG_BINARY changes.
-    """
-    writes = []
-    both = set(stableA.keys()) & set(stableB.keys())
-    for k in sorted(both):
-        ta = stableA[k]["type"]; tb = stableB[k]["type"]
-        va = stableA[k]["value"]; vb = stableB[k]["value"]
-        if ta != tb or va == vb:
-            continue
-        hive, flow, subkey, name = k
-        def _encode(typ, raw):
-            if typ == winreg.REG_DWORD:
-                try: return int(raw)
-                except Exception: return None
-            if typ == winreg.REG_SZ:
-                try: return str(raw)
-                except Exception: return None
-            if typ == winreg.REG_BINARY:
-                return _format_bin_hex(str(raw or ""))
-            return None
-        en = _encode(ta, va)
-        di = _encode(tb, vb)
-        if en is None or di is None:
-            continue
-        writes.append({
-            "hive": hive,
-            "subkey": subkey,
-            "name": name,
-            "type_enable": _reg_type_to_name(ta),
-            "type_disable": _reg_type_to_name(tb),
-            "enable": en,
-            "disable": di,
-        })
-    # Prefer stable indicators first => decider_index=1 picks the best
-    def _score(w):
-        score = 0
-        if str(w.get("subkey") or "").startswith("FxProperties"):
-            score += 3
-        te = (w["type_enable"] or "").upper()
-        td = (w["type_disable"] or "").upper()
-        if te == "REG_DWORD" and td == "REG_DWORD":
-            score += 3
-            try:
-                if {int(w["enable"]), int(w["disable"])} == {0, 1}:
-                    score += 2
-            except Exception:
-                pass
-        if te == "REG_BINARY" and td == "REG_BINARY":
-            score -= 1
-        return score
-    writes.sort(key=_score, reverse=True)
-    return writes
 
 def _learn_vendor_from_discovery_and_write_ini(target, ini_path=None, prefer_hkcu=True):
     """
@@ -2571,24 +2352,21 @@ def _list_fx_for_device(device_id, flow, ini_path=None, device_name=None):
     guid = _extract_endpoint_guid_from_device_id(device_id)
     if not guid:
         return []
+    guid_lc = guid.strip().lower()
     out = []
     for entry in db.get("fx") or []:
-        devs = {d.lower() for d in (entry.get("devices") or [])}
-        if devs and guid.lower() in devs:
-            e = dict(entry)
-            e["source"] = "ini"
-            out.append({"fx_name": entry.get("fx_name"), "entry": e})
+        # Fail-fast candidate narrowing: only consider entries that match GUID or pattern.
+        if not _fx_candidate_by_guid_or_pattern(entry, guid_lc, device_name):
             continue
-        # Spoofing path (requires caller-provided name)
-        if device_name:
-            try:
-                if _fx_entry_spoof_applies(entry, device_id, flow, device_name):
-                    e = dict(entry)
-                    e["source"] = "ini"
-                    e["_matchedBy"] = "pattern+signature"
-                    out.append({"fx_name": entry.get("fx_name"), "entry": e})
-            except Exception:
-                continue
+        # Truth check: signature must fit this endpoint right now.
+        try:
+            if _fx_entry_signature_applies(entry, device_id, flow):
+                e = dict(entry)
+                e["source"] = "ini"
+                e["_matchedBy"] = "signature"
+                out.append({"fx_name": entry.get("fx_name"), "entry": e})
+        except Exception:
+            continue
     return out
 
 def _find_fx_for_device(device_id, flow, fx_name, ini_path=None, device_name=None):
@@ -2626,6 +2404,9 @@ def _apply_enhancements(device_id, flow, enable, prefer_hklm=False, allow_univer
             if not devs or guid.lower() not in {d.lower() for d in devs}:
                 continue
             if entry.get("flows") and ("Render" if str(flow).lower().startswith("r") else "Capture") not in entry["flows"]:
+                continue
+            # Fail fast: only allow apply when signature fits THIS endpoint now.
+            if not _main_entry_signature_applies(entry, device_id, flow):
                 continue
             wrote = _set_vendor_entry_state(entry, device_id, flow, enable)
             if wrote:
