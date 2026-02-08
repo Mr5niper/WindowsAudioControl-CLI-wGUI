@@ -262,6 +262,67 @@ def _fx_signature_matches_legacy(entry: dict, device_id: str, flow: str) -> bool
                 return True  # both are valid signatures; whichever is newest is "real"
             return True
     return False
+
+def _legacy_value_matches_this_guid_now(entry: dict, device_id: str, flow: str) -> bool:
+    """
+    Legacy (single DWORD) FX applicability truth check:
+    True if the value exists for THIS GUID right now and equals either enable or disable.
+    This does not rely on GUID lists or device names.
+    """
+    try:
+        val_name = (entry.get("value_name") or "").strip().lower()
+        if not val_name:
+            return False
+        try:
+            en_val = int(entry.get("enable", entry.get("dword_enable")))
+            di_val = int(entry.get("disable", entry.get("dword_disable")))
+        except Exception:
+            return False
+        # Probe both FxProperties and Properties (some legacy entries don't record subkey)
+        for subk in ("FxProperties", "Properties"):
+            base = _endpoint_base_path(device_id, flow, subk)
+            if not base:
+                continue
+            cu_val, cu_typ = _fast_read_one("HKCU", base, val_name)
+            lm_val, lm_typ = _fast_read_one("HKLM", base, val_name)
+            if cu_typ == winreg.REG_DWORD:
+                try:
+                    v = int(cu_val)
+                    if v == en_val or v == di_val:
+                        return True
+                except Exception:
+                    pass
+            if lm_typ == winreg.REG_DWORD:
+                try:
+                    v = int(lm_val)
+                    if v == en_val or v == di_val:
+                        return True
+                except Exception:
+                    pass
+        return False
+    except Exception:
+        return False
+
+def _legacy_find_live_subkey(entry: dict, device_id: str, flow: str):
+    """
+    Return 'FxProperties' or 'Properties' if the legacy value exists there for this GUID now.
+    Prefer FxProperties if found in both. Returns None if not found.
+    """
+    try:
+        val_name = (entry.get("value_name") or "").strip().lower()
+        if not val_name:
+            return None
+        for subk in ("FxProperties", "Properties"):
+            base = _endpoint_base_path(device_id, flow, subk)
+            if not base:
+                continue
+            cu_val, cu_typ = _fast_read_one("HKCU", base, val_name)
+            lm_val, lm_typ = _fast_read_one("HKLM", base, val_name)
+            if cu_typ == winreg.REG_DWORD or lm_typ == winreg.REG_DWORD:
+                return subk
+        return None
+    except Exception:
+        return None
 def _fx_signature_matches_multi(entry: dict, device_id: str, flow: str) -> bool:
     """
     Multi-write FX spoof verification:
@@ -273,11 +334,8 @@ def _fx_signature_matches_multi(entry: dict, device_id: str, flow: str) -> bool:
     writes_all = entry.get("writes") or []
     if not writes_all:
         return False
-    guid_lc = _guid_of(device_id)
-    # IMPORTANT (FX universality):
-    # Do NOT require write{i}_devices membership for matching.
-    # Registry signature is truth: if the value exists for THIS GUID and matches
-    # enable/disable payload, the write can be considered compatible.
+    # IMPORTANT: ignore write{i}_devices gating for MATCHING.
+    # If the registry values match the INI signatures on this GUID, it applies.
     writes = list(writes_all)
     try:
         qt = float(entry.get("quorum_threshold", 0.60))
@@ -294,10 +352,13 @@ def _fx_signature_matches_multi(entry: dict, device_id: str, flow: str) -> bool:
         base = _endpoint_base_path(device_id, flow, subk)
         if not base:
             continue
-        total += 1
-        # Read both hives; accept match in either.
+        # Read both hives; if the value doesn't exist in either, it's not part of this
+        # device's signature and should not count against the quorum.
         cu_val, cu_typ = _fast_read_one("HKCU", base, name)
         lm_val, lm_typ = _fast_read_one("HKLM", base, name)
+        if cu_typ is None and lm_typ is None:
+            continue
+        total += 1 # Only count writes for keys that actually exist on the device.
         # enable signature
         if _value_equals(w.get("enable"), w.get("type_enable"), cu_val, cu_typ) or \
            _value_equals(w.get("enable"), w.get("type_enable"), lm_val, lm_typ):
@@ -311,7 +372,6 @@ def _fx_signature_matches_multi(entry: dict, device_id: str, flow: str) -> bool:
     if total <= 0:
         return False
     return (ok / float(total)) >= qt
-
 def _fx_write_matches_this_guid_now(w: dict, device_id: str, flow: str) -> bool:
     """
     Return True if this write's target value exists for this GUID and matches either
@@ -702,9 +762,9 @@ def _load_vendor_db_split(ini_path=None):
                         "flows": [x.strip().capitalize() for x in cfg.get(sec, "flows", fallback="Render,Capture").split(",") if x.strip()],
                         "multi_write": False,
                     })
-                # Only keep FX sections that have at least one device GUID
-                if e["devices"]:
-                    entries["fx"].append(e)
+                # Keep all parsed FX sections; discovery is based on signature,
+                # not just explicit GUID membership.
+                entries["fx"].append(e)
             else:
                 # MAIN entry (supports optional subkey)
                 value_name = cfg.get(sec, "value_name").strip().lower()
@@ -1214,10 +1274,10 @@ def _fast_read_vendor_entry_state(entry, device_id, flow):
             all_writes = entry.get("writes") or []
             if not all_writes:
                 return None
-            guid_lc = _guid_of(device_id)
-            writes = [w for w in all_writes if _write_applies_to_guid(w, guid_lc)]
-            if not writes:
-                return None
+            # For fast, universal reads, do not filter by write{i}_devices.
+            # Instead, pick the best candidate from all writes and probe it. If the
+            # key doesn't exist for this device, the read will fail gracefully.
+            writes = all_writes
             # Score: prefer FxProperties, then REG_DWORD (0/1), else others
             # This keeps GUI state reads fast while still picking the most stable indicator.
             def _score(w):
@@ -1991,24 +2051,23 @@ def _perform_multi_writes(entry, device_id, flow, enable):
       - We treat any failed applicable write as a failure because partial application
         often produces inconsistent driver state.
     """
-    guid_lc = _guid_of(device_id)
     ok_all = True
     for w in entry.get("writes") or []:
-        # IMPORTANT (FX universality):
-        # For applying, we still respect explicit per-GUID scoping IF it includes us.
-        # But if it doesn't include us, we can still apply IF the write's value exists
-        # for this GUID and matches a known signature right now.
-        if not _write_applies_to_guid(w, guid_lc):
-            if not _fx_write_matches_this_guid_now(w, device_id, flow):
-                continue
-        hive_name = (w.get("hive") or "").upper()
-        hive = winreg.HKEY_LOCAL_MACHINE if hive_name == "HKLM" else winreg.HKEY_CURRENT_USER
+        # IMPORTANT: ignore write{i}_devices gating for APPLYING.
+        # Apply only if the value exists at the INI-defined location for this GUID.
         subk = (w.get("subkey") or "").strip()
         name = (w.get("name") or "").strip().lower()
         base = _endpoint_base_path(device_id, flow, subk)
-        if not base:
+        if not base or not name:
             ok_all = False
             continue
+        # If the value doesn't exist in either hive, skip it (don't invent new keys).
+        cu_val, cu_typ = _fast_read_one("HKCU", base, name)
+        lm_val, lm_typ = _fast_read_one("HKLM", base, name)
+        if cu_typ is None and lm_typ is None:
+            continue
+        hive_name = (w.get("hive") or "").upper()
+        hive = winreg.HKEY_LOCAL_MACHINE if hive_name == "HKLM" else winreg.HKEY_CURRENT_USER
         tname = w.get("type_enable") if enable else w.get("type_disable")
         try:
             typ = _reg_name_to_type(tname)
@@ -2046,10 +2105,10 @@ def _read_decider_state(entry, device_id, flow):
     if not entry.get("multi_write"):
         return None
     all_writes = entry.get("writes") or []
-    if not all_writes:
-        return None
-    guid_lc = _guid_of(device_id)
-    writes = [w for w in all_writes if _write_applies_to_guid(w, guid_lc)]
+    # IMPORTANT: ignore write{i}_devices gating for READING/VERIFYING.
+    # Read strictly at the INI-defined locations; if a value isn't present for this GUID,
+    # it simply doesn't contribute a vote.
+    writes = list(all_writes)
     if not writes:
         return None
     quorum_threshold = float(entry.get("quorum_threshold", 0.60))
@@ -2114,7 +2173,7 @@ def _read_decider_state(entry, device_id, flow):
         if t_en == "REG_DWORD" and t_di == "REG_DWORD":
             s += 5
             try:
-                if {int(w.get("enable")), int(w.get("disable"))} == {0, 1}:
+                if {int(w["enable"]), int(w["disable"])} == {0, 1}:
                     s += 2
             except Exception:
                 pass
@@ -2590,13 +2649,28 @@ def _list_fx_for_device(device_id, flow, ini_path=None, device_name=None):
         return []
     guid_lc = guid.strip().lower()
     out = []
+    seen_sections = set()
     for entry in db.get("fx") or []:
-        # Fail-fast candidate narrowing: only consider entries that match GUID or pattern.
-        if not _fx_candidate_by_guid_or_pattern(entry, guid_lc, device_name):
+        # Check for explicit GUID membership first. If found, add it and move on.
+        devs = {d.lower() for d in (entry.get("devices") or [])}
+        if devs and guid_lc in devs:
+            e = dict(entry)
+            e["source"] = "ini"
+            out.append({"fx_name": entry.get("fx_name"), "entry": e})
+            seen_sections.add(entry["name"])
             continue
-        # Truth check: signature must fit this endpoint right now.
+
+    for entry in db.get("fx") or []:
+        if entry["name"] in seen_sections:
+            continue
         try:
-            if _fx_entry_signature_applies(entry, device_id, flow):
+            # Universal discovery: if not an explicit member, check if the signature matches.
+            # A device_name_pattern is for readability/learn only, not a hard filter for discovery.
+            if entry.get("multi_write"):
+                ok_sig = _fx_signature_matches_multi(entry, device_id, flow)
+            else:
+                ok_sig = _legacy_value_matches_this_guid_now(entry, device_id, flow)
+            if ok_sig:
                 e = dict(entry)
                 e["source"] = "ini"
                 e["_matchedBy"] = "signature"
@@ -2679,10 +2753,19 @@ def _apply_fx(device_id, flow, fx_name, enable, ini_path=None, device_name=None)
         verified_by = f"vendor-fx:multi:{entry.get('fx_name','')}"
         return (st is not None and st == bool(enable)), verified_by if st is not None else None, st
     # Legacy single-DWORD FX
-    wrote = _set_vendor_entry_state(entry, device_id, flow, enable)
+    # Universal apply: only apply legacy DWORD if the value exists and matches a known
+    # state signature right now (prevents writing to unrelated devices).
+    if not _legacy_value_matches_this_guid_now(entry, device_id, flow):
+        return False, None, None
+    live_subkey = _legacy_find_live_subkey(entry, device_id, flow)
+    if not live_subkey:
+        return False, None, None
+    tmp = dict(entry)
+    tmp["subkey"] = live_subkey
+    wrote = _set_vendor_entry_state(tmp, device_id, flow, enable)
     if not wrote:
         return False, None, None
-    ok, state = _verify_vendor_entry(entry, device_id, flow, enable,
+    ok, state = _verify_vendor_entry(tmp, device_id, flow, enable,
                                      timeout=2.5, interval=0.2, consecutive=2)
     verified_by = f"vendor-fx:{entry.get('fx_name','')}"
     return ok, verified_by if ok else None, state
