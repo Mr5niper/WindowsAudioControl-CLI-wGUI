@@ -2113,35 +2113,48 @@ class AudioGUI:
         except Exception:
             return []
     def _setup_combobox_autocomplete(self, combo: ttk.Combobox):
+        # Track mouse state to prevent "snapping" during a click-and-drag highlight
+        self._mouse_is_down = False
+
+        def on_mousedown(ev):
+            self._mouse_is_down = True
+
+        def on_mouseup(ev):
+            self._mouse_is_down = False
+
         def on_keyrelease(ev):
-            # 1. Ignore modifier keys (Shift, Caps_Lock, Control, etc.)
-            if ev.keysym in ("Shift_L", "Shift_R", "Caps_Lock", "Control_L", "Control_R", "Alt_L", "Alt_R"):
+            # 1. Ignore if mouse is currently dragging or text is already highlighted
+            if self._mouse_is_down or combo.selection_present():
                 return
-    
-            # 2. Ignore backspace/delete so user can actually correct mistakes
-            if ev.keysym in ("BackSpace", "Delete", "Left", "Right"):
+
+            # 2. Ignore modifier/navigation keys
+            if ev.keysym in ("Shift_L", "Shift_R", "Control_L", "Control_R", "Alt_L", "Alt_R", 
+                             "Caps_Lock", "Left", "Right", "Up", "Down", "Home", "End"):
                 return
-    
+
+            # 3. Ignore deletion keys
+            if ev.keysym in ("BackSpace", "Delete"):
+                return
+
             text = combo.get()
-            if not text: 
+            if not text:
                 return
-    
+
             vals = list(combo.cget("values") or [])
             low = text.lower()
             
             for v in vals:
                 s = str(v)
                 if s.lower().startswith(low):
-                    # Set the full text but keep track of where the user was
                     typed_len = len(text)
                     combo.set(s)
-                    
-                    # Position cursor at the end of the TYPED part, 
-                    # and select (highlight) the suggested completion
+                    # Suggest only by highlighting the new portion
                     combo.icursor(typed_len)
                     combo.select_range(typed_len, tk.END)
                     break
-    
+
+        combo.bind("<Button-1>", on_mousedown, add="+")
+        combo.bind("<ButtonRelease-1>", on_mouseup, add="+")
         combo.bind("<KeyRelease>", on_keyrelease, add="+")
 def launch_gui():
     # GUI bootstrap:
@@ -2198,6 +2211,7 @@ def launch_gui():
         _log_exc("MAINLOOP EXCEPTION")
     _log("launch_gui: mainloop exited")
     return 0
+
 
 
 
