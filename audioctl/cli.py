@@ -550,8 +550,11 @@ def cmd_enhancements(args):
     #   - "multi-write" sequences (multiple registry values/types written together).
     if args.list_fx:
         # List FX available to this device as defined in vendor_toggles.ini.
-        fx_list = _list_fx_for_device(target["id"], target["flow"],
-                                      ini_path=getattr(args, "vendor_ini", None))
+        fx_list = _list_fx_for_device(
+            target["id"], target["flow"],
+            ini_path=getattr(args, "vendor_ini", None),
+            device_name=target["name"],
+        )
         fx_list = sorted(fx_list, key=lambda x: (x.get("fx_name") or "").lower())
 
         # JSON form is consumed by the GUI; includes per-FX state if readable.
@@ -726,7 +729,8 @@ def cmd_enhancements(args):
         enable = bool(args.enable_fx)
         ok, verified_by, state = _apply_fx(
             target["id"], target["flow"], chosen_name, enable,
-            ini_path=getattr(args, "vendor_ini", None)
+            ini_path=getattr(args, "vendor_ini", None),
+            device_name=target["name"],
         )
         if ok:
             print(json.dumps({
@@ -755,7 +759,11 @@ def cmd_enhancements(args):
         if not desired:
             print("ERROR: FX name cannot be empty", file=sys.stderr)
             return 1
-        fx_all = _list_fx_for_device(target["id"], target["flow"], ini_path=getattr(args, "vendor_ini", None))
+        fx_all = _list_fx_for_device(
+            target["id"], target["flow"],
+            ini_path=getattr(args, "vendor_ini", None),
+            device_name=target["name"],
+        )
         # Build matches by name using substring or regex, case-insensitive (same as enable/disable-fx)
         matches_fx = []
         if args.regex:
@@ -1090,7 +1098,7 @@ def cmd_get_device_state(args):
     # FX list with fast states (ALWAYS list FX if present in INI; do not depend on MAIN support)
     available_fx = []
     try:
-        fx_list = _list_fx_for_device(dev_id, flow, ini_path=ini_path)
+        fx_list = _list_fx_for_device(dev_id, flow, ini_path=ini_path, device_name=target["name"])
         fx_list = sorted(fx_list, key=lambda x: (x.get("fx_name") or "").lower())
         for fx in fx_list:
             entry = fx.get("entry")
