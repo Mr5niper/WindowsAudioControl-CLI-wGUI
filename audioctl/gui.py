@@ -205,11 +205,9 @@ class LearnRunner:
 def run_audioctl(args_list, capture_json=False, expect_ok=True):
     """
     Run 'audioctl' CLI as a subprocess.
-
     Why subprocess:
     - The CLI is our authority for COM/registry interaction; it manages COM init/cleanup per call.
     - The GUI stays stable by avoiding direct COM usage in the Tk process.
-
     args_list: list of strings, e.g. ["list", "--json"]
     capture_json: if True, parse stdout as JSON and return the object
     expect_ok: if True, raise RuntimeError on non-zero exit codes
@@ -263,7 +261,6 @@ def run_audioctl(args_list, capture_json=False, expect_ok=True):
 def run_audioctl_quick_json(args_list, timeout=0.75):
     """
     Fast one-shot CLI call with timeout.
-
     Used primarily for UI freshness (context menu labels). We do *not* want to
     block the UI waiting on a slow/hung driver call; instead we:
       - enforce a small timeout
@@ -293,13 +290,11 @@ def run_audioctl_quick_json(args_list, timeout=0.75):
 def run_audioctl_interactive(args_list, prompt_patterns, expect_ok=True):
     """
     Run 'audioctl' CLI as a subprocess, line-by-line.
-
     This is used for interactive CLI flows where the CLI prints a prompt
     on stdout and waits for Enter on stdin. We:
       - read stdout line-by-line
       - when a known prompt substring appears, show a messagebox to the user
       - then write "\n" to the subprocess stdin to continue
-
     prompt_patterns: list of (substring, title, custom_message) tuples.
       - substring: text to look for in a stdout line.
       - title: window title for the messagebox.
@@ -639,12 +634,10 @@ class AudioGUI:
     def _schedule_state_population(self):
         """
         Start or restart incremental population of device_state_cache.
-
         Why incremental:
         - get-device-state can do COM reads and registry probes; running it for every
           device synchronously would freeze the UI.
         - Tk's event loop stays responsive when we schedule one device per tick.
-
         Note: We clear the cache on each refresh so we never mix old state from devices
         that may have disappeared or changed.
         """
@@ -796,7 +789,6 @@ class AudioGUI:
     def _ensure_device_state_entry(self, dev_id, flow):
         """
         Return a mutable state dict for a device in device_state_cache.
-
         Why:
         After we perform an action (mute/listen/enhancements/fx), we update the cache
         immediately so the next context menu open shows correct labels even before
@@ -1691,7 +1683,6 @@ class AudioGUI:
         """
         Delegate 'Learn Enhancements' (main) to the CLI interactive flow:
           audioctl enhancements --id "<id>" --flow <Flow> --learn
-
         Key behavior:
         - GUI shows the warning once, then sets AUDIOCTL_LEARN_CONFIRMED=1 so the CLI
           does not request the "I UNDERSTAND" confirmation again.
@@ -1839,7 +1830,6 @@ class AudioGUI:
         """
         Delegate FX learn to the existing interactive CLI flow:
           audioctl enhancements --learn-fx "<FX_NAME>" ...
-
         Why prompt ordering matters:
         FX learn is a two-pass A/B (A,B then A2,B2). We match the second-pass prompts
         first because those lines can appear later and are more specific; ordering
@@ -2041,10 +2031,8 @@ class AudioGUI:
     def on_toggle_fx_live(self, fx_name, current_state):
         """
         Toggle an FX via CLI, based on the state we saw when the menu was built.
-
         FX toggles are executed through `audioctl enhancements` sub-operations:
           --enable-fx / --disable-fx
-
         On success we update the cached FX state so the menu reflects the change
         immediately.
         current_state: True (enabled), False (disabled), or None (unknown).
@@ -2115,31 +2103,40 @@ class AudioGUI:
     def _setup_combobox_autocomplete(self, combo: ttk.Combobox):
         # Track mouse state to prevent "snapping" during a click-and-drag highlight
         self._mouse_is_down = False
-
         def on_mousedown(ev):
             self._mouse_is_down = True
-
         def on_mouseup(ev):
             self._mouse_is_down = False
-
+        def on_selected(ev=None):
+            # After choosing from the dropdown, Tk often leaves text highlighted.
+            # If we keep a selection range around, later keystrokes can behave oddly
+            # and our autocomplete may appear "stuck".
+            try:
+                combo.selection_clear()
+            except Exception:
+                pass
+            try:
+                combo.icursor(tk.END)
+            except Exception:
+                pass
         def on_keyrelease(ev):
-            # 1. Ignore if mouse is currently dragging or text is already highlighted
-            if self._mouse_is_down or combo.selection_present():
+            # 1. Ignore if mouse is currently dragging (avoid snapping while selecting)
+            if self._mouse_is_down:
                 return
-
             # 2. Ignore modifier/navigation keys
             if ev.keysym in ("Shift_L", "Shift_R", "Control_L", "Control_R", "Alt_L", "Alt_R", 
                              "Caps_Lock", "Left", "Right", "Up", "Down", "Home", "End"):
                 return
-
-            # 3. Ignore deletion keys
+            # 3. Deletion keys: let Tk edit normally; just clear any selection.
             if ev.keysym in ("BackSpace", "Delete"):
+                try:
+                    combo.selection_clear()
+                except Exception:
+                    pass
                 return
-
             text = combo.get()
             if not text:
                 return
-
             vals = list(combo.cget("values") or [])
             low = text.lower()
             
@@ -2152,9 +2149,9 @@ class AudioGUI:
                     combo.icursor(typed_len)
                     combo.select_range(typed_len, tk.END)
                     break
-
         combo.bind("<Button-1>", on_mousedown, add="+")
         combo.bind("<ButtonRelease-1>", on_mouseup, add="+")
+        combo.bind("<<ComboboxSelected>>", on_selected, add="+")
         combo.bind("<KeyRelease>", on_keyrelease, add="+")
 def launch_gui():
     # GUI bootstrap:
@@ -2211,8 +2208,4 @@ def launch_gui():
         _log_exc("MAINLOOP EXCEPTION")
     _log("launch_gui: mainloop exited")
     return 0
-
-
-
-
 
