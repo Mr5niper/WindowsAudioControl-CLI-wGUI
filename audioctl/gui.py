@@ -38,7 +38,6 @@ from .vendor_db import (
 # --- BEGIN: Non-blocking Learn runner (main Enhancements) ---
 import threading
 
-
 def _build_cli_cmd(args_list):
     # Build the command line used to run the CLI.
     #
@@ -56,7 +55,6 @@ def _build_cli_cmd(args_list):
         return [sys.executable] + args_list
     else:
         return [sys.executable, "-m", "audioctl"] + args_list
-
 
 class LearnRunner:
     # LearnRunner solves a very specific GUI problem:
@@ -79,7 +77,6 @@ class LearnRunner:
     # - "snapshot B" is the "disabled" capture point
     PATTERN_A = re.compile(r"When ready, press Enter to capture snapshot A", re.IGNORECASE)
     PATTERN_B = re.compile(r"When ready, press Enter to capture snapshot B", re.IGNORECASE)
-
     def __init__(self, args_list, on_output, on_state, confirmed=False):
         self.args_list = args_list
         self.on_output = on_output or (lambda _t: None)
@@ -96,7 +93,6 @@ class LearnRunner:
         # Collected output is kept so we can parse the final JSON summary after the process exits.
         self.collected_out = []
         self.collected_err = []
-
     def start(self):
         # Start the subprocess in a way that supports interactive stdin.
         # We keep stdout/stderr piped so we can:
@@ -123,12 +119,10 @@ class LearnRunner:
         threading.Thread(target=self._read_stream, args=(self.proc.stdout, True), daemon=True).start()
         threading.Thread(target=self._read_stream, args=(self.proc.stderr, False), daemon=True).start()
         threading.Thread(target=self._waiter, daemon=True).start()
-
     def _waiter(self):
         # Wait for completion off the Tk thread; report a simple state back to GUI.
         rc = self.proc.wait()
         self.on_state("done" if rc == 0 else "error")
-
     def _read_stream(self, stream, is_stdout):
         # Read stream one character at a time so we can detect prompts even if the CLI
         # prints them without a trailing newline.
@@ -149,7 +143,6 @@ class LearnRunner:
                 self._scan_for_prompts(buf)
         if buf:
             self._handle_text(buf, is_stdout)
-
     def _handle_text(self, text, is_stdout):
         # Store output for later parsing and forward it to the GUI's output callback.
         try:
@@ -161,7 +154,6 @@ class LearnRunner:
             pass
         self.on_output(text)
         self._scan_for_prompts(text)
-
     def _scan_for_prompts(self, text):
         t = text if isinstance(text, str) else str(text or "")
         # Auto-confirm (only on first attempt)
@@ -186,7 +178,6 @@ class LearnRunner:
             self._waiting_b = True
             self.on_state("waiting_snapshot_b")
             return
-
     def continue_snapshot_a(self):
         # Simulate pressing Enter at the "capture snapshot A" prompt.
         if self._waiting_a and self.proc and self.proc.stdin:
@@ -196,7 +187,6 @@ class LearnRunner:
             except Exception:
                 pass
             self._waiting_a = False
-
     def continue_snapshot_b(self):
         # Simulate pressing Enter at the "capture snapshot B" prompt.
         if self._waiting_b and self.proc and self.proc.stdin:
@@ -206,7 +196,6 @@ class LearnRunner:
             except Exception:
                 pass
             self._waiting_b = False
-
     def terminate(self):
         # Best-effort cancellation hook used when the user closes the learn UI.
         try:
@@ -215,9 +204,7 @@ class LearnRunner:
         except Exception:
             pass
 
-
 # --- END: Non-blocking Learn runner ---
-
 
 def run_audioctl(args_list, capture_json=False, expect_ok=True):
     """
@@ -276,7 +263,6 @@ def run_audioctl(args_list, capture_json=False, expect_ok=True):
         raise RuntimeError(f"audioctl failed with rc={rc}: {err or out}")
     return rc, out, err
 
-
 def run_audioctl_quick_json(args_list, timeout=0.75):
     """
     Fast one-shot CLI call with timeout.
@@ -306,7 +292,6 @@ def run_audioctl_quick_json(args_list, timeout=0.75):
         return json.loads(p.stdout or "{}")
     except Exception:
         return None
-
 
 def run_audioctl_interactive(args_list, prompt_patterns, expect_ok=True):
     """
@@ -388,7 +373,6 @@ def run_audioctl_interactive(args_list, prompt_patterns, expect_ok=True):
         raise RuntimeError(f"audioctl interactive failed with rc={rc}: {err_text or out_text}")
     return rc, out_text, err_text
 
-
 class AudioGUI:
     def __init__(self, root):
         self.root = root
@@ -444,12 +428,6 @@ class AudioGUI:
         self.topbar.pack(fill="x", pady=(0, 8))
         refresh_btn = ttk.Button(self.topbar, text="Refresh", command=self.refresh_devices)
         refresh_btn.pack(side="left")
-        ttk.Checkbutton(
-            self.topbar,
-            text="Show disabled/disconnected",
-            variable=self.include_all,
-            command=self.refresh_devices
-        ).pack(side="left", padx=(10, 0))
         self.chk_print_cmd = ttk.Checkbutton(
             self.topbar,
             text="Print CLI commands",
@@ -553,10 +531,8 @@ class AudioGUI:
         # Initial load
         self.refresh_devices()
         self.root.after_idle(self.adjust_layout_to_content)
-
     def is_group_row(self, iid):
         return iid not in self.item_to_device
-
     def on_left_click(self, event):
         # Prevent selecting group header rows and prevent header-click behaviors.
         region = self.tree.identify_region(event.x, event.y)
@@ -567,7 +543,6 @@ class AudioGUI:
             return
         if self.is_group_row(iid):
             return "break"
-
     def on_select_change(self, event):
         # If a group row gets selected (e.g., via keyboard navigation), redirect
         # selection to the first child device row, since only devices are actionable.
@@ -582,7 +557,6 @@ class AudioGUI:
                 self.tree.focus(children[0])
             else:
                 self.tree.selection_remove(iid)
-
     def on_focus_in(self, event):
         """
         Optional: when the main window regains focus, refresh devices & state.
@@ -594,14 +568,12 @@ class AudioGUI:
             self.refresh_devices()
         except Exception:
             pass
-
     def set_status(self, text):
         self.status.set(text)
         try:
             print(text)
         except Exception:
             pass
-
     def refresh_devices(self):
         try:
             from .logging_setup import _dbg
@@ -634,7 +606,6 @@ class AudioGUI:
                 "", "end", text="Recording (Capture)",
                 values=("", "", "", "", ""), open=True, tags=("group",)
             )
-
             def insert_group(parent, devs, flow_name):
                 for idx, d in enumerate(devs):
                     flags = [k for k, v in d["isDefault"].items() if v]
@@ -647,7 +618,6 @@ class AudioGUI:
                         values=(idx, d["name"], d["flow"], defaults_txt, d["id"])
                     )
                     self.item_to_device[iid] = d_copy
-
             insert_group(grp_render, render_devs, "Render")
             insert_group(grp_capture, capture_devs, "Capture")
             self.set_status("Device list updated")
@@ -661,7 +631,6 @@ class AudioGUI:
         except Exception as e:
             messagebox.showerror("Error", f"Failed to list devices:\n{e}")
             self.set_status("Failed to refresh devices")
-
     def _schedule_state_population(self):
         """
         Start or restart incremental population of device_state_cache.
@@ -678,7 +647,6 @@ class AudioGUI:
         self._state_queue = [(d["id"], d["flow"]) for d in self.devices]
         # Kick off first step
         self.root.after(10, self._populate_next_device_state)
-
     def _populate_next_device_state(self):
         """
         Process one device from the queue:
@@ -701,7 +669,6 @@ class AudioGUI:
         if isinstance(st, dict):
             self.device_state_cache[dev_id] = st
         self.root.after(10, self._populate_next_device_state)
-
     def adjust_layout_to_content(self):
         self.root.update_idletasks()
         try:
@@ -727,13 +694,11 @@ class AudioGUI:
         capture_count = sum(1 for d in self.devices if d["flow"] == "Capture")
         max_index_value = max(render_count - 1, capture_count - 1, 0)
         pad = 32
-
         def measure(text, fallback):
             try:
                 return tv_font.measure(text) if tv_font else fallback
             except Exception:
                 return fallback
-
         group_w = max(100, min(180, measure(longest_group, 140) + 12))
         name_w = max(240, min(700, max(measure(longest_name, 300), measure("Name", 60)) + pad))
         flow_w = max(80, max(measure("Recording", 90), measure("Flow", 60)) + 30)
@@ -768,7 +733,6 @@ class AudioGUI:
         h = min(desired_h, scr_h - margin)
         self.root.geometry(f"{int(w)}x{int(h)}")
         self.root.minsize(int(min(w, scr_w - margin)), int(min(h, scr_h - margin)))
-
     def maybe_print_cli(self, cmd_str: str):
         # Print the equivalent CLI command for a GUI action.
         #
@@ -783,7 +747,6 @@ class AudioGUI:
                 print(cmd_str)
             except Exception:
                 pass
-
     def _suspend_print_cli_and_disable_checkbox(self):
         # During learn flows, we temporarily disable "Print CLI commands" and force it off.
         # This keeps interactive output clean and prevents command spam while the GUI is
@@ -805,7 +768,6 @@ class AudioGUI:
             pass
         # HARD suppression (blocks any attempt to print via maybe_print_cli)
         self._suppress_cli_prints = True
-
     def _restore_print_cli_checkbox(self):
         # Restore checkbox and printing state after learn completes/cancels.
         # Restore checkbox and printing state
@@ -820,13 +782,11 @@ class AudioGUI:
             pass
         # Lift hard suppression
         self._suppress_cli_prints = False
-
     def get_selected_device(self):
         sel = self.tree.selection()
         if not sel:
             return None
         return self.item_to_device.get(sel[0])
-
     def _ensure_device_state_entry(self, dev_id, flow):
         """
         Return a mutable state dict for a device in device_state_cache.
@@ -851,7 +811,6 @@ class AudioGUI:
         if not isinstance(st.get("availableFX"), list):
             st["availableFX"] = []
         return st
-
     def _refresh_menu_state_async(self, d):
         # This is an asynchronous menu refresh helper (not always used).
         # It exists to avoid blocking UI while still updating menu labels based on
@@ -868,7 +827,6 @@ class AudioGUI:
                 st = None
             if not isinstance(st, dict):
                 return
-
             def apply_updates():
                 try:
                     # Cache
@@ -906,12 +864,10 @@ class AudioGUI:
                                 label = f"Enable {fx_name}"
                             else:
                                 label = f"Toggle {fx_name}"
-
                             def make_cmd(name, cur):
                                 def cmd():
                                     self.on_toggle_fx_live(name, cur)
                                 return cmd
-
                             self.fx_menu.add_command(label=label, command=make_cmd(fx_name, state_fx))
                         self.menu.entryconfig(self.fx_cascade_index, state="normal")
                     else:
@@ -919,11 +875,8 @@ class AudioGUI:
                         self.menu.entryconfig(self.fx_cascade_index, state="disabled")
                 except Exception:
                     pass
-
             self.root.after(0, apply_updates)
-
         threading.Thread(target=worker, daemon=True).start()
-
     def show_menu_for_item(self, event, iid=None):
         try:
             # Context menu rendering strategy:
@@ -939,16 +892,13 @@ class AudioGUI:
                 iid = self.tree.identify_row(event.y)
             if not iid:
                 return
-
             d = self.item_to_device.get(iid)
             if d:
                 self.tree.selection_set(iid)
             else:
                 self.tree.selection_remove(iid)
-
             end_idx = self.menu.index("end")
             end_idx = end_idx if end_idx is not None else -1
-
             if not d:
                 for i in range(end_idx + 1):
                     etype = self.menu.type(i)
@@ -956,16 +906,13 @@ class AudioGUI:
                         self.menu.entryconfig(i, state="disabled")
                 self.menu.tk_popup(event.x_root, event.y_root)
                 return
-
             # Enable all standard menu items
             for i in range(end_idx + 1):
                 etype = self.menu.type(i)
                 if etype in ("command", "cascade", "checkbutton", "radiobutton"):
                     self.menu.entryconfig(i, state="normal")
-
             # Fetch cached full device state instead of calling CLI each time
             state = self.device_state_cache.get(d["id"])
-
             # Mute label: use combined state (muted)
             mute_label = "Mute/Unmute"
             if isinstance(state, dict):
@@ -975,7 +922,6 @@ class AudioGUI:
                 elif muted is False:
                     mute_label = "Mute"
             self.menu.entryconfig(self.mute_menu_index, label=mute_label, state="normal")
-
             # Listen label (Capture only): use combined state (listenEnabled)
             if d["flow"] == "Capture":
                 listen_label = self.listen_menu_default_label
@@ -988,7 +934,6 @@ class AudioGUI:
                 self.menu.entryconfig(self.listen_menu_index, label=listen_label, state="normal")
             else:
                 self.menu.entryconfig(self.listen_menu_index, label=self.listen_menu_default_label, state="disabled")
-
             # Main enhancements toggle – vendor-only. If CLI reports None, we disable the action.
             # _pending_enh is stored so the click handler knows what state we based the label on.
             self._pending_enh = None
@@ -1021,7 +966,6 @@ class AudioGUI:
                 "supported": enh_state_enabled,
             }
             self.menu.entryconfig(self.enh_menu_index, label=enh_label, state=enh_menu_state)
-
             # Enhancement Effects submenu via combined state
             try:
                 self.fx_menu.delete(0, "end")
@@ -1041,18 +985,15 @@ class AudioGUI:
                         label = f"Enable {fx_name}"
                     else:
                         label = f"Toggle {fx_name}"
-
                     def make_fx_command(name, current_state):
                         def cmd():
                             self.on_toggle_fx_live(name, current_state)
                         return cmd
-
                     self.fx_menu.add_command(label=label, command=make_fx_command(fx_name, state_fx))
                 self.menu.entryconfig(self.fx_cascade_index, state="normal")
             else:
                 self.fx_menu.add_command(label="No effects available", state="disabled")
                 self.menu.entryconfig(self.fx_cascade_index, state="disabled")
-
             # Refresh this device's state BEFORE posting the menu (single fast CLI call).
             # This reduces stale labels if the background cache hasn't populated yet or state changed.
             try:
@@ -1097,12 +1038,10 @@ class AudioGUI:
                                     label = f"Enable {fx_name}"
                                 else:
                                     label = f"Toggle {fx_name}"
-
                                 def make_cmd(name, cur):
                                     def cmd():
                                         self.on_toggle_fx_live(name, cur)
                                     return cmd
-
                                 self.fx_menu.add_command(label=label, command=make_cmd(fx_name, state_fx))
                             self.menu.entryconfig(self.fx_cascade_index, state="normal")
                         else:
@@ -1111,7 +1050,6 @@ class AudioGUI:
             except Exception:
                 pass
             self.menu.tk_popup(event.x_root, event.y_root)
-
         except Exception as e:
             try:
                 from .logging_setup import _log_exc, _log
@@ -1131,7 +1069,6 @@ class AudioGUI:
                 pass
             # Allow next menu build
             self._menu_build_in_progress = False
-
     def on_right_click(self, event):
         iid = self.tree.identify_row(event.y)
         if not iid:
@@ -1139,7 +1076,6 @@ class AudioGUI:
         if not self.is_group_row(iid):
             self.tree.selection_set(iid)
         self.show_menu_for_item(event, iid=iid)
-
     def on_left_release(self, event):
         iid = self.tree.identify_row(event.y)
         if not iid:
@@ -1148,7 +1084,6 @@ class AudioGUI:
             self.tree.selection_remove(iid)
             return
         self.tree.selection_set(iid)
-
     def on_double_click(self, event):
         iid = self.tree.identify_row(event.y)
         if not iid:
@@ -1162,9 +1097,7 @@ class AudioGUI:
             if not self.tree.exists(iid):
                 return
             self.show_menu_for_item(event, iid=iid)
-
         self.root.after(50, _open_menu_later)
-
     def on_set_default(self):
         # set-default may require admin depending on system policy/driver.
         # After success, we refresh the list so default flags update immediately.
@@ -1198,7 +1131,6 @@ class AudioGUI:
             _log(f"GUI action: set-default failed via CLI id={d['id']} name={d['name']} error={e}")
             messagebox.showerror("Error", f"Failed to set default:\n{e}")
             self.set_status("Failed to set default")
-
     def on_set_volume(self):
         # Volume dialog uses a synced entry + slider so users can be precise but fast.
         # Initial value is read via `get-volume` to reflect current device state.
@@ -1243,7 +1175,6 @@ class AudioGUI:
             _log(f"GUI action: set-volume error via CLI id={d['id']} name={d['name']} err={e}")
             messagebox.showerror("Error", f"Failed to set volume:\n{e}")
             self.set_status("Failed to set volume")
-
     def on_toggle_mute(self):
         # Mute toggle flow:
         # - Query current mute state via `get-volume` so we know whether to send --mute or --unmute.
@@ -1298,7 +1229,6 @@ class AudioGUI:
             _log(f"GUI action: toggle-mute error via CLI id={d['id']} name={d['name']} err={e}")
             messagebox.showerror("Error", f"Failed to toggle mute:\n{e}")
             self.set_status("Failed to change mute state")
-
     def on_toggle_listen(self):
         # Listen is Capture-only by Windows design; Render devices cannot be "listened to".
         # We also query current state first to decide enable/disable deterministically.
@@ -1363,7 +1293,6 @@ class AudioGUI:
             _log(f"Listen toggle exception via CLI for {d['name']} ({d['id']}): {e!r}")
             messagebox.showerror("Error", f"Failed to toggle Listen:\n{e}")
             self.set_status("Failed to toggle Listen")
-
     def on_toggle_enhancements(self):
         # Enhancements toggling is vendor-only at runtime.
         # If the CLI reports enhancementsEnabled=None, it means no learned vendor method
@@ -1444,7 +1373,6 @@ class AudioGUI:
             _log(f"Enhancements toggle exception via CLI for {d['name']} ({d['id']}): {e!r}")
             messagebox.showerror("Error", f"Failed to toggle Enhancements:\n{e}")
             self.set_status("Failed to toggle Enhancements")
-
     def on_learn_enhancements(self):
         # Learn flow entrypoint:
         # This is a chooser that allows learning either:
@@ -1456,7 +1384,6 @@ class AudioGUI:
         d = self.get_selected_device()
         if not d:
             return
-
         try:
             # Choice Dialog
             choice_dialog = tk.Toplevel(self.root)
@@ -1464,30 +1391,24 @@ class AudioGUI:
             choice_dialog.transient(self.root)
             choice_dialog.grab_set()
             choice_dialog.resizable(False, False)
-
             try:
                 if sys.platform.startswith("win"):
                     choice_dialog.iconbitmap(resource_path("audio.ico"))
             except Exception:
                 pass
-
             frm = ttk.Frame(choice_dialog, padding=20)
             frm.pack(fill="both", expand=True)
-
             ttk.Label(frm, text="What are you learning?",
                       font=("", 10, "bold")).pack(pady=(0, 15))
-
             learn_type = tk.StringVar(value="main")
             fx_name_var = tk.StringVar()
             fx_entry_widget = None
-
             def on_radio_change():
                 if learn_type.get() == "fx":
                     fx_entry_widget.config(state="normal")
                     fx_entry_widget.focus_set()
                 else:
                     fx_entry_widget.config(state="disabled")
-
             rb1 = ttk.Radiobutton(
                 frm,
                 text="The main 'Audio Enhancements' on/off switch",
@@ -1496,7 +1417,6 @@ class AudioGUI:
                 command=on_radio_change
             )
             rb1.pack(anchor="w", pady=5)
-
             rb2 = ttk.Radiobutton(
                 frm,
                 text="A specific effect (e.g., Bass Boost, Loudness):",
@@ -1505,10 +1425,8 @@ class AudioGUI:
                 command=on_radio_change
             )
             rb2.pack(anchor="w", pady=5)
-
             fx_name_frame = ttk.Frame(frm)
             fx_name_frame.pack(anchor="w", padx=(30, 0), pady=(5, 15))
-
             ttk.Label(fx_name_frame, text="Effect name:").pack(side="left", padx=(0, 5))
             fx_entry_widget = ttk.Combobox(
                 fx_name_frame,
@@ -1525,9 +1443,7 @@ class AudioGUI:
                 pass
             # Enable simple type-to-autofill
             self._setup_combobox_autocomplete(fx_entry_widget)
-
             result = {"proceed": False, "type": None, "fx_name": None}
-
             def on_ok():
                 if learn_type.get() == "fx":
                     fx = fx_name_var.get().strip()
@@ -1540,42 +1456,32 @@ class AudioGUI:
                 result["type"] = learn_type.get()
                 result["proceed"] = True
                 choice_dialog.destroy()
-
             def on_cancel():
                 result["proceed"] = False
                 choice_dialog.destroy()
-
             btn_frame = ttk.Frame(frm)
             btn_frame.pack(anchor="e")
-
             ttk.Button(btn_frame, text="OK", command=on_ok).pack(side="right", padx=(5, 0))
             ttk.Button(btn_frame, text="Cancel", command=on_cancel).pack(side="right")
-
             choice_dialog.bind("<Return>", lambda e: on_ok())
             choice_dialog.bind("<Escape>", lambda e: on_cancel())
-
             choice_dialog.update_idletasks()
             x = self.root.winfo_x() + (self.root.winfo_width() - choice_dialog.winfo_width()) // 2
             y = self.root.winfo_y() + (self.root.winfo_height() - choice_dialog.winfo_height()) // 2
             choice_dialog.geometry(f"+{x}+{y}")
-
             choice_dialog.wait_window()
-
             if not result["proceed"]:
                 from .logging_setup import _log as _ilog
                 _ilog("GUI action: learn chooser cancelled by user")
                 self.set_status("Learn: cancelled by user")
                 return
-
             if result["type"] == "main":
                 self._learn_main_toggle_via_cli(d)
             else:
                 self._learn_fx_toggle_via_cli(d, result["fx_name"])
-
         except Exception as e:
             messagebox.showerror("Error", f"Learn failed:\n{e}")
             self.set_status("Learn failed")
-
     def _open_main_learn_dialog(self, d):
         self._in_modal_operation = True
         # This variant runs the learn flow non-blocking using LearnRunner:
@@ -1636,11 +1542,9 @@ class AudioGUI:
             return
         # Runner plumbing
         args_list = ["enhancements", "--id", d["id"], "--flow", d["flow"], "--learn"]
-
         def append_log(s):
             # marshal back to Tk thread
             self.root.after(0, lambda: (txt.insert("end", s), txt.see("end")))
-
         def handle_state(st):
             def _apply():
                 if st == "started":
@@ -1710,14 +1614,11 @@ class AudioGUI:
                         top.destroy()
                     except Exception:
                         pass
-
             self.root.after(0, _apply)
-
         # First attempt: auto-confirm when we see the prompt
         runner = LearnRunner(args_list, on_output=append_log, on_state=handle_state, confirmed=False)
         btn_a.configure(command=runner.continue_snapshot_a)
         btn_b.configure(command=runner.continue_snapshot_b)
-
         def do_cancel():
             # Clear modal flag and close
             self._in_modal_operation = False
@@ -1726,7 +1627,6 @@ class AudioGUI:
             except Exception:
                 pass
             top.destroy()
-
         def do_retry():
             nonlocal runner  # move this up
             # Retry with env skip (no confirmation prompt)
@@ -1743,13 +1643,11 @@ class AudioGUI:
             self.root.after(0, new_runner.start)
             # Rebind closures
             runner = new_runner
-
         btn_cancel.configure(command=do_cancel)
         btn_retry.configure(command=do_retry)
         # kick off
         runner.start()
         top.protocol("WM_DELETE_WINDOW", do_cancel)
-
     def _learn_main_toggle_via_cli(self, d):
         """
         Delegate 'Learn Enhancements' (main) to the CLI interactive flow:
@@ -1851,7 +1749,6 @@ class AudioGUI:
                     # continue scanning earlier content
                     i = end - 1
                 return None
-
             data = _extract_last_vendor_json(out)
             if not isinstance(data, dict):
                 messagebox.showwarning(
@@ -1898,7 +1795,6 @@ class AudioGUI:
         finally:
             self._restore_print_cli_checkbox()
             self._in_modal_operation = False
-
     def _learn_fx_toggle_via_cli(self, d, fx_name):
         """
         Delegate FX learn to the existing interactive CLI flow:
@@ -2021,7 +1917,6 @@ class AudioGUI:
         finally:
             self._restore_print_cli_checkbox()
             self._in_modal_operation = False
-
     def open_volume_dialog(self, device_id, device_name):
         top = tk.Toplevel(self.root)
         try:
@@ -2050,7 +1945,6 @@ class AudioGUI:
         v = tk.IntVar(value=initial)
         # Two-way sync between entry and slider must avoid feedback loops.
         syncing = {"entry": False, "scale": False}
-
         def _validate(P):
             if P == "":
                 return True
@@ -2063,12 +1957,10 @@ class AudioGUI:
             except Exception:
                 return False
             return 0 <= val <= 100
-
         vcmd = (top.register(_validate), "%P")
         entry = ttk.Entry(frm, width=3, textvariable=v, validate="key", validatecommand=vcmd, justify="right")
         entry.grid(row=1, column=0, sticky="w")
         ttk.Label(frm, text="%").grid(row=1, column=1, sticky="w", padx=(4, 12))
-
         def on_scale(valstr):
             if syncing["entry"]:
                 return
@@ -2077,12 +1969,10 @@ class AudioGUI:
                 v.set(int(float(valstr)))
             finally:
                 syncing["scale"] = False
-
         scale = ttk.Scale(frm, from_=0, to=100, orient="horizontal", command=on_scale)
         scale.set(initial)
         scale.grid(row=1, column=2, sticky="we")
         frm.columnconfigure(2, weight=1)
-
         def on_entry_change(*_):
             if syncing["scale"]:
                 return
@@ -2094,23 +1984,19 @@ class AudioGUI:
                     pass
             finally:
                 syncing["entry"] = False
-
         v.trace_add("write", on_entry_change)
         btns = ttk.Frame(frm)
         btns.grid(row=2, column=0, columnspan=3, sticky="e", pady=(12, 0))
         result = {"value": None}
-
         def ok():
             try:
                 result["value"] = max(0, min(100, int(v.get())))
             except Exception:
                 result["value"] = None
             top.destroy()
-
         def cancel():
             result["value"] = None
             top.destroy()
-
         ttk.Button(btns, text="OK", command=ok).pack(side="right")
         ttk.Button(btns, text="Cancel", command=cancel).pack(side="right", padx=(0, 8))
         top.bind("<Return>", lambda e: ok())
@@ -2118,7 +2004,6 @@ class AudioGUI:
         entry.focus_set()
         top.wait_window()
         return result["value"]
-
     def on_toggle_fx_live(self, fx_name, current_state):
         """
         Toggle an FX via CLI, based on the state we saw when the menu was built.
@@ -2179,7 +2064,6 @@ class AudioGUI:
             messagebox.showerror("Error", f"Failed to toggle {fx_name}:\n{e}")
             self.set_status(f"Error toggling {fx_name}")
             _log(f"GUI action: toggle-fx via CLI exception id={d['id']} name={d['name']} fx={fx_name} err={e}")
-
     def _load_fx_names_for_combo(self):
         # Returns a sorted list of unique FX names from vendor_toggles.ini
         # Used only to suggest names for the learn dialog; it does not toggle anything.
@@ -2192,17 +2076,13 @@ class AudioGUI:
             return names
         except Exception:
             return []
-
     def _setup_combobox_autocomplete(self, combo: ttk.Combobox):
         # Track mouse state to prevent "snapping" during a click-and-drag highlight
         self._mouse_is_down = False
-
         def on_mousedown(ev):
             self._mouse_is_down = True
-
         def on_mouseup(ev):
             self._mouse_is_down = False
-
         def on_selected(ev=None):
             # After choosing from the dropdown, Tk often leaves text highlighted.
             # If we keep a selection range around, later keystrokes can behave oddly
@@ -2215,7 +2095,6 @@ class AudioGUI:
                 combo.icursor(tk.END)
             except Exception:
                 pass
-
         def on_keyrelease(ev):
             # 1. Ignore if mouse is currently dragging (avoid snapping while selecting)
             if self._mouse_is_down:
@@ -2236,7 +2115,6 @@ class AudioGUI:
                 return
             vals = list(combo.cget("values") or [])
             low = text.lower()
-
             for v in vals:
                 s = str(v)
                 if s.lower().startswith(low):
@@ -2246,12 +2124,10 @@ class AudioGUI:
                     combo.icursor(typed_len)
                     combo.select_range(typed_len, tk.END)
                     break
-
         combo.bind("<Button-1>", on_mousedown, add="+")
         combo.bind("<ButtonRelease-1>", on_mouseup, add="+")
         combo.bind("<<ComboboxSelected>>", on_selected, add="+")
         combo.bind("<KeyRelease>", on_keyrelease, add="+")
-
 
 def launch_gui():
     # GUI bootstrap:
@@ -2267,31 +2143,26 @@ def launch_gui():
     except Exception:
         pass
     gui = AudioGUI(root)
-
     def _on_root_close():
         try:
             _log("WM_DELETE_WINDOW received: root close requested (user/system)")
         except Exception:
             pass
         root.destroy()
-
     try:
         root.protocol("WM_DELETE_WINDOW", _on_root_close)
     except Exception:
         pass
-
     def _on_any_destroy(ev):
         try:
             if ev.widget == root:
                 _log("Tk <Destroy> on root window")
         except Exception:
             pass
-
     try:
         root.bind("<Destroy>", _on_any_destroy, add="+")
     except Exception:
         pass
-
     def _tk_report_callback_exception(exc, val, tb):
         # Tk normally swallows callback exceptions; we log them and show a dialog with the log path.
         try:
@@ -2302,7 +2173,6 @@ def launch_gui():
             messagebox.showerror("Unexpected error", f"{exc.__name__}: {val}\n\nDetails were written to:\n{_log_path()}")
         except Exception:
             pass
-
     try:
         root.report_callback_exception = _tk_report_callback_exception
     except Exception:
