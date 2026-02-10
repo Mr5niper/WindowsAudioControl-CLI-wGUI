@@ -1120,7 +1120,7 @@ class AudioGUI:
                     return
             _log(f"GUI action: set-default start via CLI id={d['id']} name={d['name']} flow={d['flow']} roles=all")
             data = run_audioctl(args, capture_json=True, expect_ok=True)
-            cmd_str = "audioctl " + " ".join(shlex.quote(a) for a in args)
+            cmd_str = "audioctl " + subprocess.list2cmdline(args)
             self.maybe_print_cli(cmd_str)
             self.set_status(f"Set default ({d['flow']}) device: {d['name']} (all roles)")
             self.refresh_devices()
@@ -1152,7 +1152,7 @@ class AudioGUI:
                 "--json",
             ]
             rc, out, err = run_audioctl(args, capture_json=False, expect_ok=False)
-            cmd_str = "audioctl " + " ".join(shlex.quote(a) for a in args)
+            cmd_str = "audioctl " + subprocess.list2cmdline(args)
             self.maybe_print_cli(cmd_str)
             if rc == 0:
                 try:
@@ -1206,7 +1206,7 @@ class AudioGUI:
                 "--json",
             ]
             rc, out, err = run_audioctl(args, capture_json=False, expect_ok=False)
-            cmd_str = "audioctl " + " ".join(shlex.quote(a) for a in args)
+            cmd_str = "audioctl " + subprocess.list2cmdline(args)
             self.maybe_print_cli(cmd_str)
             if rc == 0:
                 try:
@@ -1270,7 +1270,7 @@ class AudioGUI:
                 enable = bool(choice)
             args = ["listen", "--id", d["id"], "--enable" if enable else "--disable", "--json"]
             rc, out, err = run_audioctl(args, capture_json=False, expect_ok=False)
-            cmd = "audioctl " + " ".join(shlex.quote(a) for a in args)
+            cmd = "audioctl " + subprocess.list2cmdline(args)
             self.maybe_print_cli(cmd)
             if rc == 0:
                 try:
@@ -1343,7 +1343,7 @@ class AudioGUI:
                 "--enable" if enable else "--disable",
             ]
             data = run_audioctl(args, capture_json=True, expect_ok=False)
-            cmd_str = "audioctl " + " ".join(shlex.quote(a) for a in args)
+            cmd_str = "audioctl " + subprocess.list2cmdline(args)
             self.maybe_print_cli(cmd_str)
             enh = data.get("enhancementsSet")
             if enh:
@@ -2030,7 +2030,7 @@ class AudioGUI:
                 fx_name,
             ]
             data = run_audioctl(args, capture_json=True, expect_ok=False)
-            cmd_str = "audioctl " + " ".join(shlex.quote(a) for a in args)
+            cmd_str = "audioctl " + subprocess.list2cmdline(args)
             self.maybe_print_cli(cmd_str)
             fx_set = data.get("fxSet")
             if fx_set:
@@ -2184,4 +2184,5 @@ def launch_gui():
         _log_exc("MAINLOOP EXCEPTION")
     _log("launch_gui: mainloop exited")
     return 0
+
 
