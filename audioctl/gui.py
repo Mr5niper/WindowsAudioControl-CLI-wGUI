@@ -1859,30 +1859,37 @@ class AudioGUI:
                 return
             # Prompts reordered and tightened so that second pass (A2/B2) is matched first
             prompt_patterns = [
-                # Second pass first (most specific) – instruction lines only
-                (
-                    "Enable the",
-                    f"Learn FX '{fx_name}' - Step 3",
-                    f"Enable the '{fx_name}' effect again (second pass), then click OK to continue."
-                ),
-                (
-                    "Disable the",
-                    f"Learn FX '{fx_name}' - Step 4",
-                    f"Disable the '{fx_name}' effect again (second pass), then click OK to continue."
-                ),
                 # First pass (instruction lines only)
                 (
                     "effect to ENABLED for this device.",
                     f"Learn FX '{fx_name}' - Step 1",
-                    f"ENABLE the '{fx_name}' effect for this device.\n"
+                    f"**ENABLE**  the '{fx_name}' effect for this device.\n\n"
+                    "Be sure to click APPLY or OK in the properties dialog.\n\n"
                     "(Do NOT toggle the main 'Audio Enhancements' switch.)\n\n"
                     "Click OK, then the GUI will continue."
                 ),
                 (
                     "to DISABLED for the same device.",
                     f"Learn FX '{fx_name}' - Step 2",
-                    f"DISABLE the '{fx_name}' effect for this device.\n\n"
+                    f"**DISABLE**  the '{fx_name}' effect for this device.\n\n"
+                    "Be sure to click APPLY or OK in the properties dialog.\n\n"
+                    "(Do NOT toggle the main 'Audio Enhancements' switch.)\n\n"
                     "Click OK, then the GUI will continue."
+                ),
+                # Second pass first (most specific) – instruction lines only
+                (
+                    "Enable the",
+                    f"Learn FX '{fx_name}' - Step 3",
+                    f"**ENABLE**  the '{fx_name}' effect again (second pass).\n\n"
+                    "Be sure to click APPLY or OK in the properties dialog.\n\n"
+                    "Then click OK to continue."
+                ),
+                (
+                    "Disable the",
+                    f"Learn FX '{fx_name}' - Step 4",
+                    f"**DISABLE**  the '{fx_name}' effect again (second pass).\n\n"
+                    "Be sure to click APPLY or OK in the properties dialog.\n\n"
+                    "Then click OK to continue."
                 ),
             ]
             args = [
@@ -2206,3 +2213,4 @@ def launch_gui():
         _log_exc("MAINLOOP EXCEPTION")
     _log("launch_gui: mainloop exited")
     return 0
+
