@@ -38,6 +38,13 @@ from .vendor_db import (
 # --- BEGIN: Non-blocking Learn runner (main Enhancements) ---
 import threading
 
+def _win_quote(arg):
+    # If safe (letters/numbers/dash/dot), return as-is.
+    # Otherwise (spaces, curly braces, parens), wrap in Double Quotes.
+    if re.match(r"^[a-zA-Z0-9_\-./]+$", arg):
+        return arg
+    return f'"{arg}"'
+
 def _build_cli_cmd(args_list):
     # Build the command line used to run the CLI.
     #
@@ -77,6 +84,7 @@ class LearnRunner:
     # - "snapshot B" is the "disabled" capture point
     PATTERN_A = re.compile(r"When ready, press Enter to capture snapshot A", re.IGNORECASE)
     PATTERN_B = re.compile(r"When ready, press Enter to capture snapshot B", re.IGNORECASE)
+    
     def __init__(self, args_list, on_output, on_state, confirmed=False):
         self.args_list = args_list
         self.on_output = on_output or (lambda _t: None)
@@ -93,6 +101,7 @@ class LearnRunner:
         # Collected output is kept so we can parse the final JSON summary after the process exits.
         self.collected_out = []
         self.collected_err = []
+        
     def start(self):
         # Start the subprocess in a way that supports interactive stdin.
         # We keep stdout/stderr piped so we can:
@@ -119,10 +128,12 @@ class LearnRunner:
         threading.Thread(target=self._read_stream, args=(self.proc.stdout, True), daemon=True).start()
         threading.Thread(target=self._read_stream, args=(self.proc.stderr, False), daemon=True).start()
         threading.Thread(target=self._waiter, daemon=True).start()
+    
     def _waiter(self):
         # Wait for completion off the Tk thread; report a simple state back to GUI.
         rc = self.proc.wait()
         self.on_state("done" if rc == 0 else "error")
+    
     def _read_stream(self, stream, is_stdout):
         # Read stream one character at a time so we can detect prompts even if the CLI
         # prints them without a trailing newline.
@@ -143,6 +154,7 @@ class LearnRunner:
                 self._scan_for_prompts(buf)
         if buf:
             self._handle_text(buf, is_stdout)
+    
     def _handle_text(self, text, is_stdout):
         # Store output for later parsing and forward it to the GUI's output callback.
         try:
@@ -154,6 +166,7 @@ class LearnRunner:
             pass
         self.on_output(text)
         self._scan_for_prompts(text)
+    
     def _scan_for_prompts(self, text):
         t = text if isinstance(text, str) else str(text or "")
         # Auto-confirm (only on first attempt)
@@ -178,6 +191,7 @@ class LearnRunner:
             self._waiting_b = True
             self.on_state("waiting_snapshot_b")
             return
+   
     def continue_snapshot_a(self):
         # Simulate pressing Enter at the "capture snapshot A" prompt.
         if self._waiting_a and self.proc and self.proc.stdin:
@@ -187,6 +201,7 @@ class LearnRunner:
             except Exception:
                 pass
             self._waiting_a = False
+ 
     def continue_snapshot_b(self):
         # Simulate pressing Enter at the "capture snapshot B" prompt.
         if self._waiting_b and self.proc and self.proc.stdin:
@@ -196,6 +211,7 @@ class LearnRunner:
             except Exception:
                 pass
             self._waiting_b = False
+ 
     def terminate(self):
         # Best-effort cancellation hook used when the user closes the learn UI.
         try:
@@ -374,6 +390,7 @@ def run_audioctl_interactive(args_list, prompt_patterns, expect_ok=True):
     return rc, out_text, err_text
 
 class AudioGUI:
+    
     def __init__(self, root):
         self.root = root
         self.root.title("Mr5niper's Audio Control  v1.5.0.0  02-10-2026")
@@ -1120,7 +1137,7 @@ class AudioGUI:
                     return
             _log(f"GUI action: set-default start via CLI id={d['id']} name={d['name']} flow={d['flow']} roles=all")
             data = run_audioctl(args, capture_json=True, expect_ok=True)
-            cmd_str = "audioctl " + subprocess.list2cmdline(args)
+            cmd_str = "audioctl " + " ".join(_win_quote(a) for a in args)
             self.maybe_print_cli(cmd_str)
             self.set_status(f"Set default ({d['flow']}) device: {d['name']} (all roles)")
             self.refresh_devices()
@@ -1152,7 +1169,7 @@ class AudioGUI:
                 "--json",
             ]
             rc, out, err = run_audioctl(args, capture_json=False, expect_ok=False)
-            cmd_str = "audioctl " + subprocess.list2cmdline(args)
+            cmd_str = "audioctl " + " ".join(_win_quote(a) for a in args)
             self.maybe_print_cli(cmd_str)
             if rc == 0:
                 try:
@@ -1206,7 +1223,7 @@ class AudioGUI:
                 "--json",
             ]
             rc, out, err = run_audioctl(args, capture_json=False, expect_ok=False)
-            cmd_str = "audioctl " + subprocess.list2cmdline(args)
+            cmd_str = "audioctl " + " ".join(_win_quote(a) for a in args)
             self.maybe_print_cli(cmd_str)
             if rc == 0:
                 try:
@@ -1270,7 +1287,7 @@ class AudioGUI:
                 enable = bool(choice)
             args = ["listen", "--id", d["id"], "--enable" if enable else "--disable", "--json"]
             rc, out, err = run_audioctl(args, capture_json=False, expect_ok=False)
-            cmd = "audioctl " + subprocess.list2cmdline(args)
+            cmd = "audioctl " + " ".join(_win_quote(a) for a in args)
             self.maybe_print_cli(cmd)
             if rc == 0:
                 try:
@@ -1343,7 +1360,7 @@ class AudioGUI:
                 "--enable" if enable else "--disable",
             ]
             data = run_audioctl(args, capture_json=True, expect_ok=False)
-            cmd_str = "audioctl " + subprocess.list2cmdline(args)
+            cmd_str = "audioctl " + " ".join(_win_quote(a) for a in args)
             self.maybe_print_cli(cmd_str)
             enh = data.get("enhancementsSet")
             if enh:
@@ -2030,7 +2047,7 @@ class AudioGUI:
                 fx_name,
             ]
             data = run_audioctl(args, capture_json=True, expect_ok=False)
-            cmd_str = "audioctl " + subprocess.list2cmdline(args)
+            cmd_str = "audioctl " + " ".join(_win_quote(a) for a in args)
             self.maybe_print_cli(cmd_str)
             fx_set = data.get("fxSet")
             if fx_set:
@@ -2184,5 +2201,6 @@ def launch_gui():
         _log_exc("MAINLOOP EXCEPTION")
     _log("launch_gui: mainloop exited")
     return 0
+
 
 
