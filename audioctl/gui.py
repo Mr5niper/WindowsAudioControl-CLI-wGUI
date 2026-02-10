@@ -461,14 +461,11 @@ class AudioGUI:
         self.tree["displaycolumns"] = ("Index", "Name", "Flow", "Defaults", "ID")
         self.tree.pack(fill="both", expand=True)
         # Scrollbar
-        self.yscroll = ttk.Scrollbar(self.tree, orient="vertical", command=self.tree.yview)
-        self.tree.configure(yscrollcommand=self.yscroll.set)
-        self.yscroll.pack(side="right", fill="y")
-        # Group tags
-        try:
-            self.tree.tag_configure("group", foreground="#202020")
-        except Exception:
-            pass
+        # Scrollbar (REMOVED for autosizing)
+        # self.yscroll = ttk.Scrollbar(self.tree, orient="vertical", command=self.tree.yview)
+        # self.tree.configure(yscrollcommand=self.yscroll.set)
+        # self.yscroll.pack(side="right", fill="y")
+        self.yscroll = None # Set to None to prevent errors in other parts of the code
         # Remove indicator element (cosmetic): we don't want expand/collapse affordances
         # for group rows; the view is always grouped and open by default.
         try:
@@ -715,13 +712,14 @@ class AudioGUI:
             self.tree.column("ID",    width=int(id_w),    minwidth=240, anchor="w", stretch=False)
         except Exception:
             pass
-        rows = len(self.devices) + 4 if self.devices else 4
-        self.tree.configure(height=min(max(rows, 6), 50))
+        # The number of rows is the device count + 2 for the group headers.
+        rows = len(self.devices) + 2 if self.devices else 4
+        # Set the height to the exact number of rows, with a minimum height.
+        # The `min(..., 50)` limit is removed to allow for full autosizing.
+        self.tree.configure(height=max(rows, 6))
         self.root.update_idletasks()
-        try:
-            sb_w = max(self.yscroll.winfo_reqwidth(), 16) if self.yscroll else 16
-        except Exception:
-            sb_w = 16
+        # Since the scrollbar is removed, its width is 0.
+        sb_w = 0
         total_cols = int(group_w + index_w + name_w + flow_w + defaults_w + id_w + sb_w + 40)
         desired_w = max(total_cols, self.container.winfo_reqwidth() + 10, 600)
         desired_h = max(self.root.winfo_reqheight(), 325)
@@ -2208,4 +2206,3 @@ def launch_gui():
         _log_exc("MAINLOOP EXCEPTION")
     _log("launch_gui: mainloop exited")
     return 0
-
