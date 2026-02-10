@@ -1,6 +1,6 @@
 # AUDIOCTL.PY CHANGELOG
 
-## v1.4.7.3 – In Validation  
+## v1.4.7.3 - [Current]
 Date: 2026-02-06  
 
 ### Fixes
@@ -49,7 +49,7 @@ Date: 2026-02-06
 
 ---
 
-## v1.4.7.2 - [Current]
+## v1.4.7.2
 Date: 2026-02-02
 
 ### Improvements
@@ -489,6 +489,7 @@ Date: 2026-01-19
 - **Basic Enumeration:** Listed playback (Render) and recording (Capture) devices using `IMMDeviceEnumerator` with `DEVICE_STATE_ACTIVE` only.
 - **“Listen” Toggle (Admin):** Initial registry-based enable/disable of “Listen to this device” for capture endpoints (admin required).
 - **Admin Check:** `is_admin` helper added to warn when elevation is required.
+
 
 
 
