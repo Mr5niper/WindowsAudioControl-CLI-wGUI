@@ -1,22 +1,51 @@
 # AUDIOCTL.PY CHANGELOG
 
-## v1.4.7.3 - [In Validation]
-Date: 2026-02-06
-Branch: `Develop`
+## v1.4.7.3 – In Validation  
+Date: 2026-02-06  
 
 ### Fixes
-- **Ghost State Mitigation (Issue #26):**
-  - Resolved an issue where `get-listen` would return `null` on fresh Windows installations or uninitialized devices.
-  - Implemented a definitive `False` fallback in `_read_listen_enable_fast` to ensure a stable boolean return for automated test sequences.
-- **CLI/Device Engine Accuracy:**
-  - Ported high-accuracy raw vtable polling methods from earlier GUI versions directly into the core `devices.py` engine.
-  - Isolated "Listen" polling logic within the CLI process to prevent cross-thread Garbage Collection (GC) interference and access violations.
+- Ghost State Mitigation (Issue #26)
+  - Resolved an issue where `get-listen` could return `null` on fresh Windows installations or uninitialized devices.
+  - Implemented a definitive `False` fallback in `_read_listen_enable_fast` to ensure stable boolean returns for automated test sequences.
+- GUI Autocomplete Stability
+  - Fixed autocomplete persistence after manual combobox selection by resetting selection ranges and cursor position on `<<ComboboxSelected>>`.
+  - Resolved cursor and selection “snapping” during mouse click-and-drag interactions by tracking mouse state and temporarily disabling autocomplete.
+  - Prevented modifier keys (Shift, Ctrl, etc.) and navigation keys from triggering autocomplete logic.
+  - Improved handling of Backspace/Delete to allow natural manual text editing without interference.
+  - Corrected method indentation and nesting to ensure `_setup_combobox_autocomplete` is properly registered within the GUI class.
+- Universal FX State Accuracy
+  - Fixed incorrect FX state reporting caused by GUID-based filtering during fast registry reads.
+  - Ensured universally discovered FX toggles now report their true enabled/disabled state directly from the registry.
+  - Prevented learned FX toggles from being falsely marked as unavailable due to driver-version or device mismatches.
 
 ### Improvements
-- **Automation Reliability:**
-  - Guaranteed consistent JSON output shapes for all "get" commands, ensuring downstream scripts never encounter unexpected `null` types during device state queries.
-- **Validation Hardening:**
-  - Added logic to treat uninitialized PropertyStore values as `False` by default, aligning the tool's behavior with the actual state of the Windows Audio subsystem.
+- Registry-Driven FX & Enhancement Logic
+  - Completed the transition to a **signature-is-truth** model for both MAIN enhancements and FX toggles.
+  - Runtime applicability is now determined exclusively by live registry signatures rather than static GUID lists.
+  - GUID lists are retained as organizational hints, not hard gates.
+- Universal FX Discovery & Application
+  - Enabled opportunistic FX application: FX toggles now apply automatically to any device whose registry signature matches, even if the GUID was never explicitly learned.
+  - Refactored multi-write FX logic to validate each write independently against the live registry.
+  - Improved quorum-based signature matching to only count registry keys that actually exist on the target device.
+- MAIN Enhancement Hardening
+  - Centralized MAIN toggle selection logic via `_find_first_vendor_entry`, enforcing live registry verification.
+  - `_enhancements_supported` now returns `True` only when a verifiable toggle mechanism exists at runtime.
+  - Enhancement writes are now strictly refused unless a signature-validated path is found.
+- Device Name & Spoofing Support
+  - Added case-insensitive device-name bucket mapping in the INI for improved traceability and reuse.
+  - Automatically groups GUIDs under stable, hash-based name buckets during learning.
+  - Enabled regex-based device name spoofing to allow FX discovery on devices not explicitly listed.
+  - Wired device names through CLI and GUI paths to ensure consistent FX matching and context menu support.
+- CLI / Device Engine Accuracy
+  - Ported high-accuracy raw vtable polling methods from earlier GUI builds into the core `devices.py` engine.
+  - Isolated “Listen” polling logic within the CLI process to prevent cross-thread GC interference and access violations.
+
+### Automation & Validation
+- Automation Reliability
+  - Guaranteed consistent JSON output shapes for all `get` commands, eliminating unexpected `null` values in downstream scripts.
+- Validation Hardening
+  - Uninitialized PropertyStore values are now treated as `False` by default.
+  - Aligns reported state strictly with the actual Windows Audio subsystem behavior.
 
 ---
 
@@ -460,6 +489,8 @@ Date: 2026-01-19
 - **Basic Enumeration:** Listed playback (Render) and recording (Capture) devices using `IMMDeviceEnumerator` with `DEVICE_STATE_ACTIVE` only.
 - **“Listen” Toggle (Admin):** Initial registry-based enable/disable of “Listen to this device” for capture endpoints (admin required).
 - **Admin Check:** `is_admin` helper added to warn when elevation is required.
+
+
 
 
 
