@@ -1,5 +1,59 @@
 # AUDIOCTL.PY CHANGELOG
 
+## v1.5.0.0 – Stable Indexing & GUI Polish  
+Date: 2026-02-10  
+
+### Fixes
+- CLI Device Index Correctness (Issue #21)
+  - Fixed a critical bug where device indices would shift after name-based filtering, causing `--index` to target the wrong device.
+  - Introduced `_resolve_standard_target` helper to centralize device resolution logic.
+  - All devices are now tagged with a stable global `guiIndex` that matches `audioctl list`.
+  - CLI commands now filter *after* indexing, ensuring indices remain consistent and reliable.
+- Ambiguous Match Messaging
+  - Fixed misleading re-indexing in ambiguous match error messages.
+  - `_pretty_matches_msg` now displays the true global `guiIndex` instead of generating local indices.
+  - Candidates are sorted by global index to ensure the displayed values are valid and actionable.
+
+### Improvements
+- CLI Consistency & Reliability
+  - Refactored all major CLI commands to use the new stable device resolution path:
+    - `list`
+    - `set-default`
+    - `set-volume`
+    - `listen`
+    - `enhancements`
+    - `wait`
+    - and related helpers
+  - Standardized error messages for:
+    - Device not found
+    - Multiple matching devices
+  - Eliminates an entire class of user-facing index confusion and accidental mis-targeting.
+- GUI Layout & Usability
+  - Removed the “Show disabled/disconnected” checkbox from the top toolbar.
+    - Simplifies the UI; `include_all` is no longer user-toggleable from the GUI.
+  - Moved the Administrator warning from the top bar to a new bottom status bar.
+    - Cleans up the toolbar.
+    - Keeps the warning visible but unobtrusive.
+  - Fixed device list cutoff issues:
+    - Removed the vertical scrollbar from the device Treeview.
+    - Enabled full autosizing based on actual row count.
+    - Removed the hardcoded 50-row height limit.
+    - Adjusted width calculations to account for the removed scrollbar.
+- FX Learning UX Improvements
+  - Standardized interactive FX learn prompts:
+    - ENABLE / DISABLE are now consistently uppercase.
+    - Added visual emphasis using **bold-style markers** (**ENABLE**, **DISABLE**).
+    - Reordered first-pass vs second-pass prompts for clearer human readability.
+  - Improves learn flow clarity without altering underlying logic.
+
+### Build & Distribution
+- Packaging Improvements
+  - Added `BUILD_EXE.bat` to streamline and standardize the build process.
+  - Moved `vendor_toggles.ini` to `dist/vendor_toggles.ini` so it is correctly included in completed builds.
+  - Updated bundled vendor toggle definitions.
+
+---
+
 ## v1.4.7.3 - [Current]
 Date: 2026-02-06  
 
@@ -489,6 +543,7 @@ Date: 2026-01-19
 - **Basic Enumeration:** Listed playback (Render) and recording (Capture) devices using `IMMDeviceEnumerator` with `DEVICE_STATE_ACTIVE` only.
 - **“Listen” Toggle (Admin):** Initial registry-based enable/disable of “Listen to this device” for capture endpoints (admin required).
 - **Admin Check:** `is_admin` helper added to warn when elevation is required.
+
 
 
 
