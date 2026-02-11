@@ -14,12 +14,9 @@ Download: https://www.python.org/downloads/release/python-3143/
 4.  Locate your new executable in the **`dist`** folder.
 
 # Manual Build Process (Windows, PowerShell): Create venv, install requirements, build EXE
-  Prerequisite:
-  Install Python 3.14.3 from:
-  <BR>
-  https://www.python.org/downloads/release/python-3143/
-  <BR>
-  *(Ensure you check "Add Python to environment variables" during installation or manually add them before build)*
+**Prerequisite:** Install Python 3.14.3  
+Download: https://www.python.org/downloads/release/python-3143/  
+*(Ensure you check "Add Python to environment variables" during installation or manually add them before build)*
   <BR>
 1) Open PowerShell
 2) Navigate to the project folder,
