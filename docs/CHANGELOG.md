@@ -1,26 +1,113 @@
 # AUDIOCTL.PY CHANGELOG
 
-## v1.4.7.3 - [In Validation]
-Date: 2026-02-06
-Branch: `Develop`
+## v1.5.0.0 - [Current]
+Date: 2026-02-10  
 
 ### Fixes
-- **Ghost State Mitigation (Issue #26):**
-  - Resolved an issue where `get-listen` would return `null` on fresh Windows installations or uninitialized devices.
-  - Implemented a definitive `False` fallback in `_read_listen_enable_fast` to ensure a stable boolean return for automated test sequences.
-- **CLI/Device Engine Accuracy:**
-  - Ported high-accuracy raw vtable polling methods from earlier GUI versions directly into the core `devices.py` engine.
-  - Isolated "Listen" polling logic within the CLI process to prevent cross-thread Garbage Collection (GC) interference and access violations.
+- **CLI Device Index Correctness (Issue #21)**
+  - Fixed a critical bug where device indices would shift after name-based filtering, causing `--index` to target the wrong device.
+  - Introduced `_resolve_standard_target` helper to centralize device resolution logic.
+  - All devices are now tagged with a stable global `guiIndex` that matches `audioctl list`.
+  - CLI commands now filter *after* indexing, ensuring indices remain consistent and reliable.
+- **Ambiguous Match Messaging**
+  - Fixed misleading re-indexing in ambiguous match error messages.
+  - `_pretty_matches_msg` now displays the true global `guiIndex` instead of generating local indices.
+  - Candidates are sorted by global index to ensure the displayed values are valid and actionable.
+- **GUI Command Quoting for Windows CMD**
+  - Fixed the "Print CLI commands" feature in the GUI producing invalid command strings.
+  - Replaced POSIX-style single quotes (`'`) with Windows-compatible double quotes (`"`).
+  - Implemented aggressive quoting logic to ensure arguments like device IDs (e.g., `{GUID}`) are always wrapped in double quotes, making them safe to copy-paste directly into `cmd.exe`.
 
 ### Improvements
-- **Automation Reliability:**
-  - Guaranteed consistent JSON output shapes for all "get" commands, ensuring downstream scripts never encounter unexpected `null` types during device state queries.
-- **Validation Hardening:**
-  - Added logic to treat uninitialized PropertyStore values as `False` by default, aligning the tool's behavior with the actual state of the Windows Audio subsystem.
+- **CLI Consistency & Reliability**
+  - Refactored all major CLI commands to use the new stable device resolution path:
+    - `list`
+    - `set-default`
+    - `set-volume`
+    - `listen`
+    - `enhancements`
+    - `wait`
+    - and related helpers
+  - Standardized error messages for:
+    - Device not found
+    - Multiple matching devices
+  - Eliminates an entire class of user-facing index confusion and accidental mis-targeting.
+- **GUI Layout & Usability**
+  - Removed the “Show disabled/disconnected” checkbox from the top toolbar.
+    - Simplifies the UI; `include_all` is no longer user-toggleable from the GUI.
+  - Moved the Administrator warning from the top bar to a new bottom status bar.
+    - Cleans up the toolbar.
+    - Keeps the warning visible but unobtrusive.
+  - Fixed device list cutoff issues:
+    - Removed the vertical scrollbar from the device Treeview.
+    - Enabled full autosizing based on actual row count.
+    - Removed the hardcoded 50-row height limit.
+    - Adjusted width calculations to account for the removed scrollbar.
+- **FX Learning UX Improvements**
+  - Standardized interactive FX learn prompts:
+    - ENABLE / DISABLE are now consistently uppercase.
+    - Added visual emphasis using **bold-style markers** (**ENABLE**, **DISABLE**).
+    - Reordered first-pass vs second-pass prompts for clearer human readability.
+  - Improves learn flow clarity without altering underlying logic.
+
+### Build & Distribution
+- **Packaging Improvements**
+  - Added `BUILD_EXE.bat` to streamline and standardize the build process.
+  - Moved `vendor_toggles.ini` to `dist/vendor_toggles.ini` so it is correctly included in completed builds.
+  - Updated bundled vendor toggle definitions.
+    
+---
+
+## v1.4.7.3
+Date: 2026-02-06  
+
+### Fixes
+- Ghost State Mitigation (Issue #26)
+  - Resolved an issue where `get-listen` could return `null` on fresh Windows installations or uninitialized devices.
+  - Implemented a definitive `False` fallback in `_read_listen_enable_fast` to ensure stable boolean returns for automated test sequences.
+- GUI Autocomplete Stability
+  - Fixed autocomplete persistence after manual combobox selection by resetting selection ranges and cursor position on `<<ComboboxSelected>>`.
+  - Resolved cursor and selection “snapping” during mouse click-and-drag interactions by tracking mouse state and temporarily disabling autocomplete.
+  - Prevented modifier keys (Shift, Ctrl, etc.) and navigation keys from triggering autocomplete logic.
+  - Improved handling of Backspace/Delete to allow natural manual text editing without interference.
+  - Corrected method indentation and nesting to ensure `_setup_combobox_autocomplete` is properly registered within the GUI class.
+- Universal FX State Accuracy
+  - Fixed incorrect FX state reporting caused by GUID-based filtering during fast registry reads.
+  - Ensured universally discovered FX toggles now report their true enabled/disabled state directly from the registry.
+  - Prevented learned FX toggles from being falsely marked as unavailable due to driver-version or device mismatches.
+
+### Improvements
+- Registry-Driven FX & Enhancement Logic
+  - Completed the transition to a **signature-is-truth** model for both MAIN enhancements and FX toggles.
+  - Runtime applicability is now determined exclusively by live registry signatures rather than static GUID lists.
+  - GUID lists are retained as organizational hints, not hard gates.
+- Universal FX Discovery & Application
+  - Enabled opportunistic FX application: FX toggles now apply automatically to any device whose registry signature matches, even if the GUID was never explicitly learned.
+  - Refactored multi-write FX logic to validate each write independently against the live registry.
+  - Improved quorum-based signature matching to only count registry keys that actually exist on the target device.
+- MAIN Enhancement Hardening
+  - Centralized MAIN toggle selection logic via `_find_first_vendor_entry`, enforcing live registry verification.
+  - `_enhancements_supported` now returns `True` only when a verifiable toggle mechanism exists at runtime.
+  - Enhancement writes are now strictly refused unless a signature-validated path is found.
+- Device Name & Spoofing Support
+  - Added case-insensitive device-name bucket mapping in the INI for improved traceability and reuse.
+  - Automatically groups GUIDs under stable, hash-based name buckets during learning.
+  - Enabled regex-based device name spoofing to allow FX discovery on devices not explicitly listed.
+  - Wired device names through CLI and GUI paths to ensure consistent FX matching and context menu support.
+- CLI / Device Engine Accuracy
+  - Ported high-accuracy raw vtable polling methods from earlier GUI builds into the core `devices.py` engine.
+  - Isolated “Listen” polling logic within the CLI process to prevent cross-thread GC interference and access violations.
+
+### Automation & Validation
+- Automation Reliability
+  - Guaranteed consistent JSON output shapes for all `get` commands, eliminating unexpected `null` values in downstream scripts.
+- Validation Hardening
+  - Uninitialized PropertyStore values are now treated as `False` by default.
+  - Aligns reported state strictly with the actual Windows Audio subsystem behavior.
 
 ---
 
-## v1.4.7.2 - [Current]
+## v1.4.7.2
 Date: 2026-02-02
 
 ### Improvements
@@ -460,6 +547,11 @@ Date: 2026-01-19
 - **Basic Enumeration:** Listed playback (Render) and recording (Capture) devices using `IMMDeviceEnumerator` with `DEVICE_STATE_ACTIVE` only.
 - **“Listen” Toggle (Admin):** Initial registry-based enable/disable of “Listen to this device” for capture endpoints (admin required).
 - **Admin Check:** `is_admin` helper added to warn when elevation is required.
+
+
+
+
+
 
 
 
