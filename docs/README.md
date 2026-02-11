@@ -643,12 +643,11 @@ Use `audioctl wait` to block until a device becomes active (appears) or until a 
     <img width="98" height="98" alt="image" src="https://github.com/user-attachments/assets/a8bacaf0-71e9-45c6-bfa2-676647c0157c" />
   <br>
   
-<img width="1367" height="357" alt="image" src="https://github.com/user-attachments/assets/efd4d7bd-ce8e-4be8-b352-9fdea7af92b8" />
+<img width="1350" height="357" alt="image" src="https://github.com/user-attachments/assets/99f148a5-4443-46cf-b6e4-cb170da5a3cb" />
 <br>
 
 ### Features
 - Visual list of playback (Render) and recording (Capture) devices, grouped and sorted.
-- **“Show disabled/disconnected”** toggle.
 - **Right-click** or **double-click** a device for actions:
 &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<br>
 &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<br>
@@ -674,14 +673,16 @@ Use `audioctl wait` to block until a device becomes active (appears) or until a 
 - Enable **“Print CLI commands”** in the top bar.  
   Every GUI action will print the equivalent `audioctl.exe` command to stdout (useful for learning the CLI and scripting).
 
-<img width="420" height="71" alt="image" src="https://github.com/user-attachments/assets/8fbc4be3-02aa-43aa-93d3-fe7835dc6bfd" />
+<img width="301" height="74" alt="image" src="https://github.com/user-attachments/assets/0957e2c4-bb71-429a-ba45-5dd30a62a3be" />
     <br>
     <br>
 
-![CLI Output](https://github.com/user-attachments/assets/1f52d28b-71fa-4343-abde-728b164d2a99)
+<img width="1006" height="162" alt="image" src="https://github.com/user-attachments/assets/dff8e526-9540-4c84-86a6-66cf8f6e05d1" />
+
 
 ### Refresh Devices
-- Click **“Refresh”** or press `F5`.
+- Click **"Refresh"** or press `F5`.
+  (Processing time varies based on device count and enhancement effects)
 
 ### Notes
 - Setting default devices via the GUI may require Administrator privileges; the GUI will warn when recommended.
