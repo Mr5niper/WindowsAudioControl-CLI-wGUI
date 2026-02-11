@@ -643,7 +643,7 @@ Use `audioctl wait` to block until a device becomes active (appears) or until a 
     <img width="98" height="98" alt="image" src="https://github.com/user-attachments/assets/a8bacaf0-71e9-45c6-bfa2-676647c0157c" />
   <br>
   
-<img width="1350" height="357" alt="image" src="https://github.com/user-attachments/assets/99f148a5-4443-46cf-b6e4-cb170da5a3cb" />
+<img width="1980" height="545" alt="image" src="https://github.com/user-attachments/assets/a61c9f2e-4d02-418e-a71c-7b6637594e70" />
 <br>
 
 ### Features
@@ -673,11 +673,11 @@ Use `audioctl wait` to block until a device becomes active (appears) or until a 
 - Enable **“Print CLI commands”** in the top bar.  
   Every GUI action will print the equivalent `audioctl.exe` command to stdout (useful for learning the CLI and scripting).
 
-<img width="301" height="74" alt="image" src="https://github.com/user-attachments/assets/0957e2c4-bb71-429a-ba45-5dd30a62a3be" />
+<img width="306" height="89" alt="image" src="https://github.com/user-attachments/assets/b68eed8f-3830-469e-b95f-be907cd9b523" />
     <br>
     <br>
 
-<img width="1006" height="162" alt="image" src="https://github.com/user-attachments/assets/dff8e526-9540-4c84-86a6-66cf8f6e05d1" />
+<img width="1602" height="283" alt="image" src="https://github.com/user-attachments/assets/05879549-9e60-4c52-834d-d3453a5fc0fd" />
 
 
 ### Refresh Devices
