@@ -1,12 +1,9 @@
-# Technical Specifications & Engineering Guide
-
-**Audioctl (Windows Audio Control CLI + GUI) v1.4.7.2**
-<BR>
-<BR>
-**Last updated:** 2026-02-02  
+# Technical Specifications & Engineering Guide  
+**Audioctl (Windows Audio Control CLI + GUI) v1.5.0.0**
+<br><br>
 **Audience:** Engineers maintaining or extending audioctl  
-**Platforms:** Windows 10/11 (x64 assumed; x86 supported if dependencies permit)  
-**Core dependencies:** Python 3.13.5, pycaw, comtypes, ctypes, winreg, tkinter (GUI), PyInstaller (optional)
+**Platforms:** Windows 10/11 (x64 assumed; x86 may work if dependencies permit)  
+**Core dependencies:** Python 3.14.3, pycaw, comtypes, ctypes, winreg, tkinter (GUI), PyInstaller (required for build)
 
 This document describes the **entire program**, including architecture, module contracts, data formats, COM/GC stability constraints, registry touchpoints, INI schema, CLI/GUI behaviors, and engineering extension guidance.
 
@@ -20,19 +17,21 @@ This document describes the **entire program**, including architecture, module c
 - Support vendor-specific enhancements/effects toggles via a learned, persistent configuration database (`vendor_toggles.ini`).
 - Offer read-only “query helpers” designed for fast, side-effect-free state retrieval.
 - Prioritize **stability** in the face of COM lifetime hazards and driver variability.
+- Support **FX (per-effect) toggles** via legacy single-DWORD and **multi-write** registry strategies.
 
 ### 1.2 Non-goals
 - Cross-platform support (Windows-only by design).
-- Per-application audio session control (this tool controls endpoints, not per-app mixers).
-- Perfect vendor coverage without learning: vendor toggles are inherently driver-specific.
+- Per-application audio session control (endpoints only; not per-app mixers).
+- Perfect vendor coverage without learning (vendor toggles are inherently driver-specific).
 
 ---
 
 ## 2) Architectural overview
 
 ### 2.1 Layer model
+
 **Layer 1 - Entry / orchestration**
-- `audioctl.py` (PyInstaller entrypoint)
+- `audioctl.py` (PyInstaller entrypoint wrapper; Windows console attach)
 - `audioctl/__main__.py` (`python -m audioctl`)
 
 **Layer 2 - Public surface (contracts)**
@@ -54,11 +53,12 @@ This document describes the **entire program**, including architecture, module c
 - GUI event → CLI subprocess call → parse JSON → update UI/state cache.
 
 ### 2.3 Contracts (hard requirements)
-1. JSON output keys are API.
-2. Prompt strings used for GUI interactive learn are API (pattern-based).
+1. JSON output keys and shapes are API.
+2. Prompt strings used for GUI interactive learn flows are API (pattern-based).
 3. `--index` ordering must match GUI order.
 4. Mutating commands must remain active-only unless intentionally changed.
-5. COM initialization must be correct and isolated; avoid global COM init patterns.
+5. COM initialization must be isolated and correct; avoid global COM init patterns.
+6. GUI must remain COM-free: no importing low-level device helpers for direct use.
 
 ---
 
@@ -67,7 +67,7 @@ This document describes the **entire program**, including architecture, module c
 ### 3.1 `audioctl.py`
 **Purpose:** Frozen EXE entrypoint and console attachment helper.  
 **Responsibilities:**
-- Attach to parent console on Windows so shells (notably PS 5.1) don’t spawn a new window.
+- On Windows: attempt `AttachConsole(ATTACH_PARENT_PROCESS)` to reuse parent console (esp. older PowerShell behavior).
 - Call `audioctl.cli.main()` and propagate exit code.
 
 **Technical constraints:**
@@ -81,63 +81,135 @@ This document describes the **entire program**, including architecture, module c
 - argparse subcommands definition.
 - Device selection logic and disambiguation behavior.
 - Calls to `devices.py` and `vendor_db.py`.
-- GUI auto-launch when invoked with no arguments.
+- GUI auto-launch when invoked with no arguments (`argv is None` and no CLI args).
 
 **Required behaviors:**
-- For mutating operations, select only active endpoints (`include_all=False`).
-- On ambiguity, return exit code `4` and require `--index`.
+- Mutating operations select only active endpoints (`include_all=False`).
+- On ambiguity, return exit code `4` and require `--index` (except FX disambiguation which is interactive by design).
 
-**CLI exit codes:**
+**CLI exit codes (contract):**
 - `0` success
 - `1` invalid args/runtime failure
 - `3` not found / wait timeout
-- `4` multiple matches / index required / index out of range
+- `4` multiple matches / index required / index out of range / interactive selection invalid
 - `130` Ctrl-C
 
-**Command surface (spec):**
-- `list [--all] [--json]`
-  - JSON: `{ "devices": [ {id,name,flow,state,isDefault}, ... ] }`
+#### 3.2.1 Command surface (spec)
 
-- `set-default`
-  - Args: playback-id|playback-name, recording-id|recording-name, roles, regex, index
-  - JSON: `{ "set": [ {flow, role, id, name}, ... ] }`
+- `list [--all] [--json]`  
+  - JSON:  
+    ```json
+    { "devices": [ {id,name,flow,state,isDefault,guiIndex}, ... ] }
+    ```
+  - Note: devices are tagged with `guiIndex` (0-based within each flow) after GUI-order sorting.
 
-- `set-volume`
-  - Args: --id|--name, optional --flow, exactly one of --level|--mute|--unmute, optional --index, --regex
+- `set-default`  
+  - Args: `--playback-id|--playback-name`, `--recording-id|--recording-name`, roles, `--regex`, `--index`  
+  - JSON:
+    ```json
+    { "set": [ { "flow": "Render|Capture", "role": "console|multimedia|communications|all", "id": "...", "name": "..." }, ... ] }
+    ```
+  - Warning emitted to stderr if not elevated: *"might require Administrator privileges..."*
+
+- `set-volume`  
+  - Args: `--id|--name`, optional `--flow`, exactly one of `--level|--mute|--unmute`, optional `--index`, `--regex`  
   - JSON success:
     - `{ "volumeSet": {id,name,level} }` OR `{ "muteSet": {id,name,muted} }`
+  - `--json` exists but current behavior always prints JSON on success; errors go to stderr.
 
-- `get-volume`
-  - JSON: `{ id, name, flow, volume, muted }`
+- `get-volume`  
+  - JSON:
+    ```json
+    { "id": "...", "name": "...", "flow": "Render|Capture", "volume": 0-100|null, "muted": true|false|null }
+    ```
 
-- `listen` (Capture only)
-  - Args: capture selector + enable/disable + optional playback target selector
-  - JSON: `{ "listenSet": { id, name, enabled, [verifiedBy] } }`
+- `listen` (Capture only)  
+  - Args:
+    - capture selector: `--id|--name` (+ `--index`, `--regex`)
+    - exactly one: `--enable|--disable`
+    - optional playback routing target:
+      - `--playback-target-id [ID]` (flag without value means default playback device via `const=''`)
+      - `--playback-target-name [NAME]` (flag without value means default playback device via `const=''`)
+  - JSON:
+    ```json
+    { "listenSet": { "id": "...", "name": "...", "enabled": true|false|null, "verifiedBy": "com|registry" } }
+    ```
+    `verifiedBy` is present only when the setter returned failure but state was confirmed anyway (driver/Windows timing quirks).
 
-- `get-listen`
-  - JSON: `{ id, name, flow, listenEnabled }`
+- `get-listen`  
+  - JSON:
+    ```json
+    { "id": "...", "name": "...", "flow": "Capture", "listenEnabled": true|false }
+    ```
+  - Note: **fast path is registry-first with COM fallback; final fallback forces boolean False** (no `null`), per `_read_listen_enable_fast()`.
 
-- `enhancements`
-  - Main: `--enable|--disable|--learn`
-  - FX ops: `--list-fx|--learn-fx|--enable-fx|--disable-fx|--delete-fx`
+- `enhancements`  
+  - Exactly one operation is required:
+    - Main: `--enable|--disable|--learn`
+    - FX subsystem: `--list-fx|--learn-fx|--enable-fx|--disable-fx|--delete-fx`
   - JSON varies by operation:
-    - `{ "enhancementsSet": { id, name, enabled, verifiedBy } }`
-    - `{ "vendorLearned": {...} }` / `{ "vendorAvailable": {...} }`
-    - `{ "fxLearned": {...} }`
-    - `{ "fxSet": {...} }`
-    - `{ "fxDeleted": {...} }`
+    - Main toggle:
+      ```json
+      { "enhancementsSet": { "id": "...", "name": "...", "enabled": true|false|null, "verifiedBy": "..." } }
+      ```
+    - Learn main:
+      ```json
+      { "vendorLearned": {...} }
+      ```
+      or
+      ```json
+      { "vendorAvailable": {...} }
+      ```
+    - FX learn:
+      ```json
+      { "fxLearned": {...} }
+      ```
+    - FX toggle:
+      ```json
+      { "fxSet": {...} }
+      ```
+    - FX delete:
+      ```json
+      { "fxDeleted": {...} }
+      ```
 
-- `get-enhancements`
-  - JSON: `{ id, name, flow, enhancementsEnabled }` (vendor-only)
+  - FX enable/disable disambiguation:
+    - If multiple FX name matches, CLI uses **interactive selection via stdin** (returns exit `4` on invalid selection). The GUI relies on this behavior for some flows.
 
-- `get-device-state`
-  - JSON: `{ id, name, flow, volume, muted, listenEnabled, enhancementsEnabled, availableFX:[...] }`
+- `get-enhancements` (vendor-only)  
+  - JSON:
+    ```json
+    { "id": "...", "name": "...", "flow": "Render|Capture", "enhancementsEnabled": true|false|null }
+    ```
+  - Note: If a vendor method exists but read is inconclusive, CLI **default-assumes enabled** (`true`) for UI friendliness.
 
-- `diag-sysfx`, `diag-mmdevices`, `discover-enhancements`, `wait`
-  - Diagnostic/discovery commands with JSON or mixed output.
+- `get-device-state` (GUI aggregator)  
+  - JSON:
+    ```json
+    {
+      "id": "...",
+      "name": "...",
+      "flow": "Render|Capture",
+      "volume": 0-100|null,
+      "muted": true|false|null,
+      "listenEnabled": true|false|null,
+      "enhancementsEnabled": true|false|null,
+      "availableFX": [
+        { "fx_name": "...", "state": true|false|null, "source": "ini" }
+      ]
+    }
+    ```
+  - Defaulting behavior for UI friendliness:
+    - if vendor/FX entry exists but state read is inconclusive → default `true` (enabled) in this aggregator.
 
-- Hidden: `vendor-ini-append`
-  - Internal elevated write helper for GUI deployments in protected directories.
+- Diagnostics/discovery:
+  - `diag-sysfx` (JSON summary of live Windows + vendor toggles)
+  - `diag-mmdevices` (JSON dump of all endpoint MMDevices registry values)
+  - `discover-enhancements` (interactive; prints report and writes TXT/JSON bundle)
+  - `wait` (poll until active endpoint appears; JSON on success)
+
+- Hidden (GUI support):
+  - `vendor-ini-append --work <json>`: elevated helper for appending INI entries in protected locations (supports `"kind": "main"` and `"kind": "fx"` work orders).
 
 ### 3.3 `audioctl/gui.py`
 **Purpose:** Tkinter GUI frontend that shells out to CLI as subprocess.
@@ -147,27 +219,50 @@ This document describes the **entire program**, including architecture, module c
 - Context menu actions:
   - set default
   - set volume
-  - mute/unmute
-  - listen toggle (capture)
-  - enhancements toggle (vendor-only)
-  - FX toggles (learned)
-  - learn workflows (main + FX)
+  - mute/unmute (deterministic: queries state then chooses mute/unmute)
+  - listen enable/disable (Capture only; queries state then chooses)
+  - enhancements enable/disable (vendor-only; disabled if no vendor method)
+  - FX toggles (learned; presented as Enable/Disable depending on cached state)
+  - learn workflows (main + FX) via CLI interactive mode
 - Background device state caching using `get-device-state`.
 
 **Technical constraints:**
-- Must not import low-level COM device helpers directly (avoid long-lived COM state in GUI).
+- Must not import/use low-level COM device helpers directly.
 - Must tolerate CLI failure and display actionable errors.
 - Must keep UI responsive:
-  - incremental state population
-  - non-blocking learn runner for long operations
+  - incremental state population (`get-device-state` one device per tick)
+  - quick JSON probe for context menu freshness (`run_audioctl_quick_json` timeout ~0.75s)
+  - interactive learn runner mechanisms (see below)
 
-**State cache specification:**
-- `device_state_cache: Dict[device_id -> state]`
-- State is expected to match `get-device-state` JSON shape.
-- Cache is refreshed incrementally after list refresh.
+#### 3.3.1 Learn flows in GUI (important update)
+v1.5.0.0 contains **two learn-driving mechanisms**:
+1. `run_audioctl_interactive(...)`: line-buffered; shows messageboxes when prompt substrings appear; then writes newline to CLI stdin.
+2. `LearnRunner` (non-blocking): character-by-character stream parsing; designed to avoid UI freezing and to detect prompts without newline terminators.
+
+Both exist; the code currently uses the interactive pattern-based approach in `_learn_main_toggle_via_cli` / `_learn_fx_toggle_via_cli`. A separate non-blocking controller exists (`_open_main_learn_dialog`) for main learn.
+
+**Prompt-string compatibility warning:** GUI prompt matching relies on CLI text like:
+- `"Step 1: ... set 'Audio Enhancements' to ENABLED ..."`
+- `"Step 2: ... set 'Audio Enhancements' to DISABLED ..."`
+- FX learn prompts: `"Set the '<fx>' effect to ENABLED..."`, `"Now set ... to DISABLED..."`, `"Enable ... again (second pass)"`, `"Disable ... again (second pass)"`
+
+Changing these strings requires updating GUI match logic.
+
+#### 3.3.2 State cache specification
+- `device_state_cache: Dict[device_id -> state_dict]`
+- state_dict shape matches `get-device-state`.
+
+Cache population:
+- After `Refresh`, the GUI:
+  - runs `audioctl list --json`
+  - then schedules incremental `get-device-state` calls
+
+Context menu:
+- Uses cached state immediately.
+- Then performs a fast one-shot `get-device-state` refresh right before showing menu (timeout-limited).
 
 ### 3.4 `audioctl/devices.py`
-**Purpose:** Low-level Windows integration layer.
+**Purpose:** Low-level Windows integration layer (COM + registry).
 
 #### 3.4.1 COM lifecycle subsystem
 - `_com_context()` provides thread-local COM initialization with refcounting.
@@ -184,7 +279,8 @@ This document describes the **entire program**, including architecture, module c
 **API:**
 - `list_devices(include_all: bool) -> List[device]`
 - `find_devices_by_selector(devices, dev_id, name_substr, flow, regex) -> List[device]`
-- `_sort_and_tag_gui_indices(devices) -> {Render: [...], Capture: [...]} (mutates devices to add guiIndex)`
+- `_sort_and_tag_gui_indices(devices) -> {Render: [...], Capture: [...]}`
+  - mutates devices by adding `guiIndex`
 
 **Device object shape:**
 ```json
@@ -197,18 +293,21 @@ This document describes the **entire program**, including architecture, module c
     "console": true|false,
     "multimedia": true|false,
     "communications": true|false
-  }
+  },
+  "guiIndex": 0
 }
 ```
+
+**Naming strategy update:**  
+`list_devices()` now prefers names from `AudioUtilities.GetAllDevices()` (name map) to reduce use of raw PropertyStore reads (stability).
 
 #### 3.4.3 Default endpoint management
 **API:**
 - `set_default_endpoint(device_id: str, role: str) -> None`
-- Roles:
-  - `console`, `multimedia`, `communications`, `all`
+- Roles: `console`, `multimedia`, `communications`, `all`
 
 **Constraints:**
-- Must refuse inactive endpoints.
+- Must refuse inactive endpoints (`_is_device_active` check).
 
 #### 3.4.4 Volume/mute
 **API:**
@@ -218,21 +317,28 @@ This document describes the **entire program**, including architecture, module c
 - `set_endpoint_mute(device_id, mute_state: bool) -> bool`
 
 **Normalization rules:**
-- Volume is scalar float 0.0..1.0 → percent 0..100.
-- Mute returns bool when readable; None only on unrecoverable variant mismatch.
+- Volume scalar float 0.0..1.0 → percent 0..100.
+- Mute returns `bool` when readable; may return `None` on unrecoverable variant mismatch.
 
 #### 3.4.5 Listen feature
 **Enable flag (PropertyStore):**
 - PROPERTYKEY fmtid `{24dbb0fc-9311-4b3d-9cf0-18ff155639d4}`, pid `1`
-- Written via IPropertyStore::SetValue + Commit.
+- Written via raw `IPropertyStore::SetValue + Commit`
 
 **Routing target (registry, HKLM):**
-- HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Capture\{endpoint-guid}\Properties
-- Value `{24dbb0fc-9311-4b3d-9cf0-18ff155639d4},0` (REG_SZ)
+- `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Capture\{endpoint-guid}\Properties`
+- Value name `{24dbb0fc-9311-4b3d-9cf0-18ff155639d4},0` (REG_SZ)
 - Empty string means “Default Playback Device”.
 
-**Verification:**
-- COM readback preferred; registry fallback and polling permitted.
+**Verification behavior:**
+- Setter returns True/False based on PropertyStore write success.
+- CLI will verify via COM read first, then registry polling (`_verify_listen_via_registry`) if needed.
+
+**Fast read update (important):**
+- `_read_listen_enable_fast()`:
+  1. COM property store read
+  2. registry decode fallback
+  3. final fallback returns `False` (prevents `null` in JSON).
 
 #### 3.4.6 SysFX (Disable_SysFx) helpers
 **Disable_SysFx PROPERTYKEY:**
@@ -241,15 +347,17 @@ This document describes the **entire program**, including architecture, module c
   - 0 → Enhancements enabled
   - 1 → Enhancements disabled
 
-**Read paths:**
-- PolicyConfigFx (`GetPropertyValue` with bFxStore True/False)
+**Read paths (diagnostic/discovery):**
+- PolicyConfigFx (`GetPropertyValue` with `bFxStore=True/False`)
 - Endpoint PropertyStore (raw vtable)
-- Registry scanning for discovery/diagnostics
+- Registry scanning (snapshot tooling)
 
-**Write paths:**
+**Write paths (diagnostic/learn tooling):**
 - PolicyConfigFx (`SetPropertyValue`)
-- Endpoint PropertyStore (`SetValue`+Commit)
-- Registry writes (used for learning/testing; not always runtime)
+- Endpoint PropertyStore (`SetValue` + `Commit`)
+- Registry writes (`_set_enhancements_registry`) mainly as fallback/test tooling
+
+**Runtime policy note:** Main enhancements toggling in normal operation is vendor-only via `vendor_db.py`. Windows Disable_SysFx setters are for diagnostics/learning, not runtime toggling.
 
 #### 3.4.7 Registry snapshot & diff subsystem
 **API:**
@@ -273,7 +381,7 @@ This document describes the **entire program**, including architecture, module c
 
 **Diff summary shape:**
 - `added`, `removed`, `changed`
-- `dword_flips`: (0↔1 flips)
+- `dword_flips`: 0↔1 flips (strong vendor toggle candidates)
 - `disable_sysfx_hits`: entries involving Disable_SysFx fmtid
 
 #### 3.4.8 PropertyStore raw vtable subsystem
@@ -281,16 +389,16 @@ This document describes the **entire program**, including architecture, module c
 
 **Stability requirements:**
 - Must remain cached at module scope.
-- Calls using raw pointers should remain GC-guarded.
-- PropVariantClear must be called on allocated PROPVARIANTs.
+- Calls using raw pointers should remain GC-guarded (GC temporarily disabled during vtable access).
+- `PropVariantClear` must be called on allocated PROPVARIANTs.
 
 ### 3.5 `audioctl/vendor_db.py`
 **Purpose:** Vendor toggles persistence + application + learning.
 
 #### 3.5.1 INI file location
-`vendor_toggles.ini` default path:
-- EXE directory if writable
-- else %LOCALAPPDATA%\audioctl\vendor_toggles.ini
+Default `vendor_toggles.ini` path:
+- EXE directory if writable  
+- else `%LOCALAPPDATA%\audioctl\vendor_toggles.ini`
 
 #### 3.5.2 INI cache
 Cache key:
@@ -302,7 +410,7 @@ Cache key:
 - If mtime unchanged: reuse parsed DB.
 
 #### 3.5.3 Split DB model
-The loader returns:
+Loader returns:
 ```python
 { "main": [ ... ], "fx": [ ... ] }
 ```
@@ -311,30 +419,32 @@ The loader returns:
 Required fields:
 - `value_name` (normalized lower)
 - `dword_enable`, `dword_disable` (int; typically 0/1)
-- `hives` list (HKCU/HKLM)
+- `hives` list (HKCU/HKLM; ordering is preference)
 - `flows` list (Render/Capture)
 - `devices` list (endpoint GUIDs)
-- `subkey` (FxProperties or Properties)
+- `subkey` (`FxProperties` or `Properties`) — learned scope
 
-**Applicability rule:**
-- Must match endpoint GUID membership.
-- Must match flow (if specified).
-- Prefer entries that actually exist under HKCU for the endpoint (reduces false positives).
+**Applicability rule (runtime-truth update):**
+- v1.5.0.0 now relies heavily on **signature truth**:
+  - `_find_first_vendor_entry(...)` selects the **first MAIN entry whose registry signature matches this endpoint now**.
+  - This is **not** purely GUID membership-based at runtime; the registry value must exist and match known enable/disable values.
+- This reduces false positives and supports dedupe across endpoints/drivers.
 
 #### 3.5.5 FX schema (legacy single DWORD)
 Fields:
-- `type=fx`
+- `type = fx`
 - `fx_name`
 - `value_name`
 - `dword_enable`, `dword_disable`
-- `devices` list required
+- `devices` list (may exist, but runtime discovery can also use signature matching)
 
 #### 3.5.6 FX schema (multi_write)
 Fields:
-- `type=fx`
+- `type = fx`
 - `fx_name`
-- `multi_write=1`
-- `write_count=N`
+- `device_name_pattern` (optional; used for readability/spoof/candidate filters)
+- `multi_write = 1`
+- `write_count = N`
 - `decider_index` (1-based)
 - `quorum_threshold` (0.50..0.95; default 0.60)
 - Per write block i:
@@ -345,40 +455,55 @@ Fields:
   - `write{i}_enable/disable = payload`
   - optional: `write{i}_devices`
 
-**write{i}_devices semantics:**
-- missing => universal (applies to all devices in bucket)
+**write{i}_devices semantics (documented & implemented):**
+- missing => universal within bucket
 - empty => applies to nobody
 - list => applies only to listed GUIDs
+
+**Important behavior note (v1.5.0.0):**  
+For **matching/reading/verifying/applying**, the code frequently treats signature as truth and may **ignore per-write devices gating** in some paths, instead applying only to values that actually exist for the endpoint GUID. In other words:
+- It won’t “invent” missing keys.
+- It may still apply a write if the value exists on the device and matches known enable/disable signatures.
 
 #### 3.5.7 Vendor-only runtime policy
 - `_apply_enhancements` is vendor-only.
 - If no vendor entry applies: return failure (`no-vendor-method`).
 
 #### 3.5.8 Fast read semantics (GUI support)
-Fast read functions do:
-- single registry probe
+Fast reads do:
+- single registry probe(s)
 - optional alternate hive probe
 - last-write-time tie-break if HKCU/HKLM disagree
 
-For multi_write FX:
-- may select a “best” write based on strength (FxProperties + DWORD favored)
-- uses decider/quorum logic where appropriate
+For multi_write FX fast reads:
+- selects a “best” write signal (FxProperties + DWORD favored)
+- uses type-aware signature comparison
 
 #### 3.5.9 Learning algorithms (spec)
-**Enhancements learn:**
-- A/B snapshot capture while user toggles UI.
-- Diff to find stable DWORD flips.
-- Write INI section and append device GUID.
 
-**FX learn (multi-write):**
-- Uses stability filtering:
-  - multiple samples to eliminate registry noise
-- Derives a write set from stable differences:
-  - supports DWORD, SZ, and binary values
+**Enhancements learn (manual UI toggling):**
+- A/B snapshot capture while user toggles UI.
+- Diff to find stable DWORD flips (`dword_flips`).
+- Write INI entry with learned `subkey` (FxProperties vs Properties).
+- Dedupe:
+  - if an identical main entry exists, append GUID to its `devices`
+  - also maintain optional name→GUID buckets (`name_<hash>`, `guids_<hash>`) for readability
+
+**FX learn (two-pass A/B/A2/B2):**
+- Guided interactive capture:
+  - Pass 1: A/B “prime” driver
+  - Pass 2: A2/B2 authoritative pair written into INI
+- Uses stability filtering and can generate multi-write sets (DWORD/SZ/BINARY).
 - Merge behavior:
-  - match identity+payload: append GUID to write{i}_devices
-  - new payload: append a new write block
-  - conflict cleanup: ensure one GUID is not attached to two competing writes with same identity
+  - match identity+payload: append GUID to `write{i}_devices`
+  - new payload: append a new write block scoped to this GUID
+  - conflict cleanup prevents a GUID from attaching to competing writes with same identity but different payload
+
+**FX delete (new in doc; present in code):**
+- Removes GUID association for a specific FX bucket without deleting the whole bucket:
+  - updates section `devices = ...`
+  - updates or introduces `write{i}_devices` to exclude the GUID where needed
+  - preserves write blocks even if they become scoped to nobody
 
 ### 3.6 `audioctl/compat.py`
 **Purpose:** Load-order critical compatibility shim.
@@ -386,10 +511,13 @@ For multi_write FX:
 **Requirements:**
 - Must be imported before any comtypes usage.
 - Ensures:
-  - PROPVARIANT alias exists
-  - VT constants exist (VT_BOOL, VT_LPWSTR, etc.)
-  - VARIANT_TRUE/FALSE exists
-- Forces import of `comtypes._post_coinit` modules so PyInstaller bundles cleanup code.
+  - `PROPVARIANT` alias exists (if only `tagPROPVARIANT` exists)
+  - VT constants exist (`VT_BOOL`, `VT_LPWSTR`, `VT_UI2`, `VT_UI4`)
+  - `VARIANT_TRUE` / `VARIANT_FALSE` exists
+- Forces import of:
+  - `comtypes._post_coinit`
+  - `comtypes._post_coinit.unknwn`
+  - (and other hiddenimports are included in PyInstaller spec/bat)
 
 ### 3.7 `audioctl/logging_setup.py`
 **Purpose:** Lazy log file initialization + crash breadcrumbs.
@@ -397,14 +525,14 @@ For multi_write FX:
 **Specification:**
 - No filesystem writes at import time.
 - On first log call:
-  - resolve log path (prefer exe dir; else temp/appdata)
+  - resolve log path (prefer exe dir; else temp dir)
   - install:
-    - sys.excepthook
-    - sys.unraisablehook
+    - `sys.excepthook`
+    - `sys.unraisablehook`
     - Windows console control handler (best-effort)
-  - enable faulthandler if available
-  - wrap sys.exit to log breadcrumb
-  - register atexit breadcrumbs and handle cleanup
+  - enable `faulthandler` to log file if possible (`all_threads=True`)
+  - wrap `sys.exit` to record breadcrumb
+  - register atexit breadcrumbs and close handles
 
 ---
 
@@ -414,20 +542,21 @@ For multi_write FX:
 Given a command with selectors:
 1. Enumerate devices:
    - mutating commands: `list_devices(include_all=False)`
-   - list command: `include_all` optional
-2. Filter matches:
+   - list command: optional `include_all`
+2. Tag devices with GUI order (`guiIndex`):
+   - sort by `name.lower()` within each flow bucket
+3. Filter matches:
    - by ID exact match, OR
    - by name substring/regex match, optional flow filter
-3. If multiple matches:
-   - sort in GUI-order (per-flow name sort)
-   - require --index unless command uses a special resolution helper
-4. Choose target based on index or first match.
-5. Execute operation and return JSON.
+4. If multiple matches:
+   - require `--index` (except some FX sub-ops which may prompt interactively)
+5. Choose target based on index or first match.
+6. Execute operation and return JSON.
 
 ### 4.2 GUI-order sorting definition
 Within each flow bucket:
 - Sort by `name.lower()`
-- assign `guiIndex` sequentially starting at 0
+- Assign `guiIndex` sequentially starting at 0
 
 ---
 
@@ -436,13 +565,13 @@ Within each flow bucket:
 > Registry paths shown here are conceptual; do not copy/paste these as Python strings unless you escape properly.
 
 ### 5.1 MMDevices base
-- HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\{Render|Capture}\{endpoint-guid}\...
-- HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\{Render|Capture}\{endpoint-guid}\...
+- `HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\{Render|Capture}\{endpoint-guid}\...`
+- `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\{Render|Capture}\{endpoint-guid}\...`
 
 Common subkeys:
 - `FxProperties`
 - `Properties`
-- nested subkeys under FxProperties for plugins/user state
+- Nested subkeys under FxProperties for plugins/user state
 
 ### 5.2 Listen keys
 - Enable flag (PropertyStore): `{24dbb0fc-...}, pid=1`
@@ -453,7 +582,7 @@ Common subkeys:
 
 ### 5.4 Vendor toggles
 - Vendor-defined `{fmtid},pid` values under either FxProperties or Properties.
-- Hive selection (HKCU vs HKLM) varies by driver and by learned preference.
+- Hive selection (HKCU vs HKLM) varies by driver and learned preference.
 
 ---
 
@@ -477,13 +606,13 @@ Used for:
 ### 6.4 PolicyConfigFx
 Used for:
 - reading/writing endpoint properties with bFxStore awareness
-- diagnostics and discovery around Disable_SysFx
+- diagnostics/discovery around Disable_SysFx
 
 ### 6.5 IPropertyStore (raw vtable)
 Used for:
 - Listen enable flag
-- Disable_SysFx property store read/write
-- friendly name fallback reads
+- Disable_SysFx property store read/write (diagnostic/learn)
+- Friendly name fallback reads (rare; name map preferred)
 
 ---
 
@@ -493,14 +622,14 @@ Used for:
 - Most operations are single COM calls + lightweight processing.
 - Some operations intentionally poll:
   - listen verification registry polling (short, bounded)
-  - enhancements verification in some contexts (bounded)
+  - vendor entry verification polling (bounded)
 - `wait` polls at 0.5s intervals until timeout.
 
 ### 7.2 GUI
 - Device listing:
   - one CLI call (`list --json`)
 - State population:
-  - multiple CLI calls (`get-device-state`) spread over Tk event loop ticks
+  - multiple CLI calls (`get-device-state`) spread over Tk loop ticks
 - Context menu refresh:
   - optional quick JSON probe with short timeout (~0.75s)
 
@@ -512,11 +641,11 @@ Used for:
 - Must follow selection algorithm conventions.
 - Must return stable JSON with a predictable top-level key.
 - Must preserve exit code conventions.
-- Must not introduce global COM init in cli.py.
+- Must not introduce global COM init in `cli.py`.
 
 ### 8.2 Adding a GUI feature
 - Must call CLI via subprocess.
-- Must not import devices.py for direct COM work.
+- Must not import `devices.py` for direct COM work.
 - Must update cache or schedule refresh after state changes.
 - Must keep UI responsive (avoid blocking calls without timeouts or threading).
 
@@ -529,8 +658,8 @@ Used for:
 
 ### 8.4 Editing prompt strings (strict warning)
 If you change learn prompt text:
-- update GUI prompt matchers in `LearnRunner` / interactive patterns
-- keep compatibility if possible (match old and new patterns)
+- update GUI prompt matchers (`LearnRunner` and/or `run_audioctl_interactive` patterns)
+- preserve backward compatibility where possible (match old + new patterns)
 
 ---
 
@@ -546,19 +675,22 @@ If you change learn prompt text:
 - `audioctl set-volume --id <id> --flow Render --level 10`
 - `audioctl set-volume --id <id> --flow Render --mute`
 - `audioctl get-volume --id <id> --flow Render`
+- `audioctl get-listen --id <capture-id>`
+- `audioctl get-enhancements --id <id> --flow Render`
 
 ### 9.3 GUI smoke tests
 - Launch GUI (no args).
 - Refresh devices.
-- Right-click a render endpoint: check mute label, enhancements label, FX menu.
-- Right-click a capture endpoint: check listen label.
-- Run a learn workflow only if your change impacts learn paths.
+- Right-click a render endpoint: verify mute label, enhancements label, FX submenu state.
+- Right-click a capture endpoint: verify listen label.
+- Run learn workflow only if changes impact learn paths.
 
 ### 9.4 Frozen EXE tests (PyInstaller)
 - Clean build.
 - Run EXE from dist output folder.
-- Confirm GUI launches and at least `list --json` works.
-- Confirm no missing module errors.
+- Confirm GUI launches and `list --json` works.
+- Confirm no missing module errors related to `comtypes._post_coinit*`.
+- Confirm console attach behavior when launched from an existing terminal.
 
 ---
 
@@ -569,26 +701,31 @@ Typical cause:
 - COM object released on wrong thread or during raw pointer usage.
 
 Engineering response:
-- verify GC guards remain around raw vtable calls
-- avoid long-lived COM objects
-- enable `AUDIOCTL_DEBUG=1` and review log breadcrumbs
+- Verify GC guards remain around raw vtable calls.
+- Avoid long-lived COM objects.
+- Enable `AUDIOCTL_DEBUG=1` and review `audioctl_gui.log` breadcrumbs.
+- Prefer name map path (`AudioUtilities.GetAllDevices`) over per-device PropertyStore name reads.
 
 ### 10.2 “Vendor toggle failed” / “No vendor toggle available”
 Cause:
-- INI has no entry for that endpoint GUID, or driver uses different keys.
+- No matching vendor entry signature exists for this endpoint at runtime.
 
 Response:
-- use learn flows
-- use discovery report and inspect diffs
+- Run main learn:
+  - `audioctl enhancements --id <id> --flow <Render|Capture> --learn`
+- Use discovery tooling:
+  - `audioctl discover-enhancements --id <id> --flow <...> --output-dir <...>`
+- Inspect generated report and diffs (look for `dword_flips`).
 
 ### 10.3 GUI learn doesn’t progress
 Cause:
-- prompt strings changed or not matched
-- subprocess stdout buffering changes
+- Prompt strings changed or not matched.
+- Subprocess output buffering/prompt-without-newline.
 
 Response:
-- inspect learn runner logs
-- confirm patterns in GUI match prompts in CLI
+- Confirm GUI patterns match CLI prompt strings.
+- Use `LearnRunner` (char-wise reading) if prompts appear without newline.
+- Inspect logs (`audioctl_gui.log`) for subprocess output and state transitions.
 
 ---
 
@@ -605,7 +742,8 @@ Response:
     "console": true,
     "multimedia": true,
     "communications": false
-  }
+  },
+  "guiIndex": 0
 }
 ```
 
@@ -643,6 +781,7 @@ devices = {endpoint-guid-1},{endpoint-guid-2}
 [fx_example_bucket]
 type = fx
 fx_name = BassBoost
+device_name_pattern = Speakers
 multi_write = 1
 write_count = 2
 decider_index = 1
