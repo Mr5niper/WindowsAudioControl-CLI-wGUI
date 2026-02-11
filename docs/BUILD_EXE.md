@@ -22,11 +22,10 @@ Download: https://www.python.org/downloads/release/python-3143/
   *(Ensure you check "Add Python to environment variables" during installation or manually add them before build)*
   <BR>
 1) Open PowerShell
-2) Navigate to the project folder (example: Audio_Control)
-```powershell
-cd "C:\path\to\Audio_Control"
-```
-3) Create a virtual environment
+2) Navigate to the project folder,
+   <BR>*example:* `cd "C:\path\to\Audio_Control"`
+
+4) Create a virtual environment
 ```powershell
 py -3 -m venv .\venv
 ```
