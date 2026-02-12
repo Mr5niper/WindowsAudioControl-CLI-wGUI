@@ -1,39 +1,54 @@
 # AUDIOCTL.PY CHANGELOG
 
-## v1.5.0.0 - [Current]  
-Date: 2026-02-10
+## v1.5.0.0 - [current]
+
+### Highlights
+- GUI remains a thin wrapper over the CLI, with improved stability, readability, and copy/paste-friendly command echoing.
+- Major enhancements/FX vendor toggle system overhaul (learn/apply/list/delete FX).
+- CLI device selection/indexing corrected to be stable and consistent with GUI ordering.
 
 ### Fixes
-- **CLI Device Index Correctness (Issue #21)**
-  - Fixed a critical bug where device indices could shift after filtering, causing `--index` to target the wrong device.
-  - Device selection now uses a stable `guiIndex` tagging approach consistent with `audioctl list`.
-  - Ambiguous match output now reports real, actionable indices (no local re-indexing confusion).
+- **Stable device indexing across CLI commands (Issue #21)**
+  - `--index` now consistently targets the same device as shown by `audioctl list`.
+  - Ambiguous match messages now display the correct global GUI indices (no misleading re-indexing).
 
-- **GUI “Print CLI commands” output is Windows- and PowerShell-friendly**
-  - Fixed command echo output that previously produced copy/paste issues.
-  - Commands now render with Windows-style double quotes (no POSIX-style `'...'` quoting).
-  - Device IDs printed after `--id` are now always wrapped in double quotes to avoid PowerShell parsing errors.
-  - Frozen builds print commands using a `.\audioctl.exe ...` prefix for reliable copy/paste from the app directory.
+- **Windows-friendly CLI command echoing (GUI)**
+  - “Print CLI commands” output is now copy/paste-safe on Windows:
+    - Uses Windows-style double quotes (no POSIX `'...'` quoting).
+    - Always quotes the value after `--id` to avoid PowerShell parsing issues.
+    - Uses `.\audioctl.exe ...` prefix in frozen builds for reliable copy/paste from the app directory.
+  - GUI debug logs (`AUDIOCTL_DEBUG=1`) now render commands using the same Windows-friendly formatting.
 
-- **Elevated debug logging reliability**
-  - Debug launcher now supports UAC elevation while preserving `AUDIOCTL_DEBUG=1`, ensuring `[DBG ...]` lines still appear in `audioctl_gui.log` when running as Administrator.
+- **Elevated debug logging**
+  - Debug launcher batch file now supports UAC elevation while still enabling `AUDIOCTL_DEBUG=1`, ensuring `[DBG ...]` lines are written to `audioctl_gui.log` even when running as Administrator.
+
+- **GUI reliability and usability fixes**
+  - Fixed device list cutoff by enabling full autosizing (removes hard row limits).
+  - Fixed combobox autocomplete getting “stuck” after selecting from dropdown.
 
 ### Improvements
-- **CLI/GUI architecture stability**
-  - Continued enforcing the “GUI is a wrapper over CLI” model (no long-lived COM in the GUI process).
-  - Consolidated command formatting into a shared helper (`cmdline_fmt.py`) for consistent display/log output.
+- **Enhancements + FX subsystem (vendor_toggles.ini)**
+  - New vendor toggle model supporting main Enhancements + per-effect FX toggles.
+  - Improved learning workflows and verification.
+  - FX operations expanded/standardized (learn/list/enable/disable/delete).
+  - `vendor_toggles.ini` now ships in `dist/` next to the EXE for packaged builds.
 
-- **Documentation/build toolchain clarity**
-  - Updated engineering/build docs to reflect Python **3.13.12** as the recommended/validated toolchain for v1.5.0.0 builds (after evaluating newer versions).
+- **GUI layout and UX**
+  - Removed “Show disabled/disconnected” toggle from the GUI toolbar (GUI displays active devices only).
+  - Admin warning moved to the bottom status bar to reduce top bar clutter.
+  - Improved FX learn prompt formatting for clarity (standardized ENABLE/DISABLE wording).
 
-### Build & Distribution
-- **Developer workflow / distribution additions**
-  - Added/updated a GUI debug launcher batch file for enabling verbose logging.
-  - Added an author/info text file to the `dist` folder for distributed builds.
+- **Build + documentation**
+  - Added/updated build tooling and docs (BUILD_EXE.bat / BUILD_EXE.md / Engineering Guide).
+  - Documented/standardized Python toolchain baseline at **Python 3.13.12** for this release.
+
+### Distribution
+- Added an author/info text file in `dist/` for packaged releases.
+- Added/updated a debug launcher batch file in `dist/` for easy verbose logging.
 
 ---
 
-## v1.4.7.3
+## v1.4.7.3 - [no build released]
 Date: 2026-02-06  
 
 ### Fixes
@@ -522,6 +537,7 @@ Date: 2026-01-19
 - **Basic Enumeration:** Listed playback (Render) and recording (Capture) devices using `IMMDeviceEnumerator` with `DEVICE_STATE_ACTIVE` only.
 - **“Listen” Toggle (Admin):** Initial registry-based enable/disable of “Listen to this device” for capture endpoints (admin required).
 - **Admin Check:** `is_admin` helper added to warn when elevation is required.
+
 
 
 
