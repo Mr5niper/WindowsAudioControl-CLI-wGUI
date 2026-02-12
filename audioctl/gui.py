@@ -28,13 +28,13 @@ import json
 import os
 from .logging_setup import resource_path, _log, _log_exc, _log_path
 from .compat import is_admin
-from .cmdline_fmt import format_cmd_for_display
 # GUI uses only CLI commands; it does not import low-level device helpers directly.
 # This keeps COM usage and raw registry/vtable interactions confined to the CLI layer.
 from .vendor_db import (
     _vendor_ini_default_path,
     _load_vendor_db_split,  # NEW
 )
+from .cmdline_fmt import format_cmd_for_display, format_audioctl_cmd_for_display
 
 # --- BEGIN: Non-blocking Learn runner (main Enhancements) ---
 import threading
@@ -244,7 +244,6 @@ def run_audioctl(args_list, capture_json=False, expect_ok=True):
         cmd = [exe, "-m", "audioctl"] + args_list
     try:
         from .logging_setup import _dbg
-
         _dbg("GUI run_audioctl: " + format_cmd_for_display(cmd))
     except Exception:
         pass
@@ -333,7 +332,6 @@ def run_audioctl_interactive(args_list, prompt_patterns, expect_ok=True):
         cmd = [exe, "-m", "audioctl"] + args_list
     try:
         from .logging_setup import _dbg
-
         _dbg("GUI run_audioctl_interactive: " + format_cmd_for_display(cmd))
     except Exception:
         pass
@@ -504,11 +502,7 @@ class AudioGUI:
         self.bottombar = ttk.Frame(self.root, padding=(10, 3))
         self.bottombar.pack(side="bottom", fill="x")
         if not is_admin():
-            admin_lbl = ttk.Label(
-                self.bottombar,
-                text="Note: Some actions may require Administrator",
-                foreground="#CC6600"
-            )
+            admin_lbl = ttk.Label(self.bottombar, text="Note: Some actions may require Administrator", foreground="#CC6600")
             admin_lbl.pack(side="right")
         self.status = tk.StringVar(value="Ready")
         self.statusbar = ttk.Label(self.bottombar, textvariable=self.status, anchor="w")
@@ -912,7 +906,6 @@ class AudioGUI:
                             def make_cmd(name, cur):
                                 def cmd():
                                     self.on_toggle_fx_live(name, cur)
-
                                 return cmd
 
                             self.fx_menu.add_command(label=label, command=make_cmd(fx_name, state_fx))
@@ -1039,7 +1032,6 @@ class AudioGUI:
                     def make_fx_command(name, current_state):
                         def cmd():
                             self.on_toggle_fx_live(name, current_state)
-
                         return cmd
 
                     self.fx_menu.add_command(label=label, command=make_fx_command(fx_name, state_fx))
@@ -1095,7 +1087,6 @@ class AudioGUI:
                                 def make_cmd(name, cur):
                                     def cmd():
                                         self.on_toggle_fx_live(name, cur)
-
                                     return cmd
 
                                 self.fx_menu.add_command(label=label, command=make_cmd(fx_name, state_fx))
@@ -1182,7 +1173,9 @@ class AudioGUI:
                     return
             _log(f"GUI action: set-default start via CLI id={d['id']} name={d['name']} flow={d['flow']} roles=all")
             data = run_audioctl(args, capture_json=True, expect_ok=True)
-            cmd_str = "audioctl " + format_cmd_for_display(args)
+            cmd_str = format_audioctl_cmd_for_display(
+                args, frozen=getattr(sys, "frozen", False), cross_shell=True
+            )
             self.maybe_print_cli(cmd_str)
             self.set_status(f"Set default ({d['flow']}) device: {d['name']} (all roles)")
             self.refresh_devices()
@@ -1215,7 +1208,9 @@ class AudioGUI:
                 "--json",
             ]
             rc, out, err = run_audioctl(args, capture_json=False, expect_ok=False)
-            cmd_str = "audioctl " + format_cmd_for_display(args)
+            cmd_str = format_audioctl_cmd_for_display(
+                args, frozen=getattr(sys, "frozen", False), cross_shell=True
+            )
             self.maybe_print_cli(cmd_str)
             if rc == 0:
                 try:
@@ -1270,7 +1265,9 @@ class AudioGUI:
                 "--json",
             ]
             rc, out, err = run_audioctl(args, capture_json=False, expect_ok=False)
-            cmd_str = "audioctl " + format_cmd_for_display(args)
+            cmd_str = format_audioctl_cmd_for_display(
+                args, frozen=getattr(sys, "frozen", False), cross_shell=True
+            )
             self.maybe_print_cli(cmd_str)
             if rc == 0:
                 try:
@@ -1335,7 +1332,9 @@ class AudioGUI:
                 enable = bool(choice)
             args = ["listen", "--id", d["id"], "--enable" if enable else "--disable", "--json"]
             rc, out, err = run_audioctl(args, capture_json=False, expect_ok=False)
-            cmd = "audioctl " + format_cmd_for_display(args)
+            cmd = format_audioctl_cmd_for_display(
+                args, frozen=getattr(sys, "frozen", False), cross_shell=True
+            )
             self.maybe_print_cli(cmd)
             if rc == 0:
                 try:
@@ -1409,7 +1408,9 @@ class AudioGUI:
                 "--enable" if enable else "--disable",
             ]
             data = run_audioctl(args, capture_json=True, expect_ok=False)
-            cmd_str = "audioctl " + format_cmd_for_display(args)
+            cmd_str = format_audioctl_cmd_for_display(
+                args, frozen=getattr(sys, "frozen", False), cross_shell=True
+            )
             self.maybe_print_cli(cmd_str)
             enh = data.get("enhancementsSet")
             if enh:
@@ -2125,7 +2126,9 @@ class AudioGUI:
                 fx_name,
             ]
             data = run_audioctl(args, capture_json=True, expect_ok=False)
-            cmd_str = "audioctl " + format_cmd_for_display(args)
+            cmd_str = format_audioctl_cmd_for_display(
+                args, frozen=getattr(sys, "frozen", False), cross_shell=True
+            )
             self.maybe_print_cli(cmd_str)
             fx_set = data.get("fxSet")
             if fx_set:
