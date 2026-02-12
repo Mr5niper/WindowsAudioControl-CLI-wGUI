@@ -4,7 +4,7 @@
 **Audience:** Engineers debugging, maintaining, or extending the codebase  
 **Platforms:** Windows 10/11  
 **Version:** 1.5.0.0  
-**Build contract:** **Python 3.14.3 required**, **PyInstaller required**
+**Build contract:** **Python 3.13.12 required**, **PyInstaller required**
 
 This document is intentionally **not** a usage manual. The README covers commands, examples, and screenshots.  
 This file focuses on how the program is built, how it works internally, where it breaks, and how to extend it safely.
@@ -14,9 +14,9 @@ This file focuses on how the program is built, how it works internally, where it
 ## 1) Build & runtime contract (non-negotiable)
 
 ### 1.1 Python version
-- Development/build is pinned to **Python 3.14.3**.
+- Development/build is pinned to **Python 3.13.12**.
 - `BUILD_EXE.bat` performs a hard preflight check:
-  - build fails if `python --version` is not exactly `3.14.3`.
+  - build fails if `python --version` is not exactly `3.13.12`.
 
 ### 1.2 PyInstaller is required
 This project is shipped/tested as a **frozen EXE**. Source-mode runs exist for development parity, but the supported artifact is:

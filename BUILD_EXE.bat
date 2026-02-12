@@ -4,15 +4,15 @@ setlocal enabledelayedexpansion
 :: ==========================================================================
 :: Configuration
 :: ==========================================================================
-set "REQUIRED_PYTHON_VERSION=3.14.3"
-set "PYTHON_DOWNLOAD_URL=https://www.python.org/downloads/release/python-3143/"
+set "REQUIRED_PYTHON_VERSION=3.13.12"
+set "PYTHON_DOWNLOAD_URL=https://www.python.org/downloads/release/python-31312/"
 
 :: ==========================================================================
 :: Pre-flight Check: Verify Python Version
 :: ==========================================================================
 echo [INFO] Checking Python version...
 
-:: Get the current Python version output (e.g., "Python 3.14.3")
+:: Get the current Python version output (e.g., "Python 3.13.12")
 for /f "tokens=2 delims= " %%v in ('python --version 2^>^&1') do set "CURRENT_PYTHON_VERSION=%%v"
 
 echo [INFO] Current Python version: !CURRENT_PYTHON_VERSION!
