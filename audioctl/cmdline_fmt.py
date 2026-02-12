@@ -1,4 +1,25 @@
 # audioctl/cmdline_fmt.py
+#
+# Command-line formatting helpers (display only)
+# ---------------------------------------------
+# This module exists because we need to display/echo commands in a way that:
+#   1) matches Windows expectations (double quotes, CreateProcess rules), and
+#   2) is copy/paste friendly into both cmd.exe and PowerShell (PowerShell is picky
+#      about device IDs and `{}` tokens unless quoted).
+#
+# IMPORTANT:
+# - These helpers are for *display/logging only*.
+# - Do NOT build a shell string and execute it.
+#   Always execute subprocesses by passing argv as a list (Popen([...])).
+#
+# Design notes:
+# - `shlex.join()` is POSIX-oriented and uses single quotes; that is confusing on
+#   Windows and often not pasteable as-is.
+# - On Windows we prefer `subprocess.list2cmdline()` which implements the proper
+#   CreateProcess quoting rules and produces double quotes.
+# - For "Print CLI commands" (GUI echo), we may intentionally add quotes even when
+#   not strictly required by CreateProcess so the command pastes cleanly into
+#   PowerShell (e.g., `--id "{...}"`).
 import os
 import subprocess
 
@@ -48,3 +69,5 @@ def format_audioctl_cmd_for_display(args, *, frozen: bool = False, cross_shell: 
         return prefix + (" " + " ".join(cooked) if cooked else "")
 
     return "audioctl " + format_cmd_for_display(args)
+
+
