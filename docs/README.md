@@ -637,18 +637,17 @@ Use `audioctl wait` to block until a device becomes active (appears) or until a 
 ---
 
 # GUI (Graphical User Interface)
-- Launch the GUI:
-  - Double-click `audioctl.exe` (no arguments), or run it without command-line options.
+### Launch the GUI:
+- Double-click `audioctl.exe` (no arguments), or run it without command-line options.<br>
   <br>
-    <img width="98" height="98" alt="image" src="https://github.com/user-attachments/assets/a8bacaf0-71e9-45c6-bfa2-676647c0157c" />
+    <img width="98" height="130" alt="image" src="https://github.com/user-attachments/assets/46adf78b-c222-4aaa-8e5d-0bd5bcc5b9bb" />
   <br>
   
-<img width="1367" height="357" alt="image" src="https://github.com/user-attachments/assets/efd4d7bd-ce8e-4be8-b352-9fdea7af92b8" />
+<img width="1980" height="545" alt="image" src="https://github.com/user-attachments/assets/a61c9f2e-4d02-418e-a71c-7b6637594e70" />
 <br>
 
 ### Features
-- Visual list of playback (Render) and recording (Capture) devices, grouped and sorted.
-- **“Show disabled/disconnected”** toggle.
+- A visual overview of all playback (Render) and recording (Capture) devices, clearly grouped and sorted for easy navigation and management.
 - **Right-click** or **double-click** a device for actions:
 &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<br>
 &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<br>
@@ -656,32 +655,41 @@ Use `audioctl wait` to block until a device becomes active (appears) or until a 
 &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<br>
 
   - **“Set as Default (all roles)”**
+    - Sets the selected device as the system default for Console, Multimedia, and Communications roles.
   - “Set Volume…”
+    - Opens a volume control dialog to precisely adjust the device’s output or input level.
     <br>
     <img width="218" height="146" alt="image" src="https://github.com/user-attachments/assets/b58c8b9e-df50-411a-ae13-d341d61ce332" />
     <br>
   - **“Mute” / “Unmute”**
+    - Switch the device between muted and active audio states.
   - **“Toggle Listen (capture only)”**
-  - **“Enable/Disable Enhancements”** (when a vendor toggle is known)
-  - **“Enhancement Effects”** (per‑effect toggles learned from your INI)
+    - Enable or disable “Listen to this device” for microphones and other recording inputs.
+  - **“Enable/Disable Enhancements”**
+    - Turn vendor-provided audio enhancements on or off when a known enhancement toggle is available.
+  - **“Enhancement Effects”**
+    - Individually toggle specific enhancement effects discovered and stored in your **vendor_toggles.ini** file.
     <img width="642" height="237" alt="image" src="https://github.com/user-attachments/assets/d79cf646-6fb0-43fc-b417-85c88885583e" />
   
-  - **“Learn Enhancements”** (discover a vendor DWORD and/or effects for that device)<br>
+  - **“Learn Enhancements”** (discover a vendor DWORD and/or effects for that device)
+    - Scan and identify vendor-specific enhancement DWORDs and per-effect settings for the selected device.<br>
     <img width="346" height="238" alt="image" src="https://github.com/user-attachments/assets/ebb033e9-89fb-4a34-a92a-165d443fdd7a" />
 
 
 ### Print CLI Commands
 - Enable **“Print CLI commands”** in the top bar.  
-  Every GUI action will print the equivalent `audioctl.exe` command to stdout (useful for learning the CLI and scripting).
+  Every GUI action will print the equivalent `audioctl.exe` command to the console (useful for learning the CLI and scripting).
 
-<img width="420" height="71" alt="image" src="https://github.com/user-attachments/assets/8fbc4be3-02aa-43aa-93d3-fe7835dc6bfd" />
+<img width="306" height="89" alt="image" src="https://github.com/user-attachments/assets/b68eed8f-3830-469e-b95f-be907cd9b523" />
     <br>
     <br>
 
-![CLI Output](https://github.com/user-attachments/assets/1f52d28b-71fa-4343-abde-728b164d2a99)
+<img width="1602" height="283" alt="image" src="https://github.com/user-attachments/assets/05879549-9e60-4c52-834d-d3453a5fc0fd" />
+
 
 ### Refresh Devices
-- Click **“Refresh”** or press `F5`.
+- Click **"Refresh"** or press `F5`.
+  (Processing time varies based on device count and enhancement effects)
 
 ### Notes
 - Setting default devices via the GUI may require Administrator privileges; the GUI will warn when recommended.

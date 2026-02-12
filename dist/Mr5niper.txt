@@ -1,0 +1,7 @@
+Windows Audio Control - CLI with GUI
+
+For documentation, updates, and source code visit:
+https://github.com/Mr5niper/WindowsAudioControl-CLI-wGUI
+
+Report issues or request features at:
+https://github.com/Mr5niper/WindowsAudioControl-CLI-wGUI/issues

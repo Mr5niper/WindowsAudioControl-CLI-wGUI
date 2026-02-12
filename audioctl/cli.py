@@ -19,7 +19,6 @@
 #   compat.py MUST be imported before anything that might touch comtypes/pycaw.
 #   It installs small compatibility shims needed for certain comtypes builds and
 #   ensures PyInstaller bundles critical COM cleanup modules.
-
 # --- stdlib imports ---
 import sys
 import argparse
@@ -29,14 +28,12 @@ import io
 import os
 import re
 from contextlib import redirect_stderr
-
 # --- local/project imports (do these early; compat must run before comtypes usage) ---
 # Import compat BEFORE any comtypes usage
 from .compat import (
     ROLES, is_admin,
 )
 from .logging_setup import _log, _log_exc
-
 # --- device helpers (CLI stays thin; COM/registry implementation lives in devices.py) ---
 from .devices import (
     list_devices, find_devices_by_selector, _sort_and_tag_gui_indices,
@@ -55,7 +52,6 @@ from .devices import (
     _get_enhancements_status_com,
     _read_listen_enable_fast,
 )
-
 # --- vendor/INI helpers (vendor-first enhancements/FX; parsing and registry writing live in vendor_db.py) ---
 from .vendor_db import (
     _vendor_ini_default_path,
@@ -71,6 +67,36 @@ from .vendor_db import (
     _fast_read_vendor_entry_state,
 )
 
+def _resolve_standard_target(args, flow_forced=None):
+    """
+    Standard logic to find a SINGLE target device while respecting global GUI indices.
+    1. List active devices.
+    2. Tag ALL of them with global guiIndex (so indices match 'audioctl list').
+    3. Filter by selector (id/name/flow).
+    4. Handle disambiguation (--index).
+    Returns (device_dict, None) or (None, error_msg).
+    """
+    devices = list_devices(include_all=False)
+    _sort_and_tag_gui_indices(devices)
+
+    f = flow_forced if flow_forced else getattr(args, "flow", None)
+    matches = find_devices_by_selector(devices, dev_id=args.id, name_substr=args.name, flow=f, regex=args.regex)
+
+    if not matches:
+        return None, "ERROR: device not found (active only)"
+
+    if len(matches) > 1 and args.index is None:
+        return None, _pretty_matches_msg("device", matches) + "\nUse --index to disambiguate."
+
+    if args.index is not None:
+        # Select by the tagged guiIndex
+        target = next((d for d in matches if d.get("guiIndex") == args.index), None)
+        if not target:
+             valid = sorted([d.get("guiIndex") for d in matches if "guiIndex" in d])
+             return None, f"ERROR: --index {args.index} does not match any found device. (Found indices: {valid})"
+        return target, None
+
+    return matches[0], None
 
 def cmd_list(args):
     # list:
@@ -101,7 +127,6 @@ def cmd_list(args):
         flags = [k for k, v in d["isDefault"].items() if v]
         print(f"[{d['guiIndex']}] {d['name']}  id={d['id']}  defaults={','.join(flags) if flags else '-'}\n")
     return 0
-
 
 def cmd_set_default(args):
     # set-default:
@@ -134,7 +159,6 @@ def cmd_set_default(args):
     
     exit_code = 0
     results = {"set": []}
-
     if args.playback_id or args.playback_name:
         flow_name = "Render"
         if args.playback_id:
@@ -157,7 +181,6 @@ def cmd_set_default(args):
         except Exception as e:
             print(f"ERROR: failed to set playback default: {e}", file=sys.stderr)
             exit_code = 1
-
     if args.recording_id or args.recording_name:
         flow_name = "Capture"
         if args.recording_id:
@@ -180,10 +203,8 @@ def cmd_set_default(args):
         except Exception as e:
             print(f"ERROR: failed to set recording default: {e}", file=sys.stderr)
             exit_code = 1
-
     print(json.dumps(results))
     return exit_code
-
 
 def cmd_set_volume(args):
     # set-volume:
@@ -218,34 +239,10 @@ def cmd_set_volume(args):
         print("ERROR: Must specify --level or --mute/--unmute", file=sys.stderr)
         return 1
 
-    devices = list_devices(include_all=False)
-    matches = find_devices_by_selector(devices, dev_id=args.id, name_substr=args.name, flow=args.flow, regex=args.regex)
-    if len(matches) == 0:
-        print("ERROR: device not found (active only)", file=sys.stderr)
-        return 3
-    if len(matches) > 1 and args.index is None:
-        print("ERROR: multiple matches; specify --index", file=sys.stderr)
-        return 4
-    
-    # Cross-cutting selection pattern:
-    # - _sort_and_tag_gui_indices sorts by name within flow and assigns guiIndex.
-    # - We then construct an "ordered" list that matches GUI ordering so --index
-    #   is consistent between CLI and GUI.
-    buckets = _sort_and_tag_gui_indices([d for d in matches])
-    flow = args.flow or (matches[0]["flow"] if matches else None)
-    ordered = (buckets.get(flow) or []) if args.flow else (buckets["Render"] + buckets["Capture"])
-    
-    if not ordered:
-        print("ERROR: no target device found for the specified criteria", file=sys.stderr)
-        return 4
-        
-    if args.index is not None:
-        if args.index < 0 or args.index >= len(ordered):
-            print(f"ERROR: --index out of range (0..{len(ordered)-1})", file=sys.stderr)
-            return 4
-        target = ordered[args.index]
-    else:
-        target = ordered[0]
+    target, err = _resolve_standard_target(args)
+    if err:
+        print(err, file=sys.stderr)
+        return 4 if "Multiple" in err or "index" in err else 3
 
     ok = False
     if args.mute:
@@ -260,12 +257,10 @@ def cmd_set_volume(args):
         ok = set_endpoint_volume(target["id"], args.level)
         if ok:
             print(json.dumps({"volumeSet": {"id": target["id"], "name": target["name"], "level": args.level}}))
-
     if not ok:
         print("ERROR: failed to set volume/mute", file=sys.stderr)
         return 1
     return 0
-
 
 def cmd_get_volume(args):
     """
@@ -287,33 +282,11 @@ def cmd_get_volume(args):
     #   0 success
     #   3 not found
     #   4 ambiguous / --index out of range
-    devices = list_devices(include_all=False)
-    matches = find_devices_by_selector(
-        devices,
-        dev_id=args.id,
-        name_substr=args.name,
-        flow=args.flow,
-        regex=args.regex,
-    )
-    if len(matches) == 0:
-        print("ERROR: device not found (active only)", file=sys.stderr)
-        return 3
-    if len(matches) > 1 and args.index is None:
-        print("ERROR: multiple matches; specify --index", file=sys.stderr)
-        return 4
-    buckets = _sort_and_tag_gui_indices([d for d in matches])
-    flow = args.flow or (matches[0]["flow"] if matches else None)
-    ordered = (buckets.get(flow) or []) if args.flow else (buckets["Render"] + buckets["Capture"])
-    if not ordered:
-        print("ERROR: no target device found for the specified criteria", file=sys.stderr)
-        return 4
-    if args.index is not None:
-        if args.index < 0 or args.index >= len(ordered):
-            print(f"ERROR: --index out of range (0..{len(ordered)-1})", file=sys.stderr)
-            return 4
-        target = ordered[args.index]
-    else:
-        target = ordered[0]
+    target, err = _resolve_standard_target(args)
+    if err:
+        print(err, file=sys.stderr)
+        return 4 if "Multiple" in err or "index" in err else 3
+
     vol = get_endpoint_volume(target["id"])
     muted = get_endpoint_mute(target["id"])
     # Normalize muted to a plain bool/null-like; don't let odd types leak
@@ -329,7 +302,6 @@ def cmd_get_volume(args):
     }
     print(json.dumps(result))
     return 0
-
 
 def cmd_listen(args):
     # listen:
@@ -376,31 +348,11 @@ def cmd_listen(args):
                 print(f"ERROR: Could not find playback target device: {err}", file=sys.stderr)
                 return 3
             render_device_id = render_target["id"]
-
     # --- The rest of the function is for finding the CAPTURE device ---
-    devices = list_devices(include_all=False)
-    matches = find_devices_by_selector(devices, dev_id=args.id, name_substr=args.name, flow="Capture", regex=args.regex)
-    if len(matches) == 0:
-        print("ERROR: capture device not found (active only)", file=sys.stderr)
-        return 3
-    if len(matches) > 1 and args.index is None:
-        print("ERROR: multiple matches; specify --index", file=sys.stderr)
-        return 4
-    
-    # --index is interpreted in GUI-order within Capture (name-sorted).
-    buckets = _sort_and_tag_gui_indices(matches[:])
-    ordered = buckets["Capture"]
-    if not ordered:
-        print("ERROR: no target device found for the specified criteria", file=sys.stderr)
-        return 4
-        
-    if args.index is not None:
-        if args.index < 0 or args.index >= len(ordered):
-            print(f"ERROR: --index out of range (0..{len(ordered)-1})", file=sys.stderr)
-            return 4
-        target = ordered[args.index]
-    else:
-        target = ordered[0]
+    target, err = _resolve_standard_target(args, flow_forced="Capture")
+    if err:
+        print(err, file=sys.stderr)
+        return 4 if "Multiple" in err or "index" in err else 3
         
     # --- Now, call the device function with the resolved render_device_id ---
     captured_stderr = io.StringIO()
@@ -441,7 +393,6 @@ def cmd_listen(args):
     print(json.dumps({"listenSet": {"id": target["id"], "name": target["name"], "enabled": actual_enabled_state}}))
     return 0
 
-
 def cmd_get_listen(args):
     """
     Get current 'Listen to this device' enabled/disabled state for a capture device.
@@ -459,32 +410,11 @@ def cmd_get_listen(args):
     #   0 success
     #   3 not found (active-only)
     #   4 ambiguous / --index out of range
-    devices = list_devices(include_all=False)
-    matches = find_devices_by_selector(
-        devices,
-        dev_id=args.id,
-        name_substr=args.name,
-        flow="Capture",
-        regex=args.regex,
-    )
-    if len(matches) == 0:
-        print("ERROR: capture device not found (active only)", file=sys.stderr)
-        return 3
-    if len(matches) > 1 and args.index is None:
-        print("ERROR: multiple matches; specify --index", file=sys.stderr)
-        return 4
-    buckets = _sort_and_tag_gui_indices(matches[:])
-    ordered = buckets["Capture"]
-    if not ordered:
-        print("ERROR: no target device found for the specified criteria", file=sys.stderr)
-        return 4
-    if args.index is not None:
-        if args.index < 0 or args.index >= len(ordered):
-            print(f"ERROR: --index out of range (0..{len(ordered)-1})", file=sys.stderr)
-            return 4
-        target = ordered[args.index]
-    else:
-        target = ordered[0]
+    target, err = _resolve_standard_target(args, flow_forced="Capture")
+    if err:
+        print(err, file=sys.stderr)
+        return 4 if "Multiple" in err or "index" in err else 3
+
     # FAST single probe via registry; no COM; no defaulting
     state = _read_listen_enable_fast(target["id"])
     print(json.dumps({
@@ -494,7 +424,6 @@ def cmd_get_listen(args):
         "listenEnabled": state,
     }))
     return 0
-
 
 def cmd_enhancements(args):
     # enhancements:
@@ -524,24 +453,11 @@ def cmd_enhancements(args):
     if sum(ops) != 1:
         print("ERROR: specify exactly one of --enable, --disable, --learn, --learn-fx, --enable-fx, --disable-fx, or --list-fx", file=sys.stderr)
         return 1
-
     # Device selection (existing pattern)
-    devices = list_devices(include_all=False)
-    matches = find_devices_by_selector(devices, dev_id=args.id, name_substr=args.name, flow=args.flow, regex=args.regex)
-    if not matches:
-        print("ERROR: device not found (active only)", file=sys.stderr)
-        return 3
-    if len(matches) > 1 and args.index is None:
-        print(_pretty_matches_msg("device", matches), file=sys.stderr)
-        return 4
-
-    # --index is in GUI-order within flow (name-sorted) for consistency with the GUI.
-    buckets = _sort_and_tag_gui_indices(matches[:])
-    ordered = (buckets.get(args.flow) or []) if args.flow else (buckets["Render"] + buckets["Capture"])
-    if not ordered:
-        print("ERROR: no target device found for the specified criteria", file=sys.stderr)
-        return 4
-    target = ordered[args.index] if args.index is not None else ordered[0]
+    target, err = _resolve_standard_target(args)
+    if err:
+        print(err, file=sys.stderr)
+        return 4 if "Multiple" in err or "index" in err else 3
 
     # === FX Operations ===
     # FX entries are learned/defined in vendor_toggles.ini and are per-device scoped.
@@ -550,10 +466,12 @@ def cmd_enhancements(args):
     #   - "multi-write" sequences (multiple registry values/types written together).
     if args.list_fx:
         # List FX available to this device as defined in vendor_toggles.ini.
-        fx_list = _list_fx_for_device(target["id"], target["flow"],
-                                      ini_path=getattr(args, "vendor_ini", None))
+        fx_list = _list_fx_for_device(
+            target["id"], target["flow"],
+            ini_path=getattr(args, "vendor_ini", None),
+            device_name=target["name"],
+        )
         fx_list = sorted(fx_list, key=lambda x: (x.get("fx_name") or "").lower())
-
         # JSON form is consumed by the GUI; includes per-FX state if readable.
         if getattr(args, "json", False):
             result = {
@@ -574,7 +492,6 @@ def cmd_enhancements(args):
                 })
             print(json.dumps(result))
             return 0
-
         # Human-readable listing (default CLI UX).
         print(f"Enhancement Effects for: {target['name']} ({target['flow']})")
         if not fx_list:
@@ -590,7 +507,6 @@ def cmd_enhancements(args):
             src = "ini"
             print(f"  - {fx.get('fx_name')}  [source={src}]  state={state_txt}")
         return 0
-
     if args.learn_fx:
         # learn-fx:
         #   Guided, interactive A/B snapshot capture for a specific effect.
@@ -615,7 +531,6 @@ def cmd_enhancements(args):
             FX_SETTLE = float(os.environ.get("AUDIOCTL_LEARN_FX_SETTLE", "0.35"))
         except Exception:
             FX_SETTLE = 0.35
-
         # First pass (A/B) – used only to "prime" the driver
         print(f"Set the '{fx_name}' effect to ENABLED for this device.")
         input("When ready, press Enter to capture snapshot A... ")
@@ -631,7 +546,6 @@ def cmd_enhancements(args):
             time.sleep(FX_SETTLE)
             snapB = _collect_sysfx_snapshot(target["id"])
         _reemit_non_error_stderr(captured_stderr.getvalue())
-
         # Second pass (A2/B2) – this pair is what we will record in the INI
         print(f"Enable the '{fx_name}' effect again (second pass).")
         input("When ready, press Enter to capture snapshot A2... ")
@@ -647,7 +561,6 @@ def cmd_enhancements(args):
             time.sleep(FX_SETTLE)
             snapB2 = _collect_sysfx_snapshot(target["id"])
         _reemit_non_error_stderr(captured_stderr.getvalue())
-
         ok, info = _learn_fx_and_write_ini(
             target, fx_name, snapA, snapB,
             ini_path=getattr(args, "vendor_ini", None) or _vendor_ini_default_path(),
@@ -666,7 +579,6 @@ def cmd_enhancements(args):
         else:
             print(f"ERROR: FX learn failed: {info}", file=sys.stderr)
             return 1
-
     if args.enable_fx or args.disable_fx:
         # enable-fx/disable-fx:
         #   Toggle a learned effect for this device.
@@ -726,7 +638,8 @@ def cmd_enhancements(args):
         enable = bool(args.enable_fx)
         ok, verified_by, state = _apply_fx(
             target["id"], target["flow"], chosen_name, enable,
-            ini_path=getattr(args, "vendor_ini", None)
+            ini_path=getattr(args, "vendor_ini", None),
+            device_name=target["name"],
         )
         if ok:
             print(json.dumps({
@@ -742,7 +655,6 @@ def cmd_enhancements(args):
         else:
             print(f"ERROR: FX '{chosen_name}' toggle failed for this device", file=sys.stderr)
             return 1
-
     if args.delete_fx:
         # delete-fx:
         #   Removes the association for this device GUID from the FX bucket in the INI.
@@ -755,7 +667,11 @@ def cmd_enhancements(args):
         if not desired:
             print("ERROR: FX name cannot be empty", file=sys.stderr)
             return 1
-        fx_all = _list_fx_for_device(target["id"], target["flow"], ini_path=getattr(args, "vendor_ini", None))
+        fx_all = _list_fx_for_device(
+            target["id"], target["flow"],
+            ini_path=getattr(args, "vendor_ini", None),
+            device_name=target["name"],
+        )
         # Build matches by name using substring or regex, case-insensitive (same as enable/disable-fx)
         matches_fx = []
         if args.regex:
@@ -807,7 +723,6 @@ def cmd_enhancements(args):
             msg = info if isinstance(info, str) else (info.get("reason") if isinstance(info, dict) else "unknown")
             print(f"ERROR: delete-fx failed: {msg}", file=sys.stderr)
             return 1
-
     # === Main toggle operations (vendor-only at runtime) ===
     if args.learn:
         # learn (main):
@@ -881,15 +796,12 @@ def cmd_enhancements(args):
         # Nothing found after retry
         print("ERROR: No DWORD flip found and no vendor method became available after a retry. Learn failed.", file=sys.stderr)
         return 1
-
     enable = True if args.enable else False
-
     # Runtime policy: vendor-only. If we don't have a learned/known vendor method,
     # we do not attempt Windows Disable_SysFx toggles here (those exist for diagnostics/learn).
     if not _enhancements_supported(target["id"], target["flow"]):
         print("ERROR: No vendor toggle available for this device. Use --learn to teach a vendor method.", file=sys.stderr)
         return 1
-
     ok, verified_by, state = _apply_enhancements(
         target["id"], target["flow"], enable,
         prefer_hklm=args.prefer_hklm,
@@ -901,7 +813,6 @@ def cmd_enhancements(args):
         return 0
     print("ERROR: vendor toggle failed.", file=sys.stderr)
     return 1
-
 
 def cmd_get_enhancements(args):
     """
@@ -927,32 +838,11 @@ def cmd_get_enhancements(args):
     #   0 success
     #   3 not found
     #   4 ambiguous / --index out of range
-    devices = list_devices(include_all=False)
-    matches = find_devices_by_selector(
-        devices,
-        dev_id=args.id,
-        name_substr=args.name,
-        flow=args.flow,
-        regex=args.regex,
-    )
-    if not matches:
-        print("ERROR: device not found (active only)", file=sys.stderr)
-        return 3
-    if len(matches) > 1 and args.index is None:
-        print(_pretty_matches_msg("device", matches), file=sys.stderr)
-        return 4
-    buckets = _sort_and_tag_gui_indices(matches[:])
-    ordered = (buckets.get(args.flow) or []) if args.flow else (buckets["Render"] + buckets["Capture"])
-    if not ordered:
-        print("ERROR: no target device found for the specified criteria", file=sys.stderr)
-        return 4
-    if args.index is not None:
-        if args.index < 0 or args.index >= len(ordered):
-            print(f"ERROR: --index out of range (0..{len(ordered)-1})", file=sys.stderr)
-            return 4
-        target = ordered[args.index]
-    else:
-        target = ordered[0]
+    target, err = _resolve_standard_target(args)
+    if err:
+        print(err, file=sys.stderr)
+        return 4 if "Multiple" in err or "index" in err else 3
+
     # FAST vendor-only read: only if INI vendor is known for this device
     has_vendor = False
     try:
@@ -973,7 +863,6 @@ def cmd_get_enhancements(args):
         "enhancementsEnabled": state,
     }))
     return 0
-
 
 def cmd_get_device_state(args):
     """
@@ -1015,32 +904,11 @@ def cmd_get_device_state(args):
     #   3 not found
     #   4 ambiguous / --index out of range
     import time as _t
-    devices = list_devices(include_all=False)
-    matches = find_devices_by_selector(
-        devices,
-        dev_id=args.id,
-        name_substr=args.name,
-        flow=args.flow,
-        regex=args.regex,
-    )
-    if not matches:
-        print("ERROR: device not found (active only)", file=sys.stderr)
-        return 3
-    if len(matches) > 1 and args.index is None:
-        print(_pretty_matches_msg("device", matches), file=sys.stderr)
-        return 4
-    buckets = _sort_and_tag_gui_indices(matches[:])
-    ordered = (buckets.get(args.flow) or []) if args.flow else (buckets["Render"] + buckets["Capture"])
-    if not ordered:
-        print("ERROR: no target device found for the specified criteria", file=sys.stderr)
-        return 4
-    if args.index is not None:
-        if args.index < 0 or args.index >= len(ordered):
-            print(f"ERROR: --index out of range (0..{len(ordered)-1})", file=sys.stderr)
-            return 4
-        target = ordered[args.index]
-    else:
-        target = ordered[0]
+    target, err = _resolve_standard_target(args)
+    if err:
+        print(err, file=sys.stderr)
+        return 4 if "Multiple" in err or "index" in err else 3
+
     dev_id = target["id"]
     flow   = target["flow"]
     # Volume & mute (no artificial sleeps, keep COM accuracy)
@@ -1090,7 +958,7 @@ def cmd_get_device_state(args):
     # FX list with fast states (ALWAYS list FX if present in INI; do not depend on MAIN support)
     available_fx = []
     try:
-        fx_list = _list_fx_for_device(dev_id, flow, ini_path=ini_path)
+        fx_list = _list_fx_for_device(dev_id, flow, ini_path=ini_path, device_name=target["name"])
         fx_list = sorted(fx_list, key=lambda x: (x.get("fx_name") or "").lower())
         for fx in fx_list:
             entry = fx.get("entry")
@@ -1122,7 +990,6 @@ def cmd_get_device_state(args):
     print(json.dumps(result))
     return 0
 
-
 def cmd_diag_sysfx(args):
     # diag-sysfx:
     #   Diagnostic command intended for troubleshooting and development.
@@ -1138,23 +1005,11 @@ def cmd_diag_sysfx(args):
     #   0 success
     #   3 not found
     #   4 ambiguous / --index out of range
-    devices = list_devices(include_all=False)
-    matches = find_devices_by_selector(devices, dev_id=args.id, name_substr=args.name, flow=args.flow, regex=args.regex)
-    if not matches:
-        print("ERROR: device not found (active only)", file=sys.stderr)
-        return 3
-    buckets = _sort_and_tag_gui_indices([d for d in matches])
-    ordered = (buckets.get(args.flow) or []) if args.flow else (buckets["Render"] + buckets["Capture"])
-    if not ordered:
-        print("ERROR: no target device found for the specified criteria", file=sys.stderr)
-        return 4
-    if args.index is not None:
-        if args.index < 0 or args.index >= len(ordered):
-            print(f"ERROR: --index out of range (0..{len(ordered)-1})", file=sys.stderr)
-            return 4
-        target = ordered[args.index]
-    else:
-        target = ordered[0]
+    target, err = _resolve_standard_target(args)
+    if err:
+        print(err, file=sys.stderr)
+        return 4 if "Multiple" in err or "index" in err else 3
+
     live_win = _get_enhancements_status_propstore(target["id"])
     live_com = _get_enhancements_status_com(target["id"])
     vend_entry = _find_first_vendor_entry(target["id"], target["flow"], ini_path=None)
@@ -1170,7 +1025,6 @@ def cmd_diag_sysfx(args):
         "vendor_toggle_status": {vend_tag or "None Found": vend_state}
     }, indent=2))
     return 0
-
 
 def cmd_discover_enhancements(args):
     # discover-enhancements:
@@ -1189,26 +1043,11 @@ def cmd_discover_enhancements(args):
     #   0 success
     #   3 not found
     #   4 ambiguous / --index out of range
-    devices = list_devices(include_all=False)
-    matches = find_devices_by_selector(devices, dev_id=args.id, name_substr=args.name, flow=args.flow, regex=args.regex)
-    if not matches:
-        print("ERROR: device not found (active only)", file=sys.stderr)
-        return 3
-    if len(matches) > 1 and args.index is None:
-        print(_pretty_matches_msg("device", matches), file=sys.stderr)
-        return 4
-    buckets = _sort_and_tag_gui_indices(matches[:])
-    ordered = (buckets.get(args.flow) or []) if args.flow else (buckets["Render"] + buckets["Capture"])
-    if not ordered:
-        print("ERROR: no target device found for the specified criteria", file=sys.stderr)
-        return 4
-    if args.index is not None:
-        if args.index < 0 or args.index >= len(ordered):
-            print(f"ERROR: --index out of range (0..{len(ordered)-1})", file=sys.stderr)
-            return 4
-        target = ordered[args.index]
-    else:
-        target = ordered[0]
+    target, err = _resolve_standard_target(args)
+    if err:
+        print(err, file=sys.stderr)
+        return 4 if "Multiple" in err or "index" in err else 3
+
     print(f"Discovery target: {target['name']} [{target['id']}] ({target['flow']})")
     print("Step 1: In Windows Sound settings, set 'Audio Enhancements' to ENABLED for this device.")
     input("When ready, press Enter to capture snapshot A... ")
@@ -1264,7 +1103,6 @@ def cmd_discover_enhancements(args):
     print(f"  JSON -> {json_path}")
     return 0
 
-
 def cmd_wait(args):
     # wait:
     #   Poll for a device to appear as an ACTIVE endpoint until timeout.
@@ -1282,27 +1120,25 @@ def cmd_wait(args):
     deadline = time.time() + args.timeout
     while time.time() < deadline:
         devices = list_devices(include_all=False)
+        _sort_and_tag_gui_indices(devices) # Ensure indices match 'list'
         matches = find_devices_by_selector(devices, dev_id=args.id, name_substr=args.name, flow=args.flow, regex=args.regex)
         if matches:
-            buckets = _sort_and_tag_gui_indices(matches[:])
-            flow = args.flow or (matches[0]["flow"] if matches else None)
-            ordered = (buckets.get(flow) or []) if args.flow else (buckets["Render"] + buckets["Capture"])
-            if not ordered:
-                print("ERROR: no target device found for the specified criteria", file=sys.stderr)
-                return 4
             if args.index is not None:
-                if args.index < 0 or args.index >= len(ordered):
-                    print(f"ERROR: --index out of range (0..{len(ordered)-1})", file=sys.stderr)
-                    return 4
-                target = ordered[args.index]
+                # Check for exact index match
+                target = next((d for d in matches if d.get("guiIndex") == args.index), None)
+                if not target:
+                    # If index not found, keep waiting? Or fail? 
+                    # Given 'wait' semantics, we should wait until the specific index appears.
+                    time.sleep(0.5)
+                    continue
             else:
-                target = ordered[0]
+                target = matches[0]
+
             print(json.dumps({"found": target}))
             return 0
         time.sleep(0.5)
     print("ERROR: timeout waiting for device", file=sys.stderr)
     return 3
-
 
 def build_parser():
     # Build the argparse tree.
@@ -1320,13 +1156,11 @@ def build_parser():
     #   - internal helper for elevation (vendor-ini-append)
     p = argparse.ArgumentParser(prog="audioctl", description="Windows audio control CLI (pycaw-based)")
     sub = p.add_subparsers(dest="cmd", required=True)
-
     # --- list ---
     p_list = sub.add_parser("list", help="List devices")
     p_list.add_argument("--all", action="store_true", help="Include disabled/disconnected")
     p_list.add_argument("--json", action="store_true")
     p_list.set_defaults(func=cmd_list)
-
     # --- set-default ---
     p_sd = sub.add_parser("set-default", help="Set default playback/recording devices (Admin might be required)")
     p_sd.add_argument("--playback-id")
@@ -1340,7 +1174,6 @@ def build_parser():
     p_sd.add_argument("--index", type=int)
     p_sd.add_argument("--regex", action="store_true")
     p_sd.set_defaults(func=cmd_set_default)
-
     # --- volume/mute ---
     p_sv = sub.add_parser("set-volume", help="Set endpoint volume (render or capture) or mute/unmute")
     p_sv.add_argument("--id")
@@ -1353,7 +1186,6 @@ def build_parser():
     p_sv.add_argument("--regex", action="store_true")
     p_sv.add_argument("--json", action="store_true", help="Output JSON on success (default) and minimized text on error")
     p_sv.set_defaults(func=cmd_set_volume)
-
     p_gv = sub.add_parser("get-volume", help="Get endpoint volume and mute state (render or capture)")
     p_gv.add_argument("--id")
     p_gv.add_argument("--name")
@@ -1361,7 +1193,6 @@ def build_parser():
     p_gv.add_argument("--index", type=int)
     p_gv.add_argument("--regex", action="store_true")
     p_gv.set_defaults(func=cmd_get_volume)
-
     # --- listen ---
     p_ls = sub.add_parser("listen", help="Enable/disable 'Listen to this device' (capture only)")
     p_ls.add_argument("--id", help="Device ID for the capture device.")
@@ -1374,14 +1205,12 @@ def build_parser():
     p_ls.add_argument("--regex", action="store_true")
     p_ls.add_argument("--json", action="store_true", help="Output JSON on success (default) and minimized text on error")
     p_ls.set_defaults(func=cmd_listen)
-
     p_gl = sub.add_parser("get-listen", help="Get 'Listen to this device' enabled/disabled state for a capture device")
     p_gl.add_argument("--id", help="Device ID for the capture device.")
     p_gl.add_argument("--name", help="Substring or regex of the device name")
     p_gl.add_argument("--index", type=int)
     p_gl.add_argument("--regex", action="store_true")
     p_gl.set_defaults(func=cmd_get_listen)
-
     # --- enhancements / FX subsystem ---
     p_fx = sub.add_parser("enhancements", help="Enable/disable 'Audio Enhancements' (SysFX) on a device")
     p_fx.add_argument("--id", help="Endpoint ID")
@@ -1410,7 +1239,6 @@ def build_parser():
     p_fx.add_argument("--delete-fx", metavar="FX_NAME",
                       help="Delete a learned audio effect for this device")
     p_fx.set_defaults(func=cmd_enhancements)
-
     # --- vendor-only state queries ---
     p_ge = sub.add_parser(
         "get-enhancements",
@@ -1422,7 +1250,6 @@ def build_parser():
     p_ge.add_argument("--index", type=int)
     p_ge.add_argument("--regex", action="store_true")
     p_ge.set_defaults(func=cmd_get_enhancements)
-
     p_gds = sub.add_parser(
         "get-device-state",
         help="Get current state for a device (volume, mute, listen, enhancements, FX) for GUI"
@@ -1434,7 +1261,6 @@ def build_parser():
     p_gds.add_argument("--regex", action="store_true")
     p_gds.add_argument("--vendor-ini", help="Optional vendor INI path for FX lookup")
     p_gds.set_defaults(func=cmd_get_device_state)
-
     # --- diagnostics ---
     p_dx = sub.add_parser(
         "diag-sysfx",
@@ -1446,7 +1272,6 @@ def build_parser():
     p_dx.add_argument("--index", type=int)
     p_dx.add_argument("--regex", action="store_true")
     p_dx.set_defaults(func=cmd_diag_sysfx)
-
     p_dm = sub.add_parser("diag-mmdevices", help="Dump all MMDevices values for an endpoint (debug)")
     p_dm.add_argument("--id")
     p_dm.add_argument("--name")
@@ -1454,7 +1279,6 @@ def build_parser():
     p_dm.add_argument("--index", type=int)
     p_dm.add_argument("--regex", action="store_true")
     p_dm.set_defaults(func=cmd_diag_mmdevices)
-
     # --- discovery (interactive report generation) ---
     p_learn = sub.add_parser("discover-enhancements", help="Interactively learn how Enhancements toggles for a device")
     p_learn.add_argument("--id")
@@ -1465,7 +1289,6 @@ def build_parser():
     p_learn.add_argument("--output-dir", help="Where to write the TXT/JSON report (default: current directory)")
     p_learn.add_argument("--ini-snippet", help="Write a suggested vendor INI section to this path (append).")
     p_learn.set_defaults(func=cmd_discover_enhancements)
-
     # --- wait ---
     p_w = sub.add_parser("wait", help="Wait for device to appear")
     p_w.add_argument("--id")
@@ -1475,7 +1298,6 @@ def build_parser():
     p_w.add_argument("--index", type=int)
     p_w.add_argument("--regex", action="store_true")
     p_w.set_defaults(func=cmd_wait)
-
     # Hidden helper: elevated INI append (used by GUI to write into Program Files)
     # The GUI can write a "work order" JSON file and then run this subcommand via
     # an elevated process to perform the actual append when permissions require it.
@@ -1483,7 +1305,6 @@ def build_parser():
     p_vi.add_argument("--work", required=True, help=argparse.SUPPRESS)  # path to JSON work order
     p_vi.set_defaults(func=cmd_vendor_ini_append)
     return p
-
 
 def cmd_diag_mmdevices(args):
     # diag-mmdevices:
@@ -1497,33 +1318,14 @@ def cmd_diag_mmdevices(args):
     #   0 success
     #   3 not found
     #   4 ambiguous / --index out of range
-    devices = list_devices(include_all=False)
-    matches = find_devices_by_selector(devices, dev_id=args.id, name_substr=args.name, flow=args.flow, regex=args.regex)
-    if not matches:
-        print("ERROR: device not found (active only)", file=sys.stderr)
-        return 3
-    if len(matches) > 1 and args.index is None:
-        print("ERROR: multiple matches; specify --index", file=sys.stderr)
-        return 4
-    
-    buckets = _sort_and_tag_gui_indices([d for d in matches])
-    ordered = (buckets.get(args.flow) or []) if args.flow else (buckets["Render"] + buckets["Capture"])
-    if not ordered:
-        print("ERROR: no target device found for the specified criteria", file=sys.stderr)
-        return 4
-        
-    if args.index is not None:
-        if args.index < 0 or args.index >= len(ordered):
-            print(f"ERROR: --index out of range (0..{len(ordered)-1})", file=sys.stderr)
-            return 4
-        target = ordered[args.index]
-    else:
-        target = ordered[0]
-        
+    target, err = _resolve_standard_target(args)
+    if err:
+        print(err, file=sys.stderr)
+        return 4 if "Multiple" in err or "index" in err else 3
+
     dump = _dump_mmdevices_all_values(target["id"])
     print(json.dumps({"id": target["id"], "name": target["name"], "flow": target["flow"], "mmdevices": dump}, indent=2))
     return 0
-
 
 def cmd_vendor_ini_append(args):
     # vendor-ini-append (hidden):
@@ -1604,7 +1406,6 @@ def cmd_vendor_ini_append(args):
         print(f"ERROR: failed to append INI: {e}", file=sys.stderr)
         return 1
 
-
 def main(argv=None):
     # Entry point for CLI usage and for "double-click / no args" GUI launching.
     #
@@ -1618,14 +1419,12 @@ def main(argv=None):
             return launch_gui()
         except Exception as e:
             print(f"ERROR: GUI failed to start: {e}", file=sys.stderr)
-
     # NOTE: Do NOT call CoInitialize/CoUninitialize here anymore.
     # Each low-level helper in devices.py performs its own COM init/cleanup.
     # This avoids COM apartment lifetime bugs when multiple commands run inside
     # one Python process (and makes the CLI safe when called repeatedly by the GUI).
     parser = build_parser()
     args = parser.parse_args(argv)
-
     # Centralized validation for mutually exclusive flag sets.
     # (We duplicate some checks inside commands too so direct calls remain safe.)
     if args.cmd == "listen":
@@ -1636,7 +1435,6 @@ def main(argv=None):
             print("ERROR: specify --enable or --disable", file=sys.stderr)
             return 1
         args.enable = True if args.enable else False
-
     if args.cmd == "enhancements":
         ops_count = (
             int(bool(getattr(args, "enable", False))) +
@@ -1651,7 +1449,6 @@ def main(argv=None):
         if ops_count != 1:
             print("ERROR: specify exactly one of --enable, --disable, --learn, --learn-fx, --enable-fx, --disable-fx, or --list-fx", file=sys.stderr)
             return 1
-
     if args.cmd == "set-volume":
         if (args.mute or args.unmute) and args.level is not None:
             print("ERROR: Cannot specify both --level and --mute/--unmute", file=sys.stderr)
@@ -1659,7 +1456,6 @@ def main(argv=None):
         if not (args.mute or args.unmute or args.level is not None):
             print("ERROR: Must specify --level or --mute/--unmute", file=sys.stderr)
             return 1
-
     try:
         rc = args.func(args)
     except KeyboardInterrupt:
