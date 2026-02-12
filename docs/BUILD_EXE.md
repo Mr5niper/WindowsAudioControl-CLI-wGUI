@@ -1,21 +1,21 @@
 # **Auto Build Process (Recommended)**
 This method uses the included batch script to automate environment creation, dependency installation, and compilation.
 
-**Prerequisite:** Install Python 3.14.3  
-Download: https://www.python.org/downloads/release/python-3143/  
+**Prerequisite:** Install Python 3.13.12  
+Download: https://www.python.org/downloads/release/python-31312/  
 *(Ensure you check "Add Python to environment variables" during installation or manually add them before build)*
 
 1.  Navigate to the project folder.
 2.  Double-click **`BUILD_EXE.bat`**.
-    *   The script will verify your Python version matches `3.14.3`.
+    *   The script will verify your Python version matches `3.13.12`.
     *   If the version is incorrect, it will pause and provide the download link.
 3.  Wait for the process to complete.
     *   It will automatically create a temporary virtual environment (`venv`), install `requirements.txt`, and run PyInstaller.
 4.  Locate your new executable in the **`dist`** folder.
 
 # Manual Build Process (Windows, PowerShell): Create venv, install requirements, build EXE
-**Prerequisite:** Install Python 3.14.3  
-Download: https://www.python.org/downloads/release/python-3143/  
+**Prerequisite:** Install Python 3.13.12  
+Download: https://www.python.org/downloads/release/python-31312/  
 *(Ensure you check "Add Python to environment variables" during installation or manually add them before build)*
   <BR>
 1) Open PowerShell
