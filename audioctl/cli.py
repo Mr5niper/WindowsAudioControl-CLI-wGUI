@@ -348,6 +348,25 @@ def cmd_listen(args):
                 print(f"ERROR: Could not find playback target device: {err}", file=sys.stderr)
                 return 3
             render_device_id = render_target["id"]
+
+    # --- Discovery for Issue #34: Resolve target info ONLY if requested in command ---
+    playback_target_name = None
+    warning = None
+    
+    if render_device_id is not None:
+        if render_device_id == '':
+            playback_target_name = "Default Playback Device"
+        else:
+            # Resolve the friendly name for the provided ID
+            all_renders = [d for d in list_devices(include_all=True) if d["flow"] == "Render"]
+            match = next((d for d in all_renders if d["id"] == render_device_id), None)
+            if match:
+                playback_target_name = match["name"]
+            else:
+                # If ID is invalid, Windows uses default. We report fallback and add a warning.
+                playback_target_name = "Default Playback Device (Fallback)"
+                warning = f"Playback target ID '{render_device_id}' invalid; using default."
+
     # --- The rest of the function is for finding the CAPTURE device ---
     target, err = _resolve_standard_target(args, flow_forced="Capture")
     if err:
@@ -365,18 +384,32 @@ def cmd_listen(args):
         ok = set_listen_to_device_ps(target["id"], args.enable, render_device_id=render_device_id)
         
     stderr_output = captured_stderr.getvalue()
+
+    # Function to build the JSON dictionary dynamically based on if a target was requested
+    def build_payload(enabled_state, verified_by=None):
+        payload = {"id": target["id"], "name": target["name"], "enabled": enabled_state}
+        if verified_by:
+            payload["verifiedBy"] = verified_by
+        # Only add playback fields if they were part of the command
+        if playback_target_name is not None:
+            payload["playbackTargetId"] = render_device_id if render_device_id else "default"
+            payload["playbackTargetName"] = playback_target_name
+            if warning:
+                payload["warning"] = warning
+        return payload
+
     if not ok:
         # Even if the setter returned False, Windows/driver may have applied the change.
         # Verify via COM first (exact), then registry (robust) before calling it a failure.
         actual = _get_listen_to_device_status_ps(target["id"])
         if actual is not None and actual == args.enable:
             _reemit_non_error_stderr(stderr_output)
-            print(json.dumps({"listenSet": {"id": target["id"], "name": target["name"], "enabled": actual, "verifiedBy": "com"}}))
+            print(json.dumps({"listenSet": build_payload(actual, "com")}))
             return 0
         verified, reg_state = _verify_listen_via_registry(target["id"], args.enable, timeout=3.0, interval=0.20)
         if verified or (reg_state is not None and reg_state == args.enable):
             _reemit_non_error_stderr(stderr_output)
-            print(json.dumps({"listenSet": {"id": target["id"], "name": target["name"], "enabled": reg_state, "verifiedBy": "registry"}}))
+            print(json.dumps({"listenSet": build_payload(reg_state, "registry")}))
             return 0
         sys.stderr.write(stderr_output)
         print(f"ERROR: failed to set 'Listen to this device' for '{target['name']}'.", file=sys.stderr)
@@ -390,39 +423,54 @@ def cmd_listen(args):
         if verified or reg_state is not None:
             actual_enabled_state = reg_state
             
-    print(json.dumps({"listenSet": {"id": target["id"], "name": target["name"], "enabled": actual_enabled_state}}))
+    print(json.dumps({"listenSet": build_payload(actual_enabled_state)}))
     return 0
 
 def cmd_get_listen(args):
-    """
-    Get current 'Listen to this device' enabled/disabled state for a capture device.
-    Returns JSON:
-      { "id": "...", "name": "...", "flow": "Capture", "listenEnabled": true|false|null }
-    """
-    # get-listen:
-    #   Read-only helper intended for fast polling.
-    #
-    # Design choice:
-    #   We use _read_listen_enable_fast (registry-first, no COM) to keep this cheap
-    #   enough for frequent GUI refresh and scripting loops.
-    #
-    # Exit codes:
-    #   0 success
-    #   3 not found (active-only)
-    #   4 ambiguous / --index out of range
     target, err = _resolve_standard_target(args, flow_forced="Capture")
     if err:
         print(err, file=sys.stderr)
         return 4 if "Multiple" in err or "index" in err else 3
 
-    # FAST single probe via registry; no COM; no defaulting
     state = _read_listen_enable_fast(target["id"])
-    print(json.dumps({
+    
+    # Base JSON (Original structure)
+    result = {
         "id": target["id"],
         "name": target["name"],
         "flow": target["flow"],
         "listenEnabled": state,
-    }))
+    }
+
+    # Only add routing info if specifically requested in the get-listen command
+    if args.playback_target_id is not None or args.playback_target_name is not None:
+        import winreg
+        from .devices import _extract_endpoint_guid_from_device_id
+        
+        current_target_id = "default"
+        current_target_name = "Default Playback Device"
+        
+        guid = _extract_endpoint_guid_from_device_id(target["id"])
+        if guid:
+            key_path = rf"SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Capture\{guid}\Properties"
+            value_name = "{24dbb0fc-9311-4b3d-9cf0-18ff155639d4},0"
+            try:
+                key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, key_path, 0, winreg.KEY_READ)
+                val, _ = winreg.QueryValueEx(key, value_name)
+                winreg.CloseKey(key)
+                if val:
+                    current_target_id = val
+                    all_renders = [d for d in list_devices(include_all=True) if d["flow"] == "Render"]
+                    match = next((d for d in all_renders if d["id"] == val), None)
+                    if match:
+                        current_target_name = match["name"]
+            except OSError:
+                pass
+        
+        result["playbackTargetId"] = current_target_id
+        result["playbackTargetName"] = current_target_name
+
+    print(json.dumps(result))
     return 0
 
 def cmd_enhancements(args):
@@ -1210,6 +1258,8 @@ def build_parser():
     p_gl.add_argument("--name", help="Substring or regex of the device name")
     p_gl.add_argument("--index", type=int)
     p_gl.add_argument("--regex", action="store_true")
+    p_gl.add_argument("--playback-target-id", nargs='?', const='', help="Request current playback routing target ID")
+    p_gl.add_argument("--playback-target-name", nargs='?', const='', help="Request current playback routing target name")
     p_gl.set_defaults(func=cmd_get_listen)
     # --- enhancements / FX subsystem ---
     p_fx = sub.add_parser("enhancements", help="Enable/disable 'Audio Enhancements' (SysFX) on a device")
