@@ -52,13 +52,25 @@ The core design decision:
 Reason: COM object lifetime + GC timing + thread affinity is a real stability hazard in long-lived GUI processes.  
 CLI calls are short-lived and wrap COM init/cleanup per operation.
 
-### 2.2 Layering (actual dependency direction)
-- `audioctl/cli.py` is the **public API router** (JSON contract + exit codes + prompts).
-- `audioctl/gui.py` is a **subprocess client** of the CLI.
-- `audioctl/devices.py` is the **low-level Windows engine** (COM + PropertyStore + registry snapshot tooling).
-- `audioctl/vendor_db.py` is the **vendor/FX rule engine** (INI parsing/cache + registry writes + learn/merge/delete logic).
-- `audioctl/compat.py` must run **before** any comtypes/pycaw usage.
-- `audioctl/logging_setup.py` is global best-effort logging; must never break runtime.
+### 2.2 File breakdown & responsibilities
+Logic is strictly partitioned to prevent COM threading deadlock and maintain JSON output integrity.
+
+* **audioctl.py**
+    This script is the main entry point that performs environment pre-flight checks and version verification before executing the CLI or GUI modules.
+* **audioctl/cli.py**
+    This module manages argument parsing, exit code logic, and JSON serialization; it contains no direct COM or Registry logic.
+* **audioctl/gui.py**
+    This Tkinter interface operates as a pure client that executes the CLI via subprocess and parses JSON output to ensure the GUI process remains stable and COM-blind.
+* **audioctl/cmdline_fmt.py**
+    This utility translates GUI state changes into PowerShell-compatible (`.\audioctl.exe`) strings for the console mirroring feature.
+* **audioctl/devices.py**
+    This file contains the low-level `pycaw`, `comtypes`, and `PropertyStore` operations required to manipulate volume, mute, and "Listen to" states.
+* **audioctl/vendor_db.py**
+    This module handles the `vendor_toggles.ini` database lifecycle and executes direct registry writes for vendor-specific audio enhancement FX.
+* **audioctl/compat.py**
+    This bootstrap shim sets the required COM threading models and must be imported before any audio libraries are loaded to prevent PyInstaller crashes.
+* **audioctl/logging_setup.py**
+    This configuration directs all log output to `stderr` to ensure that the CLI's standard output remains a parseable JSON object.
 
 ### 2.3 Data flow (canonical)
 GUI action → spawn CLI subprocess → CLI resolves device → devices/vendor_db performs operation → CLI prints JSON → GUI parses JSON → updates UI + cache
