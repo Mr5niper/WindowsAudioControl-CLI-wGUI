@@ -1,73 +1,58 @@
-# audioctl/cmdline_fmt.py
-#
 # Command-line formatting helpers (display only)
 # ---------------------------------------------
-# This module exists because we need to display/echo commands in a way that:
-#   1) matches Windows expectations (double quotes, CreateProcess rules), and
-#   2) is copy/paste friendly into both cmd.exe and PowerShell (PowerShell is picky
-#      about device IDs and `{}` tokens unless quoted).
+# This module formats commands for display/logging purposes only.
+#
+# Goals:
+#   1) Match Windows CreateProcess quoting rules (double quotes).
+#   2) Be copy/paste friendly for both cmd.exe and PowerShell.
 #
 # IMPORTANT:
-# - These helpers are for *display/logging only*.
-# - Do NOT build a shell string and execute it.
-#   Always execute subprocesses by passing argv as a list (Popen([...])).
+# - These helpers are for display/logging only.
+# - Do NOT execute a constructed string.
+#   Always execute subprocesses using argv lists (Popen([...])).
 #
 # Design notes:
-# - `shlex.join()` is POSIX-oriented and uses single quotes; that is confusing on
-#   Windows and often not pasteable as-is.
-# - On Windows we prefer `subprocess.list2cmdline()` which implements the proper
-#   CreateProcess quoting rules and produces double quotes.
-# - For "Print CLI commands" (GUI echo), we may intentionally add quotes even when
-#   not strictly required by CreateProcess so the command pastes cleanly into
-#   PowerShell (e.g., `--id "{...}"`).
-import os
-import subprocess
+# - We use subprocess.list2cmdline() to apply proper Windows quoting rules.
+# - PowerShell treats `{}` specially (script blocks), so GUID-like tokens
+#   must be double-quoted for safe paste.
+# - Additional quoting here is for display compatibility, not execution.
 
+import sys
+import subprocess
+import re
 
 def format_cmd_for_display(argv) -> str:
-    if argv is None:
-        return ""
+    """
+    Used by gui.py for the debug log.
+    Standard Windows formatting then ensures IDs are double-quoted.
+    """
+    if argv is None: return ""
     args = ["" if a is None else str(a) for a in argv]
-    if os.name == "nt":
-        return subprocess.list2cmdline(args)
-    try:
-        import shlex
-        return shlex.join(args)
-    except Exception:
-        return " ".join(args)
+    
+    # 1. Use standard Windows rules (handles spaces in FX/Names)
+    cmd_str = subprocess.list2cmdline(args)
+    
+    # 2. Swap single quotes to double quotes for the "Look" you want
+    cmd_str = cmd_str.replace("'", '"')
 
+    # 3. Ensure {GUID} IDs are always quoted for PowerShell safety
+    guid_pattern = r'({[0-9A-Fa-f.-]+}(?:\.{[0-9A-Fa-f.-]+})?)'
+    return re.sub(r'(?<!")' + guid_pattern + r'(?!")', r'"\1"', cmd_str)
 
 def format_audioctl_cmd_for_display(args, *, frozen: bool = False, cross_shell: bool = True) -> str:
     r"""
-    Print-friendly audioctl command for copy/paste into cmd.exe OR PowerShell.
-
-    Key behavior:
-      - On Windows, prefix with .\\audioctl.exe when frozen.
-      - When cross_shell=True, ALWAYS wrap the value after --id in double quotes
-        (PowerShell-safe), even if it contains no spaces.
+    Used by gui.py for the copy/paste console.
+    Handles the .\audioctl.exe or python -m prefix.
     """
-    args = ["" if a is None else str(a) for a in (args or [])]
+    args_list = ["" if a is None else str(a) for a in (args or [])]
+    
+    # Handle the prefix correctly based on frozen state
+    prefix = r".\audioctl.exe" if frozen else f"{sys.executable} -m audioctl"
 
-    if os.name == "nt" and cross_shell:
-        prefix = (r".\audioctl.exe" if frozen else "audioctl")
+    # Reuse the clean logic
+    cmd_str = format_cmd_for_display(args_list)
 
-        cooked = []
-        i = 0
-        while i < len(args):
-            a = args[i]
-            cooked.append(a)
-
-            if a == "--id" and i + 1 < len(args):
-                val = args[i + 1]
-                # FORCE quotes even when not required by Windows parsing rules
-                cooked.append(f'"{val}"')
-                i += 2
-                continue
-
-            i += 1
-
-        return prefix + (" " + " ".join(cooked) if cooked else "")
-
-    return "audioctl " + format_cmd_for_display(args)
-
+    return f"{prefix} {cmd_str}".strip()
+    
+    
 
