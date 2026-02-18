@@ -493,6 +493,16 @@ class AudioGUI:
         )
         self.console_txt.pack(fill="both", expand=True, pady=(10, 0))
         self._install_console_tee()
+        # --- Console Copy Menu ---
+        self.console_menu = tk.Menu(self.root, tearoff=0)
+        self.console_menu.add_command(label="Copy", command=lambda: self.console_txt.event_generate("<<Copy>>"))
+
+        def show_console_menu(event):
+            # Only show if there is a 'sel' (selection) tag present in the text box
+            if self.console_txt.tag_ranges("sel"):
+                self.console_menu.tk_popup(event.x_root, event.y_root)
+                
+        self.console_txt.bind("<Button-3>", show_console_menu)
 
         # Scrollbar
         # Scrollbar (REMOVED for autosizing)
@@ -2350,3 +2360,4 @@ def launch_gui():
         _log_exc("MAINLOOP EXCEPTION")
     _log("launch_gui: mainloop exited")
     return 0
+
