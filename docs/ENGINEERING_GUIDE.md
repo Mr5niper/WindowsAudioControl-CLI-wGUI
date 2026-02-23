@@ -1,9 +1,8 @@
-# ENGINEERING GUIDE (v1.5.0.0)
-**audioctl — Windows Audio Control CLI + GUI (PyInstaller EXE)**
-
+# ENGINEERING GUIDE (v1.5.1.1)
+**audioctl - Windows Audio Control CLI + GUI (PyInstaller EXE)**
 **Audience:** Engineers debugging, maintaining, or extending the codebase  
 **Platforms:** Windows 10/11  
-**Version:** 1.5.0.0  
+**Version:** 1.5.1.1  
 **Build contract:** **Python 3.13.12 required**, **PyInstaller required**
 
 This document is intentionally **not** a usage manual. The README covers commands, examples, and screenshots.  
@@ -37,7 +36,7 @@ The *real* entrypoint is always:
 - `audioctl.cli.main()`
 
 ### 1.4 Build artifacts / metadata
-- Windows version info comes from `version.txt` (filevers/prodvers 1.5.0.0).
+- Windows version info comes from `version.txt` (filevers/prodvers 1.5.1.1).
 - Icon `audio.ico` is embedded and also shipped as data.
 
 ---
@@ -56,21 +55,33 @@ CLI calls are short-lived and wrap COM init/cleanup per operation.
 Logic is strictly partitioned to prevent COM threading deadlock and maintain JSON output integrity.
 
 * **audioctl.py**
-    This script is the main entry point that performs environment pre-flight checks and version verification before executing the CLI or GUI modules.
+    This script is the main entry point that performs environment pre-flight checks (console attachment) and version verification before executing the CLI or GUI modules.
+
 * **audioctl/cli.py**
-    This module manages argument parsing, exit code logic, and JSON serialization; it contains no direct COM or Registry logic.
+    This module manages argument parsing, exit code logic, and JSON serialization. It is the "backend" for the GUI.
+    *   **New in v1.5.1.1:** Handles conditional JSON payload generation for `listen` commands to preserve backward compatibility while exposing routing info.
+
 * **audioctl/gui.py**
-    This Tkinter interface operates as a pure client that executes the CLI via subprocess and parses JSON output to ensure the GUI process remains stable and COM-blind.
+    This Tkinter interface operates as a pure client that executes the CLI via subprocess and parses JSON output.
+    *   **Console Mirror:** Implements a `Tee` to redirect stdout/stderr into an embedded `ScrolledText` widget.
+    *   **Window Logic:** Manages auto-minimization of the external console on launch to reduce clutter.
+
 * **audioctl/cmdline_fmt.py**
     This utility translates GUI state changes into PowerShell-compatible (`.\audioctl.exe`) strings for the console mirroring feature.
+    *   **Crucial:** Handles Windows quoting rules and regex-based escaping of `{GUID}` tokens to ensure commands are copy/paste safe in both CMD and PowerShell (Issue #36).
+
 * **audioctl/devices.py**
     This file contains the low-level `pycaw`, `comtypes`, and `PropertyStore` operations required to manipulate volume, mute, and "Listen to" states.
+    *   **Stability:** Implements per-operation `_com_context()` and interface definition caching.
+
 * **audioctl/vendor_db.py**
     This module handles the `vendor_toggles.ini` database lifecycle and executes direct registry writes for vendor-specific audio enhancement FX.
+
 * **audioctl/compat.py**
     This bootstrap shim sets the required COM threading models and must be imported before any audio libraries are loaded to prevent PyInstaller crashes.
+
 * **audioctl/logging_setup.py**
-    This configuration directs all log output to `stderr` to ensure that the CLI's standard output remains a parseable JSON object.
+    This configuration directs all log output to `stderr` (or file) to ensure that the CLI's standard output remains a parseable JSON object.
 
 ### 2.3 Data flow (canonical)
 GUI action → spawn CLI subprocess → CLI resolves device → devices/vendor_db performs operation → CLI prints JSON → GUI parses JSON → updates UI + cache
@@ -86,14 +97,16 @@ The GUI depends on these commands and expects these keys (minimum):
 - `list --json` → `{"devices":[...]}` and devices include `id,name,flow,state,isDefault` plus `guiIndex` tagging behavior.
 - `get-device-state` → includes `volume,muted,listenEnabled,enhancementsEnabled,availableFX`.
 - `enhancements --list-fx --json` shape (GUI uses it for menus in some paths).
-- `listen` may include `verifiedBy` when verification fallback is used.
+- `listen` payload contract (v1.5.1.1 update):
+    - Standard keys: `id`, `name`, `enabled`.
+    - **Conditional keys:** `playbackTargetId` and `playbackTargetName` are ONLY present if requested via arguments (`--playback-target-id` etc).
+    - If you add keys unconditionally, you risk breaking parsers expecting the legacy shape.
 
 If you change JSON keys, you must update GUI parsing and any external scripting users.
 
 ### 3.2 Prompt strings are API (learn flows)
 The GUI has code that matches CLI output text during learn workflows.
 If you change the CLI prompt lines, the GUI can stop progressing.
-
 Prompts the GUI relies on (representative):
 - MAIN learn:
   - `set 'Audio Enhancements' to ENABLED`
@@ -125,7 +138,7 @@ On Refresh:
    - Render group
    - Capture group
 3. GUI inserts group header rows + device rows into the Treeview.
-4. GUI does *not* trust internal COM state—everything comes from CLI output.
+4. GUI does *not* trust internal COM state-everything comes from CLI output.
 
 Important: the GUI currently displays its own per-group index in the Treeview, but the CLI also tags `guiIndex`. The contract that matters for CLI disambiguation is the CLI’s GUI-order index semantics (name-sorted per flow).
 
@@ -138,14 +151,12 @@ The context menu labels depend on state:
 
 Querying each of these by spawning a CLI process on every right click is slow and sometimes blocks on drivers.  
 So the GUI maintains:
-
 - `device_state_cache[device_id] = (get-device-state JSON)`
 
 ### 4.3 Incremental state population (non-blocking)
 After refresh builds the Treeview:
 - GUI schedules repeated calls (one device per tick):
   - `audioctl get-device-state --id <id> --flow <flow>`
-
 This is intentionally incremental so the UI doesn’t freeze.
 
 ### 4.4 Context menu build logic (stale-cache resistant)
@@ -186,6 +197,18 @@ Engineering note:
 
 ### 4.7 “Print CLI commands” suppression during learn
 During learn workflows, GUI disables “Print CLI commands” to avoid spamming stdout while the CLI is also running interactive output.
+
+### 4.8 Embedded Console Mirroring
+The GUI contains a `ScrolledText` widget docked at the bottom.
+- **Teeing:** On startup, `gui.py` installs a `_Tee` object that wraps `sys.stdout` and `sys.stderr`.
+- **Thread Safety:** The Tee writes to the original stream (console) immediately, but queues writes to the Tkinter widget via `root.after_idle`. This prevents threading violations in Tkinter.
+- **Context Menu:** The console has a specialized Right-Click menu ("Copy") that only appears/enables when text is actually selected.
+
+### 4.9 Console Window Management (Auto-Minimize)
+When built as a console app (to support CLI usage), Windows spawns a cmd window.
+- **Behavior:** `gui.py` calls `_minimize_console_window_best_effort` on launch.
+- **Mechanism:** It uses `GetConsoleWindow` and `ShowWindow(hwnd, SW_MINIMIZE)`.
+- **Goal:** Keep the process alive (for CLI/logging) but hide the visual clutter from the user unless they explicitly look for it.
 
 ---
 
@@ -228,7 +251,7 @@ If you touch these paths:
 - PolicyConfig fallback interface definitions
 
 The reason is not micro-optimization; it is crash prevention:
-- repeatedly defining ctypes function prototypes and comtypes interfaces can trigger GC/finalizers at unsafe times in frozen builds
+- repeatedly defining ctypes function prototypes and comtypes interfaces can trigger GC/finalizers at unsafe times in frozen builds.
 
 ---
 
@@ -266,7 +289,7 @@ Drivers may store toggles under either:
 - PROPERTYKEY fmtid `{E4870E26-3CC5-4CD2-BA46-CA0A9A70ED04}`, pid `2`
 - Semantics: 0 enhancements ON, 1 enhancements OFF
 
-In v1.5.0.0:
+In v1.5.x:
 - used for diagnostics/discovery/learn tooling
 - **not** used as runtime toggle mechanism (runtime is vendor-only)
 
@@ -357,6 +380,7 @@ These tools are designed to create sharable artifacts when debugging user machin
 - Output a stable JSON object (single top-level key).
 - Use exit codes consistently (0/1/3/4).
 - Do not introduce global `CoInitialize` in `cli.py`.
+- **Formatting:** If you add flags, ensure `cmdline_fmt.py` handles any new quoting requirements (e.g., if you add a flag that takes a GUID).
 
 ### 9.2 Adding a new GUI feature
 - Must call the CLI via subprocess (`run_audioctl` / `run_audioctl_quick_json`).
