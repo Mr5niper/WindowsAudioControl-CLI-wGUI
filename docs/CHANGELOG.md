@@ -1,6 +1,25 @@
 # AUDIOCTL.PY CHANGELOG
 
-## v1.5.0.0 - [current]
+
+## v1.5.1.1 - [current]
+
+### GUI Features
+- **Embedded Console Mirror:** Added a scrollable text console to the main window that mirrors `stdout`/`stderr` in real-time [10].
+  - Includes a selective **Right-Click > Copy** context menu that appears only when text is highlighted.
+- **Auto-Minimize External Console:** The application now attempts to minimize the parent console window (if present) upon GUI launch to reduce desktop clutter while keeping the process alive [10].
+
+### CLI & Logic Improvements
+- **Fix Listen Playback Reporting (Issue #34):**
+  - The `listen` command now conditionally reports playback routing information only when explicitly requested [14].
+  - Added `--playback-target-id` and `--playback-target-name` to `get-listen` to allow manual verification of routing targets [14].
+  - Invalid Render IDs now gracefully fall back to "Default Playback Device" with a warning in the JSON output.
+- **Cross-Shell Command Formatting:**
+  - Fixed "Print CLI commands" output where quoted arguments (like FX names or GUIDs) broke in PowerShell.
+  - Implemented strict double-quoting and regex-based `{GUID}` escaping in `audioctl/cmdline_fmt.py` to ensure cross-shell compatibility [13].
+
+---
+
+## v1.5.0.0
 
 ### Highlights
 - GUI remains a thin wrapper over the CLI, with improved stability, readability, and copy/paste-friendly command echoing.
@@ -537,21 +556,4 @@ Date: 2026-01-19
 - **Basic Enumeration:** Listed playback (Render) and recording (Capture) devices using `IMMDeviceEnumerator` with `DEVICE_STATE_ACTIVE` only.
 - **“Listen” Toggle (Admin):** Initial registry-based enable/disable of “Listen to this device” for capture endpoints (admin required).
 - **Admin Check:** `is_admin` helper added to warn when elevation is required.
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
