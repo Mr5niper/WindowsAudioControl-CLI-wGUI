@@ -21,6 +21,7 @@ import io
 import time
 import tkinter as tk
 from tkinter import ttk, messagebox
+from tkinter import scrolledtext
 from contextlib import redirect_stderr
 import re
 import subprocess
@@ -38,6 +39,29 @@ from .cmdline_fmt import format_cmd_for_display, format_audioctl_cmd_for_display
 
 # --- BEGIN: Non-blocking Learn runner (main Enhancements) ---
 import threading
+
+
+def _minimize_console_window_best_effort():
+    """
+    If this process has a console window (PyInstaller --console build),
+    minimize it when launching the GUI so CLI behavior remains intact.
+    No-op on non-Windows or if no console is attached.
+    """
+    if not sys.platform.startswith("win"):
+        return
+    # Only do this for frozen exe builds to avoid minimizing the user's own terminal
+    if not getattr(sys, "frozen", False):
+        return
+    try:
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
+        user32 = ctypes.windll.user32
+        hwnd = kernel32.GetConsoleWindow()
+        if hwnd:
+            SW_MINIMIZE = 6
+            user32.ShowWindow(hwnd, SW_MINIMIZE)
+    except Exception:
+        pass
 
 
 def _build_cli_cmd(args_list):
@@ -391,10 +415,9 @@ def run_audioctl_interactive(args_list, prompt_patterns, expect_ok=True):
 
 
 class AudioGUI:
-
     def __init__(self, root):
         self.root = root
-        self.root.title("Mr5niper's Audio Control  v1.5.0.0  02-10-2026")
+        self.root.title("Mr5niper's Audio Control  v1.5.1.1  02-22-2026")
         # Style and theme
         style = ttk.Style(self.root)
         try:
@@ -476,6 +499,38 @@ class AudioGUI:
         self.tree.column("ID", width=260, minwidth=240, anchor="w", stretch=False)
         self.tree["displaycolumns"] = ("Index", "Name", "Flow", "Defaults", "ID")
         self.tree.pack(fill="both", expand=True)
+
+        # --- Embedded Console Mirror ---
+        # Mirrors exactly what this GUI process writes to stdout/stderr (what you
+        # currently see in the one console when launched from a console).
+        self.console_txt = scrolledtext.ScrolledText(
+            self.container,
+            height=8,
+            state="disabled",
+            font=("Consolas", 9) if sys.platform.startswith("win") else None,
+        )
+        # 1. Hide the default selection block (so newlines don't highlight the right side)
+        bg_color = self.console_txt.cget("background")
+        self.console_txt.configure(selectbackground=bg_color, selectforeground="black")
+
+        self.console_txt.pack(fill="both", expand=True, pady=(10, 0))
+        # 2. Config tags to apply Blue highlight to text only
+        # "cli_cmd" = Blue text (for CLI commands)
+        self.console_txt.tag_config("cli_cmd", foreground="blue", selectforeground="white", selectbackground="#0078D7")
+        # "std_out" = Default text (for standard output/black), but with Blue highlight
+        self.console_txt.tag_config("std_out", selectforeground="white", selectbackground="#0078D7")
+
+        self._install_console_tee()
+        # --- Console Copy Menu ---
+        self.console_menu = tk.Menu(self.root, tearoff=0)
+        self.console_menu.add_command(label="Copy", command=lambda: self.console_txt.event_generate("<<Copy>>"))
+
+        def show_console_menu(event):
+            # Only show if there is a 'sel' (selection) tag present in the text box
+            if self.console_txt.tag_ranges("sel"):
+                self.console_menu.tk_popup(event.x_root, event.y_root)
+
+        self.console_txt.bind("<Button-3>", show_console_menu)
         # Scrollbar
         # Scrollbar (REMOVED for autosizing)
         # self.yscroll = ttk.Scrollbar(self.tree, orient="vertical", command=self.tree.yview)
@@ -597,6 +652,101 @@ class AudioGUI:
             print(text)
         except Exception:
             pass
+
+    def write_to_console(self, msg: str, tags=None):
+        """Thread-safe append into the embedded console widget."""
+        if not msg:
+            return
+        if not hasattr(self, "console_txt") or self.console_txt is None:
+            return
+        
+        # Use "std_out" tag for normal text if no specific tag (like "cli_cmd") is provided
+        if tags is None:
+            tags = "std_out"
+
+        def _append():
+            try:
+                if not self.console_txt.winfo_exists():
+                    return
+                self.console_txt.configure(state="normal")
+                # 3. Split lines: Apply the tag (Color+Highlight) to text, but NOT to the newline.
+                parts = msg.split('\n')
+                for i, part in enumerate(parts):
+                    if part:
+                        self.console_txt.insert("end", part, tags)
+                    if i < len(parts) - 1:
+                        self.console_txt.insert("end", "\n")
+                self.console_txt.configure(state="disabled")
+                self.console_txt.see("end")
+            except Exception:
+                pass
+
+        try:
+            self.root.after(0, _append)
+        except Exception:
+            pass
+
+    def _install_console_tee(self):
+        """
+        Centralized: tee sys.stdout/sys.stderr into the embedded console.
+        This mirrors EXACTLY what your existing console currently shows.
+        """
+        gui = self
+
+        class _Tee(io.TextIOBase):
+            def __init__(self, original):
+                self._orig = original
+
+            def write(self, s):
+                if s is None:
+                    return 0
+                text = str(s)
+                # Write to original stream (console) if present
+                try:
+                    if self._orig is not None:
+                        self._orig.write(text)
+                except Exception:
+                    pass
+                try:
+                    if self._orig is not None:
+                        self._orig.flush()
+                except Exception:
+                    pass
+                # Mirror to GUI console
+                try:
+                    gui.write_to_console(text)
+                except Exception:
+                    pass
+                return len(text)
+
+            def flush(self):
+                try:
+                    if self._orig is not None:
+                        self._orig.flush()
+                except Exception:
+                    pass
+
+            def isatty(self):
+                try:
+                    return bool(self._orig and self._orig.isatty())
+                except Exception:
+                    return False
+
+            @property
+            def encoding(self):
+                try:
+                    return getattr(self._orig, "encoding", "utf-8")
+                except Exception:
+                    return "utf-8"
+
+        # Save originals once
+        if not hasattr(self, "_orig_stdout"):
+            self._orig_stdout = sys.stdout
+        if not hasattr(self, "_orig_stderr"):
+            self._orig_stderr = sys.stderr
+
+        sys.stdout = _Tee(self._orig_stdout)
+        sys.stderr = _Tee(self._orig_stderr)
 
     def refresh_devices(self):
         try:
@@ -775,10 +925,15 @@ class AudioGUI:
         if getattr(self, "_suppress_cli_prints", False):
             return
         if self.print_cmd.get():
+            # Write to original stdout (terminal) if available
             try:
-                print(cmd_str)
+                if hasattr(self, "_orig_stdout") and self._orig_stdout:
+                    self._orig_stdout.write(cmd_str + "\n")
+                    self._orig_stdout.flush()
             except Exception:
                 pass
+            # Write to embedded console with blue styling
+            self.write_to_console(cmd_str + "\n", "cli_cmd")
 
     def _suspend_print_cli_and_disable_checkbox(self):
         # During learn flows, we temporarily disable "Print CLI commands" and force it off.
@@ -1142,13 +1297,11 @@ class AudioGUI:
             self.tree.item(iid, open=not bool(self.tree.item(iid, "open")))
             self.tree.selection_remove(iid)
             return
-
         # Schedule menu build slightly later to avoid racing with other events
         def _open_menu_later():
             if not self.tree.exists(iid):
                 return
             self.show_menu_for_item(event, iid=iid)
-
         self.root.after(50, _open_menu_later)
 
     def on_set_default(self):
@@ -1690,7 +1843,6 @@ class AudioGUI:
                         top.destroy()
                     except Exception:
                         pass
-
             self.root.after(0, _apply)
 
         # First attempt: auto-confirm when we see the prompt
@@ -1798,7 +1950,6 @@ class AudioGUI:
                         pass
                 else:
                     os.environ["AUDIOCTL_LEARN_CONFIRMED"] = prev
-
             # Parse final JSON: vendorLearned or vendorAvailable (robust even if prompt text and JSON share a line)
             def _extract_last_vendor_json(text: str):
                 s = text or ""
@@ -1832,7 +1983,6 @@ class AudioGUI:
                     # continue scanning earlier content
                     i = end - 1
                 return None
-
             data = _extract_last_vendor_json(out)
             if not isinstance(data, dict):
                 messagebox.showwarning(
@@ -2242,6 +2392,7 @@ def launch_gui():
     # - routes Tk callback exceptions into our log file so crashes are diagnosable
     #   even when launched without a console (double-clicked EXE).
     _log("launch_gui: creating Tk root")
+    _minimize_console_window_best_effort()
     root = tk.Tk()
     try:
         if sys.platform.startswith("win"):

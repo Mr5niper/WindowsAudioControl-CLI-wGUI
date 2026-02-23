@@ -45,11 +45,11 @@ audioctl is designed to be CLI-first for repeatability and automation; the GUI i
 # Quick Start
 - Help:
   ```bash
-  audioctl.exe -h
+  .\audioctl.exe -h
   ```
 - No arguments (double‑click or run without args) launches the GUI:
   ```bash
-  audioctl.exe
+  .\audioctl.exe
   ```
 
 ---
@@ -121,22 +121,22 @@ audioctl
 
 # List Devices
 - Human-readable:
-  ```bash
-  audioctl.exe list
+  ```ps1
+  .\audioctl.exe list
   ```
 - Include disabled/disconnected:
-  ```bash
-  audioctl.exe list --all
+  ```ps1
+  .\audioctl.exe list --all
   ```
 - JSON output:
-  ```bash
-  audioctl.exe list --json
+  ```ps1
+  .\audioctl.exe list --json
   ```
 
 ---
 
 # Set Default Devices (CLI)
-Use `audioctl set-default` to choose the system’s default playback (Render) and/or recording (Capture) endpoints. Targets must be active (`DEVICE_STATE_ACTIVE`). On some systems, you may need an elevated console (Run as Administrator).
+Use `.\audioctl.exe set-default` to choose the system’s default playback (Render) and/or recording (Capture) endpoints. Targets must be active (`DEVICE_STATE_ACTIVE`). On some systems, you may need an elevated console (Run as Administrator).
 
 Roles you can set:
 - console - the default device most apps use.
@@ -156,8 +156,8 @@ Most users want a device to be the default for everything. Use:
 - `--recording-role all` for recording (Capture)
 
 Get IDs first (optional but recommended):
-```bash
-audioctl list --json
+```ps1
+.\audioctl.exe list --json
 ```
 
 Disambiguation when multiple name matches:
@@ -175,44 +175,48 @@ Notes about JSON output:
 
 ## Examples (only using “all”)
 ### 1) Playback (Render) - by name
-```bash
-audioctl set-default --playback-name "Speakers" --playback-role all --index 0
+```ps1
+.\audioctl.exe set-default --playback-name "Speakers" --playback-role all --index 0
 ```
 Sample output:
 ```json
 {"set":[{"flow":"Render","role":"all","id":"{RENDER-ENDPOINT-ID}","name":"Speakers (Realtek(R) Audio)"}]}
 ```
+<br>
 
 ### 2) Playback (Render) - by ID
-```bash
-audioctl set-default --playback-id "{RENDER-ENDPOINT-ID}" --playback-role all
+```ps1
+.\audioctl.exe set-default --playback-id "{RENDER-ENDPOINT-ID}" --playback-role all
 ```
 Sample output:
 ```json
 {"set":[{"flow":"Render","role":"all","id":"{RENDER-ENDPOINT-ID}","name":"Speakers (USB DAC)"}]}
 ```
+<br>
 
 ### 3) Recording (Capture) - by name
-```bash
-audioctl set-default --recording-name "USB Microphone" --recording-role all --index 0
+```ps1
+.\audioctl.exe set-default --recording-name "USB Microphone" --recording-role all --index 0
 ```
 Sample output:
 ```json
 {"set":[{"flow":"Capture","role":"all","id":"{CAPTURE-ENDPOINT-ID}","name":"USB Microphone"}]}
 ```
+<br>
 
 ### 4) Recording (Capture) - by ID
-```bash
-audioctl set-default --recording-id "{CAPTURE-ENDPOINT-ID}" --recording-role all
+```ps1
+.\audioctl.exe set-default --recording-id "{CAPTURE-ENDPOINT-ID}" --recording-role all
 ```
 Sample output:
 ```json
 {"set":[{"flow":"Capture","role":"all","id":"{CAPTURE-ENDPOINT-ID}","name":"Headset Mic"}]}
 ```
+<br>
 
 ### 5) Playback + Recording - both “all” in one command
-```bash
-audioctl set-default \
+```ps1
+.\audioctl.exe set-default \
   --playback-id "{RENDER-ENDPOINT-ID}"   --playback-role all \
   --recording-id "{CAPTURE-ENDPOINT-ID}" --recording-role all
 ```
@@ -220,11 +224,13 @@ Sample output:
 ```json
 {"set":[{"flow":"Render","role":"all","id":"{RENDER-ENDPOINT-ID}","name":"Speakers (Realtek(R) Audio)"},{"flow":"Capture","role":"all","id":"{CAPTURE-ENDPOINT-ID}","name":"USB Microphone"}]}
 ```
+<br>
 
 Additional notes:
 - If list output shows both console and multimedia toggled after setting only one, that is expected on most Windows builds, they commonly map to the same endpoint.
 - “device not found (active only)”: verify the device is connected/enabled and visible in `audioctl list`.
 - If multiple name matches occur, rerun with `--index N` using the indices printed in the disambiguation prompt.
+<br>
 
 ---
 
@@ -249,57 +255,63 @@ Disambiguation behavior:
   ```
   ERROR: multiple matches; specify --index
   ```
-  Rerun the command with `--flow` and/or `--index N`. Use `audioctl list` (or `--json`) to see devices in the same GUI order.
+  Rerun the command with `--flow` and/or `--index N`. Use `.\audioctl.exe list` (or `--json`) to see devices in the same GUI order.
 
 Notes about JSON output:
 - Successful commands print compact, single‑line JSON. Pipe to a formatter (e.g., `| jq .`) if you want pretty output.
+<br>
 
 ## Examples
 ### 1) Set playback volume by name (Render, 30%)
-```bash
-audioctl set-volume --name "Speakers" --flow Render --level 30
+```ps1
+.\audioctl.exe set-volume --name "Speakers" --flow Render --level 30
 ```
 Sample output:
 ```json
 {"volumeSet":{"id":"{RENDER-ENDPOINT-ID}","name":"Speakers (Realtek(R) Audio)","level":30}}
 ```
+<br>
 
 ### 2) Set recording volume by ID (Capture, 70%)
-```bash
-audioctl set-volume --id "{CAPTURE-ENDPOINT-ID}" --level 70
+```ps1
+.\audioctl.exe set-volume --id "{CAPTURE-ENDPOINT-ID}" --level 70
 ```
 Sample output:
 ```json
 {"volumeSet":{"id":"{CAPTURE-ENDPOINT-ID}","name":"USB Microphone","level":70}}
 ```
+<br>
 
 ### 3) Mute a playback device by name (Render) with index disambiguation
 If multiple “Speakers” exist, specify which one using `--index` (0‑based, GUI‑order for Render).
-```bash
-audioctl set-volume --name "Speakers" --flow Render --mute --index 0
+```ps1
+.\audioctl.exe set-volume --name "Speakers" --flow Render --mute --index 0
 ```
 Sample output:
 ```json
 {"muteSet":{"id":"{RENDER-ENDPOINT-ID}","name":"Speakers (USB DAC)","muted":true}}
 ```
+<br>
 
 ### 4) Unmute a recording device by ID (Capture)
-```bash
-audioctl set-volume --id "{CAPTURE-ENDPOINT-ID}" --unmute
+```ps1
+.\audioctl.exe set-volume --id "{CAPTURE-ENDPOINT-ID}" --unmute
 ```
 Sample output:
 ```json
 {"muteSet":{"id":"{CAPTURE-ENDPOINT-ID}","name":"USB Microphone","muted":false}}
 ```
+<br>
 
 ### 5) Use regex name matching (Render)
-```bash
-audioctl set-volume --name "^Speakers .* Realtek\\(R\\) Audio$" --regex --flow Render --level 15
+```ps1
+.\audioctl.exe set-volume --name "^Speakers .* Realtek\\(R\\) Audio$" --regex --flow Render --level 15
 ```
 Sample output:
 ```json
 {"volumeSet":{"id":"{RENDER-ENDPOINT-ID}","name":"Speakers (Realtek(R) Audio)","level":15}}
 ```
+<br>
 
 ### 6) Name match without `--flow` and multiple results
 If both Render and Capture have a device matching “USB”, you’ll see:
@@ -307,18 +319,19 @@ If both Render and Capture have a device matching “USB”, you’ll see:
 ERROR: multiple matches; specify --index
 ```
 Disambiguate by flow and/or index:
-```bash
-audioctl set-volume --name "USB" --flow Capture --unmute --index 0
+```ps1
+.\audioctl.exe set-volume --name "USB" --flow Capture --unmute --index 0
 ```
 Sample output:
 ```json
 {"muteSet":{"id":"{CAPTURE-ENDPOINT-ID}","name":"USB Microphone","muted":false}}
 ```
+<br>
 
 ### 7) Error safeguard: `--level` cannot be combined with `--mute/--unmute`
 Invalid example (will return an error):
-```bash
-audioctl set-volume --name "Speakers" --flow Render --level 20 --mute
+```ps1
+.\audioctl.exe set-volume --name "Speakers" --flow Render --level 20 --mute
 ```
 Error:
 ```
@@ -327,13 +340,13 @@ ERROR: Cannot specify both --level and --mute/--unmute
 
 Tips:
 - Prefer `--id` for exact targeting (no disambiguation needed).
-- If you get “device not found (active only)”, verify the endpoint is connected/enabled and visible in `audioctl list`.
+- If you get “device not found (active only)”, verify the endpoint is connected/enabled and visible in `.\audioctl.exe list`.
 - The command controls the endpoint’s master scalar level and mute state (not per‑app volumes).
 
 ---
 
 # “Listen to this device” (Capture Only, CLI)
-Use `audioctl listen` to enable or disable “Listen to this device” on a capture (recording) endpoint. The target must be active (`DEVICE_STATE_ACTIVE`). This command only operates on Capture devices; Render devices are not eligible.
+Use `.\audioctl.exe listen` to enable or disable “Listen to this device” on a capture (recording) endpoint. The target must be active (`DEVICE_STATE_ACTIVE`). This command only operates on Capture devices; Render devices are not eligible.
 
 You must specify exactly one of:
 - `--enable`
@@ -360,57 +373,73 @@ Disambiguation behavior:
   ```
   ERROR: multiple matches; specify --index
   ```
-  Rerun with `--index N` (0‑based, GUI‑order for the Capture flow). Use `audioctl list` (or `--json`) to see the same order.
+  Rerun with `--index N` (0‑based, GUI‑order for the Capture flow). Use `.\audioctl.exe list` (or `--json`) to see the same order.
 
 Notes about JSON output:
 - Success prints compact, single‑line JSON.
 - When a retry/verification path is used, the JSON may include a `verifiedBy` field (`"com"` or `"registry"`).
+<br>
 
 ## Examples
 ### 1) Enable Listen for a microphone by name (preserve current playback target)
-```bash
-audioctl listen --name "Microphone" --enable
+```ps1
+.\audioctl.exe listen --name "Microphone" --enable
 ```
 Sample output:
 ```json
 {"listenSet":{"id":"{CAPTURE-ENDPOINT-ID}","name":"Microphone","enabled":true}}
 ```
+<br>
 
-### 2) Enable Listen and route to the Default Playback Device
-```bash
-audioctl listen --name "Microphone" --enable --playback-target-id
+### 2) Enable listen with specific playback routing
+```ps1
+.\audioctl.exe listen --name "Microphone" --enable --playback-target-name "Speakers"
+```
+or
+```ps1
+.\audioctl.exe listen --id "{CAPTURE-ENDPOINT-ID}" --enable --playback-target-id "{RENDER-ENDPOINT-ID}"
 ```
 Sample output:
 ```json
-{"listenSet":{"id":"{CAPTURE-ENDPOINT-ID}","name":"Microphone","enabled":true}}
+{"listenSet":{"id":"{CAPTURE-ENDPOINT-ID}","name":"Microphone","enabled":true,"playbackTargetId":"{RENDER-ENDPOINT-ID}","playbackTargetName":"Speakers"}}
 ```
+<br>
 
-### 3) Enable Listen and route to a specific playback endpoint by ID
-```bash
-audioctl listen --name "Microphone" --enable --playback-target-id "{RENDER-ENDPOINT-ID}"
+### 3) Enable Listen and route to the Default Playback Device
+Passing the target flags without a value selects the Windows default.
+
+```ps1
+.\audioctl.exe listen --name "Microphone" --enable --playback-target-name
+```
+or
+```ps1
+.\audioctl.exe listen --id "{CAPTURE-ENDPOINT-ID}" --enable --playback-target-id
 ```
 Sample output:
 ```json
-{"listenSet":{"id":"{CAPTURE-ENDPOINT-ID}","name":"Microphone","enabled":true}}
+{"listenSet":{"id":"{CAPTURE-ENDPOINT-ID}","name":"Microphone","enabled":true,"playbackTargetId":"default","playbackTargetName":"Default Playback Device"}}
 ```
+<br>
 
 ### 4) Disable Listen by exact ID
-```bash
-audioctl listen --id "{CAPTURE-ENDPOINT-ID}" --disable
+```ps1
+.\audioctl.exe listen --id "{CAPTURE-ENDPOINT-ID}" --disable
 ```
 Sample output:
 ```json
 {"listenSet":{"id":"{CAPTURE-ENDPOINT-ID}","name":"USB Microphone","enabled":false}}
 ```
+<br>
 
 ### 5) Use regex name matching with index disambiguation (Capture)
-```bash
-audioctl listen --name "Mic" --regex --enable --index 0
+```ps1
+.\audioctl.exe listen --name "Mic" --regex --enable --index 0
 ```
 Sample output:
 ```json
 {"listenSet":{"id":"{CAPTURE-ENDPOINT-ID}","name":"Studio Mic","enabled":true}}
 ```
+<br>
 
 ### 6) Example with verification source included
 ```json
@@ -420,6 +449,7 @@ or:
 ```json
 {"listenSet":{"id":"{CAPTURE-ENDPOINT-ID}","name":"Microphone","enabled":true,"verifiedBy":"registry"}}
 ```
+<br>
 
 Tips:
 - This command only targets Capture devices. If you try a Render device, it won’t match.
@@ -429,7 +459,7 @@ Tips:
 ---
 
 # Audio Enhancements (SysFX) – Vendor Toggles (CLI)
-Use `audioctl enhancements` to enable or disable “Audio Enhancements” (SysFX) on an endpoint using a vendor‑first method. Many drivers (e.g., Realtek/Waves) expose Enhancements via device‑specific registry DWORDs under MMDevices; this tool writes those DWORDs (when known) and verifies the change.
+Use `.\audioctl.exe enhancements` to enable or disable “Audio Enhancements” (SysFX) on an endpoint using a vendor‑first method. Many drivers (e.g., Realtek/Waves) expose Enhancements via device‑specific registry DWORDs under MMDevices; this tool writes those DWORDs (when known) and verifies the change.
 
 Key points:
 - Control is vendor‑only at runtime: if no vendor toggle is known for the target endpoint, the command fails and asks you to use `--learn` first.
@@ -458,109 +488,140 @@ audioctl enhancements
   [--index <N>] [--regex]
   [--vendor-ini <PATH>]
 ```
+<br>
 
 ## Enhancement Effects (FX)
 Beyond the main switch, you can manage individual effects (per-device) after learning them.
 
 - List learned effects for a device:
-  ```bash
-  audioctl enhancements --id "{ENDPOINT-ID}" --list-fx
-  audioctl enhancements --id "{ENDPOINT-ID}" --list-fx --json
+  ```ps1
+  .\audioctl.exe enhancements --id "{ENDPOINT-ID}" --list-fx
+  .\audioctl.exe enhancements --id "{ENDPOINT-ID}" --list-fx --json
   ```
+  <br>
+
 - Learn a specific effect (guided, two-pass A/B):
-  ```bash
-  audioctl enhancements --id "{ENDPOINT-ID}" --flow Render --learn-fx "BassBoost"
+  ```ps1
+  .\audioctl.exe enhancements --id "{ENDPOINT-ID}" --flow Render --learn-fx "BassBoost"
   ```
+  <br>
+
 - Toggle an effect:
-  ```bash
-  audioctl enhancements --id "{ENDPOINT-ID}" --flow Capture --enable-fx "Loudness"
-  audioctl enhancements --id "{ENDPOINT-ID}" --flow Capture --disable-fx "Loudness"
+  ```ps1
+  .\audioctl.exe enhancements --id "{ENDPOINT-ID}" --flow Capture --enable-fx "Loudness"
+  .\audioctl.exe enhancements --id "{ENDPOINT-ID}" --flow Capture --disable-fx "Loudness"
   ```
+  <br>
+
 - Delete a learned effect association for this device:
-  ```bash
-  audioctl enhancements --id "{ENDPOINT-ID}" --delete-fx "BassBoost"
+  ```ps1
+  .\audioctl.exe enhancements --id "{ENDPOINT-ID}" --delete-fx "BassBoost"
   ```
+<br>
 
 Notes about JSON output:
 - Success prints compact, single‑line JSON, e.g.:
   ```json
-  {"enhancementsSet":{"id":"{...}","name":"Speakers (Realtek(R) Audio)","enabled":true,"verifiedBy":"vendor:realtek_waves_primary"}}
+  {"enhancementsSet":{"id":"{ENDPOINT-ID}","name":"Speakers (Realtek(R) Audio)","enabled":true,"verifiedBy":"vendor:realtek_waves_primary"}}
   ```
+  <br>
+
 - FX toggles:
   ```json
-  {"fxSet":{"id":"{...}","name":"Speakers","fx_name":"BassBoost","enabled":true,"verifiedBy":"vendor-fx:multi:BassBoost"}}
+  {"fxSet":{"id":"{ENDPOINT-ID}","name":"Speakers","fx_name":"BassBoost","enabled":true,"verifiedBy":"vendor-fx:multi:BassBoost"}}
   ```
 
 ---
+<br>
 
 # Query helpers (read‑only)
 Fast, side‑effect‑free commands perfect for status bars, hotkeys, and scripts.
 
-- Current volume/mute:
-  ```bash
-  audioctl get-volume [--id <ID> | --name <NAME>] [--flow Render|Capture] [--index <N>] [--regex]
+- Get current volume/mute:
+  ```ps1
+  .\audioctl.exe get-volume --id "{ENDPOINT-ID}"
+  ```
+  or use --name (--regex if needed)
+  ```ps1
+  .\audioctl.exe get-volume --name "Speakers" --flow Render --index 0 --regex
   ```
   Returns:
   ```json
-  {"id":"{...}","name":"...","flow":"Render","volume":78,"muted":false}
+  {"id":"{ENDPOINT-ID}","name":"NAME","flow":"Render","volume":78,"muted":false}
+  ```
+  
+<br>
+
+- Get current “Listen” state (Capture):
+  ```ps1
+  .\audioctl.exe get-listen --id "{ENDPOINT-ID}"
+  ```
+  or use --name (--index and --regex if needed)
+  ```ps1
+  .\audioctl.exe get-listen --name "Microphone" --index 0 --regex
+  ```
+  Returns:
+  ```json
+  {"id":"{ENDPOINT-ID}","name":"NAME","flow":"Capture","listenEnabled":true}
   ```
 
-- Current “Listen” state (Capture):
-  ```bash
-  audioctl get-listen [--id <ID> | --name <NAME>] [--index <N>] [--regex]
+<br>
+
+- Check status with playback routing details:
+  Use the `--playback-target-id` or `--playback-target-name` flags (even without values) to force the inclusion of routing data.
+  ```ps1
+  .\audioctl.exe get-listen --id "{ENDPOINT-ID}" --playback-target-id
   ```
-  Returns:
   ```json
-  {"id":"{...}","name":"...","flow":"Capture","listenEnabled":true}
+  {"id":"{ENDPOINT-ID}","name":"Microphone","flow":"Capture","listenEnabled":true,"playbackTargetId":"{RENDER-GUID}","playbackTargetName":"Headphones (External DAC)"}}
   ```
 
-- Current Enhancements state (vendor‑only):
-  ```bash
-  audioctl get-enhancements [--id <ID> | --name <NAME>] [--flow Render|Capture] [--index <N>] [--regex]
+<br>
+
+- Get current Enhancements state (vendor‑only):
+  ```ps1
+  .\audioctl.exe get-enhancements --id "{ENDPOINT-ID}"
+  ```
+  or use --name (--index and --regex if needed)
+  ```ps1
+  .\audioctl.exe get-enhancements --name "Speakers" --flow Render --index 0 --regex
   ```
   Returns:
   ```json
-  {"id":"{...}","name":"...","flow":"Render","enhancementsEnabled":true}
+  {"id":"{ENDPOINT-ID}","name":"Speakers","flow":"Render","enhancementsEnabled":true}
   ```
+  
+<br>
 
 - Aggregated device state (for GUI/scripts):
-  ```bash
-  audioctl get-device-state [--id <ID> | --name <NAME>] [--flow Render|Capture] [--index <N>] [--regex] [--vendor-ini PATH]
+  ```yaml
+  .\audioctl.exe get-device-state [--id <ID> | --name <NAME>] [--flow Render|Capture] [--index <N>] [--regex] [--vendor-ini PATH]
   ```
   Returns:
   ```json
-  {
-    "id":"{...}",
-    "name":"...",
-    "flow":"Render",
-    "volume":78,
-    "muted":false,
-    "listenEnabled":null,
-    "enhancementsEnabled":true,
-    "availableFX":[{"fx_name":"BassBoost","state":true,"source":"ini"}]
-  }
+  {"id":"{ENDPOINT-ID}","name":"NAME","flow":"Render","volume":78,"muted":false,"listenEnabled":null,"enhancementsEnabled":true,"availableFX":[{"fx_name":"BassBoost","state":true,"source":"ini"}]}
   ```
 
 ---
 
 # Diagnostics & Discovery (Optional, Read‑Only)
 - View live Enhancements status and vendor state:
-  ```bash
-  audioctl diag-sysfx --name "Speakers" --flow Render
+  ```ps1
+  .\audioctl.exe diag-sysfx --name "Speakers" --flow Render
   ```
 - Dump all MMDevices values for an endpoint (HKCU/HKLM; FxProperties/Properties):
-  ```bash
-  audioctl diag-mmdevices --id "{RENDER-ENDPOINT-ID}" --flow Render
+  ```ps1
+  .\audioctl.exe diag-mmdevices --id "{RENDER-ENDPOINT-ID}" --flow Render
   ```
 - Interactive discovery with reports (TXT/JSON) and optional INI snippet:
-  ```bash
-  audioctl discover-enhancements --name "Speakers" --flow Render --output-dir "." --ini-snippet ".\vendor_snippets.ini"
+  ```ps1
+  .\audioctl.exe discover-enhancements --name "Speakers" --flow Render --output-dir "." --ini-snippet ".\vendor_snippets.ini"
   ```
 
 ---
 
 # Wait for a Device to Appear (CLI)
-Use `audioctl wait` to block until a device becomes active (appears) or until a timeout expires. Matching is against active endpoints only (`DEVICE_STATE_ACTIVE`). When a match is found, the command prints a compact, single‑line JSON object and exits with code 0.
+Use `.\audioctl.exe wait` to block until a device becomes active (appears) or until a timeout expires. Matching is against active endpoints only (`DEVICE_STATE_ACTIVE`). When a match is found, the command prints a compact, single‑line JSON object and exits with code 0.
 
 - Template:
   ```bash
@@ -575,7 +636,16 @@ Use `audioctl wait` to block until a device becomes active (appears) or until a 
 - Tips:
   - Prefer `--id` when you know it.
   - Add `--flow` when the name appears in both flows.
-
+ 
+## Examples
+  ```ps1
+  .\audioctl.exe wait --name "USB Headset" --timeout 30
+  ```
+  When the device is found, the CLI prints the following device dictionary as a compact string:
+  ```json
+  {"found":{"id": "{ENDPOINT-ID}", "name": "Headset Earphone (USB Audio Device)","flow":"Render","state":"active","isDefault":{"console":true,"multimedia":true,"communications":false},"guiIndex": 2}}
+  ```
+  <br>
 ---
 
 # General Exit Codes
@@ -598,8 +668,8 @@ Use `audioctl wait` to block until a device becomes active (appears) or until a 
   - Check JSON output: look at `enabled` and `verifiedBy` (`"com"` or `"registry"`).
 - Enhancements don’t toggle:
   - First try the toggle directly:
-    ```
-    audioctl enhancements --id "{ENDPOINT-ID}" --flow Render --enable
+    ```ps1
+    .\audioctl.exe enhancements --id "{ENDPOINT-ID}" --flow Render --enable
     ```
     If you get:
     ```
@@ -607,27 +677,27 @@ Use `audioctl wait` to block until a device becomes active (appears) or until a 
     ```
     then proceed to learn.
   - Learn the vendor toggle (manual A/B):
-    ```
-    audioctl enhancements --id "{ENDPOINT-ID}" --flow Render --learn
+    ```ps1
+    .\audioctl.exe enhancements --id "{ENDPOINT-ID}" --flow Render --learn
     ```
     After a successful learn, re-run the toggle:
-    ```
-    audioctl enhancements --id "{ENDPOINT-ID}" --flow Render --disable
+    ```ps1
+    .\audioctl.exe enhancements --id "{ENDPOINT-ID}" --flow Render --disable
     ```
   - If learn fails or the result can’t be verified:
     - Inspect live state vs vendor with:
-      ```
-      audioctl diag-sysfx --id "{ENDPOINT-ID}" --flow Render
+      ```ps1
+      .\audioctl.exe diag-sysfx --id "{ENDPOINT-ID}" --flow Render
       ```
     - Capture ON/OFF snapshots and generate a report/snippet:
-      ```
-      audioctl discover-enhancements --id "{ENDPOINT-ID}" --flow Render --output-dir "." --ini-snippet ".\vendor_snippets.ini"
+      ```ps1
+      .\audioctl.exe discover-enhancements --id "{ENDPOINT-ID}" --flow Render --output-dir "." --ini-snippet ".\vendor_snippets.ini"
       ```
       Use the suggested INI snippet or share the TXT/JSON for analysis.
   - Permissions and hive preference:
     - Some drivers only honor HKLM. Re-run the toggle with:
-      ```
-      audioctl enhancements --id "{ENDPOINT-ID}" --flow Render --enable --prefer-hklm
+      ```ps1
+      .\audioctl.exe enhancements --id "{ENDPOINT-ID}" --flow Render --enable --prefer-hklm
       ```
       (Run an elevated console if HKLM writes are required.)
   - Confirm selection and INI placement:
