@@ -6,6 +6,8 @@
 ### GUI Features
 - **Embedded Console Mirror:** Added a scrollable text console to the main window that mirrors `stdout`/`stderr` in real-time [10].
   - Includes a selective **Right-Click > Copy** context menu that appears only when text is highlighted.
+  - **Visual Styling:** The console now renders all text in **Blue** with **White-on-Blue selection**.
+  - **Smart Highlighting:** Implemented a custom selection rendering engine that applies background highlights only to text characters. This prevents the selection block from visually extending into empty space on newlines.
 - **Auto-Minimize External Console:** The application now attempts to minimize the parent console window (if present) upon GUI launch to reduce desktop clutter while keeping the process alive [10].
 
 ### CLI & Logic Improvements
@@ -556,4 +558,5 @@ Date: 2026-01-19
 - **Basic Enumeration:** Listed playback (Render) and recording (Capture) devices using `IMMDeviceEnumerator` with `DEVICE_STATE_ACTIVE` only.
 - **“Listen” Toggle (Admin):** Initial registry-based enable/disable of “Listen to this device” for capture endpoints (admin required).
 - **Admin Check:** `is_admin` helper added to warn when elevation is required.
+
 
