@@ -2396,7 +2396,9 @@ def launch_gui():
     root = tk.Tk()
     try:
         if sys.platform.startswith("win"):
-            root.iconbitmap(resource_path("audio.ico"))
+            # Use 'default=' to apply the icon to the entire application instance,
+            # overriding the inherited console/shim icon in the Taskbar.
+            root.iconbitmap(default=resource_path("audio.ico"))
     except Exception:
         pass
     gui = AudioGUI(root)
@@ -2447,3 +2449,4 @@ def launch_gui():
         _log_exc("MAINLOOP EXCEPTION")
     _log("launch_gui: mainloop exited")
     return 0
+
