@@ -1,12 +1,12 @@
-# Vendor Toggles Configuration Guide (v1.5.1.1)
+# Vendor Toggles Configuration Guide (v1.5.1.2)
 This guide explains **vendor_toggles.ini**: the database that teaches **audioctl** how to reliably toggle **Audio Enhancements (SysFX)** and individual **FX effects** on specific Windows audio endpoints.
 
 Because vendors implement enhancements/effects differently (and sometimes don’t honor Windows’ generic SysFX switches), audioctl uses **learned registry-write rules** stored in this INI.
 
-This document reflects the behavior of `audioctl/vendor_db.py` in **v1.5.1.1**.
+This document reflects the behavior of `audioctl/vendor_db.py` in **v1.5.1.2**.
 --------------------------------------------------------------------------------
 
-## 1) What is vendor_toggles.ini? (v1.5.1.1)
+## 1) What is vendor_toggles.ini? (v1.5.1.2)
 
 `vendor_toggles.ini` is audioctl’s **INI-backed vendor toggle rule database**. It stores the learned rules that tell audioctl **exactly which MMDevices registry values to read and write** to control:
 
@@ -20,8 +20,8 @@ What’s in the file:
   - legacy single-DWORD effects, or
   - multi-write effects (several values, possibly mixing `REG_DWORD`, `REG_SZ`, `REG_BINARY`)
 
-### v1.5.1.1 nuance: shared rules + “registry truth” discovery
-In v1.5.1.1, the INI is best thought of as a **rule library**, not just “a list of devices”.
+### v1.5.1.2 nuance: shared rules + “registry truth” discovery
+In v1.5.1.2, the INI is best thought of as a **rule library**, not just “a list of devices”.
 
 audioctl uses **live registry signature matching (“registry truth”)** to decide applicability:
 
@@ -40,7 +40,7 @@ So the file describes:
 
 --------------------------------------------------------------------------------
 
-## 2) Default location and permissions (v1.5.1.1)
+## 2) Default location and permissions (v1.5.1.2)
 **`vendor_toggles.ini` ships inside the project’s `dist/` folder**, so when you build/package the app, the INI ends up **next to the generated `audioctl.exe`**.
 
 So the effective default is:
@@ -71,7 +71,7 @@ This means:
 ## 3) Do I need this file?
 Yes, if you want audioctl to toggle Enhancements or FX reliably.
 
-In v1.5.1.1 the runtime policy is **vendor-only**:
+In v1.5.1.2 the runtime policy is **vendor-only**:
 - If audioctl cannot find a matching vendor rule in `vendor_toggles.ini`, it returns:
   - `no-vendor-method`
 
@@ -98,13 +98,13 @@ For a given endpoint GUID, audioctl targets MMDevices keys:
 `HKCU/HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\{Render|Capture}\{GUID}\{FxProperties|Properties}`
 
 Important:
-- v1.5.1.1 records and uses the learned **subkey**:
+- v1.5.1.2 records and uses the learned **subkey**:
   - `FxProperties` or `Properties`
 - audioctl tries hard not to “guess” at runtime; it reads/writes exactly the learned location.
 
 --------------------------------------------------------------------------------
 
-## 6) New / notable behavior in v1.5.1.1 (what changed vs older guides)
+## 6) New / notable behavior in v1.5.1.2 (what changed vs older guides)
 
 ### 6.1 Vendor-only runtime (“no Windows fallback”)
 `_apply_enhancements()` is vendor-only:
@@ -206,10 +206,10 @@ Field meanings:
   - Which endpoint flows this entry can apply to: `Render`, `Capture`, or both
 - `subkey`
   - Learned location: `FxProperties` or `Properties`
-  - v1.5.1.1 reads/writes exactly this learned scope
+  - v1.5.1.2 reads/writes exactly this learned scope
 - `devices`
   - A list of endpoint GUIDs associated with this entry (used for candidate filtering in some paths)
-  - NOTE: v1.5.1.1 also uses registry signature truth; support/apply ultimately depends on signature match for the endpoint
+  - NOTE: v1.5.1.2 also uses registry signature truth; support/apply ultimately depends on signature match for the endpoint
 
 Runtime rule (MAIN):
 - Support is determined by whether a MAIN entry’s **registry signature matches** the endpoint now.
@@ -235,7 +235,7 @@ notes = Some devices
 devices = {guid-a},{guid-b}
 ```
 
-Key points (v1.5.1.1):
+Key points (v1.5.1.2):
 - Legacy FX toggling is treated similarly to MAIN toggling for writing:
   - it writes a single DWORD value
 - Before applying a legacy FX, audioctl performs a *truth check*:
@@ -302,12 +302,12 @@ guids_1a2b3c4d = {guid-a},{guid-b}
 ### 10.1 Section-level `devices = ...` (FX bucket membership)
 For FX sections, `devices = ...` is the “bucket membership” union list:
 - used as a fast association list
-- however, v1.5.1.1 can also discover FX by signature even if the GUID is not listed
+- however, v1.5.1.2 can also discover FX by signature even if the GUID is not listed
 
 ### 10.2 Per-write scoping: `write{i}_devices` semantics (important)
 Each write block can optionally define its own device list.
 
-Semantics in v1.5.1.1 loader:
+Semantics in v1.5.1.2 loader:
 - Missing `write{i}_devices` key:
   - `devices: None` in memory
   - Means “universal within this FX bucket”
@@ -317,7 +317,7 @@ Semantics in v1.5.1.1 loader:
 - Present with list:
   - applies only to those GUIDs
 
-Important runtime nuance in v1.5.1.1:
+Important runtime nuance in v1.5.1.2:
 - For *matching/verification/reading* multi-write FX signatures, code intentionally ignores per-write gating:
   - it checks whether the registry values match the INI signatures for this endpoint
 - For *applying* multi-write writes, it also intentionally ignores per-write gating:
@@ -355,7 +355,7 @@ Multi-write FX uses `_read_decider_state()`:
 
 Config fields:
 - `decider_index`
-  - Stored/parsed, but the v1.5.1.1 readback logic primarily uses quorum + best-signal scoring.
+  - Stored/parsed, but the v1.5.1.2 readback logic primarily uses quorum + best-signal scoring.
 - `quorum_threshold`
   - Default: 0.60
   - Clamped internally to [0.50, 0.95]
@@ -454,13 +454,13 @@ audioctl enhancements --id "{ENDPOINT-ID}" --delete-fx "BassBoost"
 
 --------------------------------------------------------------------------------
 
-## 16) Best practices (v1.5.1.1 behavior-aware)
+## 16) Best practices (v1.5.1.2 behavior-aware)
 - Learn MAIN Enhancements first if your vendor effects depend on the global switch.
 - Run elevated if HKLM writes are required (common for some vendor drivers).
 - Keep effect names stable and human-friendly (`BassBoost`, `Loudness`, etc.).
 - Prefer not to hand-edit multi-write payloads unless you understand the driver behavior:
   - incorrect types/payloads can cause mismatched signatures, failed writes, or unstable state reads.
-- If a driver uses `Properties` instead of `FxProperties`, ensure `subkey = Properties` is recorded; v1.5.1.1 will respect it.
+- If a driver uses `Properties` instead of `FxProperties`, ensure `subkey = Properties` is recorded; v1.5.1.2 will respect it.
 
 --------------------------------------------------------------------------------
 
