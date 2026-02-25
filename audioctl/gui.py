@@ -537,17 +537,17 @@ class AudioGUI:
         # self.tree.configure(yscrollcommand=self.yscroll.set)
         # self.yscroll.pack(side="right", fill="y")
         self.yscroll = None  # Set to None to prevent errors in other parts of the code
-        # Remove indicator element (cosmetic): we don't want expand/collapse affordances
         # for group rows; the view is always grouped and open by default.
+        # Remove indicator element AND the dotted focus ring (ghost box)
         try:
             style.layout("Treeview.Item", [
                 ('Treeitem.padding', {
                     'sticky': 'nswe',
                     'children': [
                         ('Treeitem.image', {'side': 'left', 'sticky': ''}),
-                        ('Treeitem.focus', {'side': 'left', 'sticky': 'nswe', 'children': [
-                            ('Treeitem.text', {'side': 'left', 'sticky': ''})
-                        ]})
+                        # We removed 'Treeitem.focus' here.
+                        # Now the text is drawn directly, without the dotted box wrapper.
+                        ('Treeitem.text', {'side': 'left', 'sticky': ''})
                     ]
                 })
             ])
@@ -2213,6 +2213,26 @@ class AudioGUI:
         scale.set(initial)
         scale.grid(row=1, column=2, sticky="we")
         frm.columnconfigure(2, weight=1)
+
+        # Fix: Snap to click AND drag immediately (slide-to-place)
+        def on_scale_interact(event):
+            try:
+                w = scale.winfo_width()
+                if w > 1:
+                    # Map mouse X position directly to 0-100 range
+                    val = (event.x / w) * 100
+                    val = max(0, min(100, val))
+                    scale.set(val)
+                    on_scale(val)
+                    # Return "break" to disable default Tkinter handling 
+                    # (prevents "bumping" or fighting with our custom drag)
+                    return "break"
+            except Exception:
+                pass
+
+        # Bind both Click (jump) and Drag (slide)
+        scale.bind("<Button-1>", on_scale_interact, add="+")
+        scale.bind("<B1-Motion>", on_scale_interact, add="+")
 
         def on_entry_change(*_):
             if syncing["scale"]:
