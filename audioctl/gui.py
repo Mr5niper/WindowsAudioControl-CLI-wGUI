@@ -417,7 +417,7 @@ def run_audioctl_interactive(args_list, prompt_patterns, expect_ok=True):
 class AudioGUI:
     def __init__(self, root):
         self.root = root
-        self.root.title("Mr5niper's Audio Control  v1.5.1.1  02-22-2026")
+        self.root.title("Mr5niper's Audio Control  v1.5.1.2  02-24-2026")
         # Style and theme
         style = ttk.Style(self.root)
         try:
@@ -537,17 +537,17 @@ class AudioGUI:
         # self.tree.configure(yscrollcommand=self.yscroll.set)
         # self.yscroll.pack(side="right", fill="y")
         self.yscroll = None  # Set to None to prevent errors in other parts of the code
-        # Remove indicator element (cosmetic): we don't want expand/collapse affordances
         # for group rows; the view is always grouped and open by default.
+        # Remove indicator element AND the dotted focus ring (ghost box)
         try:
             style.layout("Treeview.Item", [
                 ('Treeitem.padding', {
                     'sticky': 'nswe',
                     'children': [
                         ('Treeitem.image', {'side': 'left', 'sticky': ''}),
-                        ('Treeitem.focus', {'side': 'left', 'sticky': 'nswe', 'children': [
-                            ('Treeitem.text', {'side': 'left', 'sticky': ''})
-                        ]})
+                        # We removed 'Treeitem.focus' here.
+                        # Now the text is drawn directly, without the dotted box wrapper.
+                        ('Treeitem.text', {'side': 'left', 'sticky': ''})
                     ]
                 })
             ])
@@ -2214,6 +2214,26 @@ class AudioGUI:
         scale.grid(row=1, column=2, sticky="we")
         frm.columnconfigure(2, weight=1)
 
+        # Fix: Snap to click AND drag immediately (slide-to-place)
+        def on_scale_interact(event):
+            try:
+                w = scale.winfo_width()
+                if w > 1:
+                    # Map mouse X position directly to 0-100 range
+                    val = (event.x / w) * 100
+                    val = max(0, min(100, val))
+                    scale.set(val)
+                    on_scale(val)
+                    # Return "break" to disable default Tkinter handling 
+                    # (prevents "bumping" or fighting with our custom drag)
+                    return "break"
+            except Exception:
+                pass
+
+        # Bind both Click (jump) and Drag (slide)
+        scale.bind("<Button-1>", on_scale_interact, add="+")
+        scale.bind("<B1-Motion>", on_scale_interact, add="+")
+
         def on_entry_change(*_):
             if syncing["scale"]:
                 return
@@ -2396,7 +2416,9 @@ def launch_gui():
     root = tk.Tk()
     try:
         if sys.platform.startswith("win"):
-            root.iconbitmap(resource_path("audio.ico"))
+            # Use 'default=' to apply the icon to the entire application instance,
+            # overriding the inherited console/shim icon in the Taskbar.
+            root.iconbitmap(default=resource_path("audio.ico"))
     except Exception:
         pass
     gui = AudioGUI(root)
@@ -2447,3 +2469,5 @@ def launch_gui():
         _log_exc("MAINLOOP EXCEPTION")
     _log("launch_gui: mainloop exited")
     return 0
+
+

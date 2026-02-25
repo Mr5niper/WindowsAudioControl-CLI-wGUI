@@ -713,7 +713,8 @@ Use `.\audioctl.exe wait` to block until a device becomes active (appears) or un
     <img width="98" height="130" alt="image" src="https://github.com/user-attachments/assets/46adf78b-c222-4aaa-8e5d-0bd5bcc5b9bb" />
   <br>
   
-<img width="1980" height="545" alt="image" src="https://github.com/user-attachments/assets/a61c9f2e-4d02-418e-a71c-7b6637594e70" />
+<img width="1980" height="754" alt="image" src="https://github.com/user-attachments/assets/d1db39f2-99a2-4264-8a44-973671d364a1" />
+
 <br>
 
 ### Features
@@ -748,14 +749,18 @@ Use `.\audioctl.exe wait` to block until a device becomes active (appears) or un
 
 ### Print CLI Commands
 - Enable **“Print CLI commands”** in the top bar.  
-  Every GUI action will print the equivalent `audioctl.exe` command to the console (useful for learning the CLI and scripting).
-
-<img width="306" height="89" alt="image" src="https://github.com/user-attachments/assets/b68eed8f-3830-469e-b95f-be907cd9b523" />
+  Every GUI action will print the equivalent `audioctl.exe` command to the console in blue font(useful for learning the CLI and scripting).
+    
+    <img width="320" height="85" alt="image" src="https://github.com/user-attachments/assets/f4914104-eefe-4c51-b8c7-5261991c1867" />
     <br>
     <br>
 
-<img width="1602" height="283" alt="image" src="https://github.com/user-attachments/assets/05879549-9e60-4c52-834d-d3453a5fc0fd" />
+    <img width="1602" height="184" alt="image" src="https://github.com/user-attachments/assets/a97b6ecb-ffa1-4847-83a8-4735230c1e85" />
 
+- Highlight a command, right-click, and copy it directly from the console:
+    
+    <img width="820" height="145" alt="image" src="https://github.com/user-attachments/assets/c3b7a1dc-b427-4ca7-9ae5-0dc517b0f5d2" />
+    <br>
 
 ### Refresh Devices
 - Click **"Refresh"** or press `F5`.
