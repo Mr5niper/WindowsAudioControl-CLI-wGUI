@@ -1,15 +1,22 @@
 # AUDIOCTL.PY CHANGELOG
 
 
-## v1.5.1.2 - [current]
+## v1.5.1.3 - [current]
+
+### Improvements
+- Added learned Bass Boost and Virtual Surround FX entries to vendor_toggles.ini (Issue #43).
+  - Registry writes target the correct HKLM\FxProperties\{b13412ee-07af-4c57-b08b-e327f8db085b}\User path with device-scoped GUID binding.
+
+---
+
+## v1.5.1.2
 
 ### GUI Polish & Usability
-
-*   **Taskbar Icon Fix:** Resolved an issue where the application icon reverted to a generic "feather" or console icon when running as a non-admin frozen executable.
-    *   *Fix:* Applied the icon as the application default (`root.iconbitmap(default=...)`) to override the PyInstaller bootloader identity 011 audioctl/gui.py.
-*   **Snappy Volume Slider:** The volume dialog slider now responds instantly to clicks (jump-to-position) and supports immediate dragging.
-    *   Replaces the default incremental "step" behavior with custom mouse event bindings for a modern slider feel.
-*   **Visual Clean-up:** Removed the dotted "focus ring" (ghost box) from the selected device row in the main list for a cleaner look.
+- **Taskbar Icon Fix:** Resolved an issue where the application icon reverted to a generic "feather" or console icon when running as a non-admin frozen executable.
+  - *Fix:* Applied the icon as the application default (`root.iconbitmap(default=...)`) to override the PyInstaller bootloader identity 011 audioctl/gui.py.
+- **Snappy Volume Slider:** The volume dialog slider now responds instantly to clicks (jump-to-position) and supports immediate dragging.
+  - Replaces the default incremental "step" behavior with custom mouse event bindings for a modern slider feel.
+- **Visual Clean-up:** Removed the dotted "focus ring" (ghost box) from the selected device row in the main list for a cleaner look.
 
 ---
 
@@ -570,6 +577,7 @@ Date: 2026-01-19
 - **Basic Enumeration:** Listed playback (Render) and recording (Capture) devices using `IMMDeviceEnumerator` with `DEVICE_STATE_ACTIVE` only.
 - **“Listen” Toggle (Admin):** Initial registry-based enable/disable of “Listen to this device” for capture endpoints (admin required).
 - **Admin Check:** `is_admin` helper added to warn when elevation is required.
+
 
 
 
