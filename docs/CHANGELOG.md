@@ -1,7 +1,14 @@
 # AUDIOCTL.PY CHANGELOG
 
 
-## v1.5.1.2 - [current]
+## v1.5.2.0 - [current]
+
+### Performance
+- **Ghost Device Bottleneck Fix:** Resolved severe 20-30 second execution delays on PCs with large numbers of historical/disconnected USB audio devices. The application now strictly enumerates only active endpoints instead of caching all known registry entries.
+
+---
+
+## v1.5.1.2
 
 ### GUI Polish & Usability
 
