@@ -358,7 +358,7 @@ def cmd_listen(args):
             playback_target_name = "Default Playback Device"
         else:
             # Resolve the friendly name for the provided ID
-            all_renders = [d for d in list_devices(include_all=True) if d["flow"] == "Render"]
+            all_renders = [d for d in list_devices(include_all=False) if d["flow"] == "Render"]
             match = next((d for d in all_renders if d["id"] == render_device_id), None)
             if match:
                 playback_target_name = match["name"]
@@ -460,7 +460,7 @@ def cmd_get_listen(args):
                 winreg.CloseKey(key)
                 if val:
                     current_target_id = val
-                    all_renders = [d for d in list_devices(include_all=True) if d["flow"] == "Render"]
+                    all_renders = [d for d in list_devices(include_all=False) if d["flow"] == "Render"]
                     match = next((d for d in all_renders if d["id"] == val), None)
                     if match:
                         current_target_name = match["name"]

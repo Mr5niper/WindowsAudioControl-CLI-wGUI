@@ -1795,9 +1795,6 @@ def list_devices(include_all=False):
             defaults = get_default_ids(enumerator_for_defaults)
             state_mask = DEVICE_STATE_ALL if include_all else DEVICE_STATE_ACTIVE
             
-            # Build the name map once per call (keeps enumeration fast and stable).
-            name_map = _friendly_names_by_id()
-            
             out = []
             
             for flow_name, flow in [("Render", E_RENDER), ("Capture", E_CAPTURE)]:
@@ -1807,8 +1804,8 @@ def list_devices(include_all=False):
                     dev = coll.Item(i)
                     dev_id = dev.GetId()
                     
-                    # Use name map lookup instead of raw COM call
-                    name = name_map.get(dev_id) or dev_id
+                    # Use safe friendly name directly to avoid enumerating inactive devices
+                    name = _safe_friendly_name_from_device(dev) or dev_id
                     
                     state_str = "active"
                     
