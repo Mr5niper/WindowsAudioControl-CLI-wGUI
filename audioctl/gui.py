@@ -58,8 +58,10 @@ def _minimize_console_window_best_effort():
         user32 = ctypes.windll.user32
         hwnd = kernel32.GetConsoleWindow()
         if hwnd:
-            SW_MINIMIZE = 6
-            user32.ShowWindow(hwnd, SW_MINIMIZE)
+            # 0 = SW_HIDE. This completely hides the background console
+            # instead of leaving a floating minimized block on your desktop.
+            SW_HIDE = 0
+            user32.ShowWindow(hwnd, SW_HIDE)
     except Exception:
         pass
 
