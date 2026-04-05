@@ -1,7 +1,19 @@
 # AUDIOCTL.PY CHANGELOG
 
+## v1.5.3.0 - [current]
 
-## v1.5.2.0 - [current]
+### Vendor Engine Upgrades
+- **Profile-Aware Universal Spoofing:** Upgraded the multi-write FX engine to intelligently group writes into distinct device "profiles". When a new device is discovered, the engine scores the live registry to find the best-fit profile and strictly applies only the relevant writes.
+- **Universal Fallback:** Guaranteed backwards compatibility for older INI rules. If a device doesn't match a specific profile, the engine safely falls back to evaluating all writes collectively.
+- **Zero-Touch Priming:** The learning engine now cross-references newly captured toggles against existing rules. If a primed device perfectly matches an existing universal rule, the engine exits early without appending the device GUID, preventing INI bloat.
+- **Strict Registry Truth Enforced:** Hardened the registry writer to strictly mutate existing keys, guaranteeing the program never attempts to invent registry paths that the native audio driver hasn't naturally initialized.
+
+### GUI Polish
+- **Console Visual Artifact Fix:** Resolved a Windows OS visual bug where launching the application as a standard user left a tiny, floating minimized console block on the desktop. The background process window is now cleanly hidden entirely.
+
+---
+
+## v1.5.2.0
 
 ### Performance
 - **Ghost Device Bottleneck Fix:** Resolved severe 20-30 second execution delays on PCs with large numbers of historical/disconnected USB audio devices. The application now strictly enumerates only active endpoints instead of caching all known registry entries.
