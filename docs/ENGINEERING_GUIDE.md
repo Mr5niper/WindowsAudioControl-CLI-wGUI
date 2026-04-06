@@ -1,8 +1,8 @@
-# ENGINEERING GUIDE (v1.5.2.0)
+# ENGINEERING GUIDE (v1.5.3.0)
 **audioctl - Windows Audio Control CLI + GUI (PyInstaller EXE)**
 **Audience:** Engineers debugging, maintaining, or extending the codebase  
 **Platforms:** Windows 10/11  
-**Version:** 1.5.2.0 
+**Version:** 1.5.3.0 
 **Build contract:** **Python 3.13.12 required**, **PyInstaller required**
 
 This document is intentionally **not** a usage manual. The README covers commands, examples, and screenshots.  
@@ -36,7 +36,7 @@ The *real* entrypoint is always:
 - `audioctl.cli.main()`
 
 ### 1.4 Build artifacts / metadata
-- Windows version info comes from `version.txt` (filevers/prodvers 1.5.2.0).
+- Windows version info comes from `version.txt` (filevers/prodvers 1.5.3.0).
 - Icon `audio.ico` is embedded and also shipped as data.
 
 ---

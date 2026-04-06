@@ -99,12 +99,21 @@ Because multi-write FX involve several keys, determining if the effect is curren
 3. If `votes / total_writes >= quorum_threshold` (default 60%), the state is declared.
 4. If a quorum cannot be reached (e.g., conflicting manual edits), it falls back to evaluating the single most reliable key (preferring `FxProperties` DWORDs).
 
-### 4.2 Per-Write Scoping (`write{i}_devices`)
+### 4.2 Per-Write Scoping & Device Profiles (`write{i}_devices`)
 During learning, different devices might map the same effect to slightly different payload combinations. The engine merges these into a single `fx_name` bucket, using `write{i}_devices` to scope specific writes to specific GUIDs.
 
-*   **Missing:** Applies to all devices in the bucket (Universal).
-*   **List (`{guid}`):** Applies ONLY to the listed GUIDs.
+By grouping writes that share the same GUIDs, the engine dynamically builds distinct **Device Profiles** within a single effect bucket.
+
+*   **Missing:** This write is "Universal" and is injected into *every* device profile in the bucket.
+*   **List (`{guid}`):** This write belongs strictly to the profile(s) for the listed GUIDs.
 *   **Empty:** Applies to nobody (explicitly disabled by conflict cleanup).
+
+### 4.3 Profile-Aware Universal Spoofing & Fallback
+When a newly connected device (whose GUID is not yet explicitly learned in the INI) attempts to use an FX toggle, the engine uses **Profile-Aware Universal Spoofing**:
+
+1. **Registry Scoring:** The engine scans the live Windows registry and compares existing keys against all known Device Profiles in the bucket.
+2. **Profile Adoption:** It calculates a "best-fit" score. The engine adopts the profile with the highest match ratio and safely applies *only* the writes belonging to that specific profile. 
+3. **Universal Fallback:** If the device's registry is completely unrecognized (it matches no specific profile), the engine safely falls back to evaluating all writes collectively. This ensures backwards compatibility with older, legacy INI rules.
 
 ---
 

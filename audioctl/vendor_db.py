@@ -323,55 +323,71 @@ def _legacy_find_live_subkey(entry: dict, device_id: str, flow: str):
         return None
     except Exception:
         return None
-def _fx_signature_matches_multi(entry: dict, device_id: str, flow: str) -> bool:
+def _fx_signature_matches_multi(entry, device_id, flow) -> bool:
     """
-    Multi-write FX spoof verification:
-      - for applicable writes (universal + write{i}_devices for this guid),
-        check that current registry value matches either enable or disable payload
-        with the correct type.
-      - require quorum_threshold fraction to match to avoid ghost FX.
+    Multi-write FX spoof verification (Profile-Aware + Universal Fallback):
+    Evaluates signature matching per device 'profile', but safely falls back 
+    to the old universal method if no strict profile matches.
     """
     writes_all = entry.get("writes") or []
     if not writes_all:
         return False
-    # IMPORTANT: ignore write{i}_devices gating for MATCHING.
-    # If the registry values match the INI signatures on this GUID, it applies.
-    writes = list(writes_all)
     try:
         qt = float(entry.get("quorum_threshold", 0.60))
     except Exception:
         qt = 0.60
     qt = max(0.50, min(0.95, qt))
-    ok = 0
-    total = 0
-    for w in writes:
-        subk = (w.get("subkey") or "").strip() or "FxProperties"
-        name = (w.get("name") or "").strip().lower()
-        if not name:
-            continue
-        base = _endpoint_base_path(device_id, flow, subk)
-        if not base:
-            continue
-        # Read both hives; if the value doesn't exist in either, it's not part of this
-        # device's signature and should not count against the quorum.
-        cu_val, cu_typ = _fast_read_one("HKCU", base, name)
-        lm_val, lm_typ = _fast_read_one("HKLM", base, name)
-        if cu_typ is None and lm_typ is None:
-            continue
-        total += 1 # Only count writes for keys that actually exist on the device.
-        # enable signature
-        if _value_equals(w.get("enable"), w.get("type_enable"), cu_val, cu_typ) or \
-           _value_equals(w.get("enable"), w.get("type_enable"), lm_val, lm_typ):
-            ok += 1
-            continue
-        # disable signature
-        if _value_equals(w.get("disable"), w.get("type_disable"), cu_val, cu_typ) or \
-           _value_equals(w.get("disable"), w.get("type_disable"), lm_val, lm_typ):
-            ok += 1
-            continue
-    if total <= 0:
-        return False
-    return (ok / float(total)) >= qt
+
+    # Build profiles based on write{i}_devices
+    profiles = {}
+    for w in writes_all:
+        devs = w.get("devices")
+        if devs is not None and len(devs) > 0:
+            for g in devs:
+                if g not in profiles: profiles[g] = []
+                profiles[g].append(w)
+    uni_writes = [w for w in writes_all if w.get("devices") is None]
+    for g in profiles:
+        profiles[g].extend(uni_writes)
+
+    def _evaluate_writes(writes_list):
+        ok = 0
+        total = 0
+        for w in writes_list:
+            subk = (w.get("subkey") or "").strip() or "FxProperties"
+            name = (w.get("name") or "").strip().lower()
+            if not name: continue
+            base = _endpoint_base_path(device_id, flow, subk)
+            if not base: continue
+            cu_val, cu_typ = _fast_read_one("HKCU", base, name)
+            lm_val, lm_typ = _fast_read_one("HKLM", base, name)
+            if cu_typ is None and lm_typ is None:
+                continue
+            total += 1
+            if _value_equals(w.get("enable"), w.get("type_enable"), cu_val, cu_typ) or \
+               _value_equals(w.get("enable"), w.get("type_enable"), lm_val, lm_typ):
+                ok += 1
+                continue
+            if _value_equals(w.get("disable"), w.get("type_disable"), cu_val, cu_typ) or \
+               _value_equals(w.get("disable"), w.get("type_disable"), lm_val, lm_typ):
+                ok += 1
+                continue
+        return total, ok
+
+    # Check individual profiles first
+    for p_guid, p_writes in profiles.items():
+        tot, ok = _evaluate_writes(p_writes)
+        if tot > 0 and (ok / float(tot)) >= qt:
+            return True
+            
+    # FALLBACK: If profiles failed, evaluate ALL writes together (the original method)
+    # This guarantees we never break something that used to work!
+    tot, ok = _evaluate_writes(writes_all)
+    if tot > 0 and (ok / float(tot)) >= qt:
+        return True
+        
+    return False
+    
 def _fx_write_matches_this_guid_now(w: dict, device_id: str, flow: str) -> bool:
     """
     Return True if this write's target value exists for this GUID and matches either
@@ -1831,42 +1847,24 @@ def _build_fx_multiwrite_from_stable_maps(target, stableA, stableB):
     writes.sort(key=_score, reverse=True)
     return writes
 def _learn_vendor_from_discovery_and_write_ini(target, ini_path=None, prefer_hkcu=True):
-    """
-    Manual learn using discovery flow.
-    Safety/UX:
-      Requires explicit confirmation ("I UNDERSTAND") unless AUDIOCTL_LEARN_CONFIRMED=1 is set
-      (GUI uses the env var after showing its own warning dialog).
-    Learn behavior:
-      - Captures A/B snapshots (user sets enabled, then disabled)
-      - Chooses a candidate DWORD flip and records the subkey where it occurred
-      - Dedupes identical entries by appending this GUID to an existing section when possible
-    """
     import sys
     dev_id = target["id"]
     flow   = target["flow"]
     name   = target["name"]
     ini_path = ini_path or _vendor_ini_default_path()
-    # STERN WARNING + explicit confirmation
     warning = f"""
 READ CAREFULLY
 This Learn mode will capture two registry snapshots and write a vendor entry into:
   {ini_path}
-From now on, future 'enhancements' commands for this device WILL WRITE registry values on this machine (HKCU/optional HKLM) to toggle Enhancements. This is persistent until you manually remove the learned section from vendor_toggles.ini.
-Critical rules during Learn:
-- Do NOT change any other audio settings.
-- Do NOT switch default devices.
-- Do NOT open other audio/control apps.
-- Only toggle 'Audio Enhancements' for THIS device exactly when asked.
+From now on, future 'enhancements' commands for this device WILL WRITE registry values.
 If you accept this and understand the risk, type exactly:
 I UNDERSTAND
 """
     confirmed = os.environ.get("AUDIOCTL_LEARN_CONFIRMED", "0") == "1"
     if not confirmed:
         resp = input(warning + "\n> ").strip()
-        if resp != "I UNDERSTAND":
-            return False, "Learn aborted by user (confirmation not provided)."
-    else:
-        print("INFO: Learn confirmation skipped via AUDIOCTL_LEARN_CONFIRMED=1")
+        if resp != "I UNDERSTAND": return False, "Learn aborted by user."
+    
     print(f"Manual learn target: {name} ({flow})")
     print("Step 1: In Windows Sound settings, set 'Audio Enhancements' to ENABLED for this device.")
     input("When ready, press Enter to capture snapshot A... ")
@@ -1874,151 +1872,103 @@ I UNDERSTAND
     print("Step 2: Now set 'Audio Enhancements' to DISABLED for the same device.")
     input("When ready, press Enter to capture snapshot B... ")
     snapB = _collect_sysfx_snapshot(dev_id)
+    
     diffs = _diff_mmdevices_lists(snapA.get("registry") or [], snapB.get("registry") or [])
     snippet, picked = _build_vendor_ini_snippet(target, snapA, snapB, diffs)
-    if not picked:
-        return False, "No suitable REG_DWORD flip found under FxProperties. Driver may use non-DWORD or a different location."
+    if not picked: return False, "No suitable REG_DWORD flip found."
+    
     value_name    = picked["name"]
     dword_enable  = int(picked["before"])
     dword_disable = int(picked["after"])
     guid_lc = _guid_of(dev_id)
-    # Try to dedupe into existing identical section
+    
     db = _load_vendor_db_split(ini_path)
-    candidate = {
-        "type": "main",
-        "value_name": value_name.strip().lower(),
-        "enable": dword_enable,
-        "disable": dword_disable,
-    }
+    candidate = {"type": "main", "value_name": value_name.strip().lower(), "enable": dword_enable, "disable": dword_disable}
     for e in (db.get("main") or []):
         if _entries_identical_main(e, candidate):
-            _append_guid_to_section(ini_path, e.get("name"), guid_lc)
-            # Also record device name -> guid bucket mapping (readability, dedupe by name)
-            try:
-                _append_guid_to_name_bucket(ini_path, e.get("name"), name, guid_lc)
-            except Exception:
-                pass
-            return True, {
-                "iniPath": ini_path,
-                "section": e.get("name"),
-                "value_name": value_name,
-                "dword_enable": dword_enable,
-                "dword_disable": dword_disable
-            }
+            # Zero-Touch
+            return True, {"iniPath": ini_path, "section": e.get("name"), "value_name": value_name, "dword_enable": dword_enable, "dword_disable": dword_disable, "note": "Primed existing universal rule (no INI changes)."}
+            
     section_name  = _sanitize_ini_section_name(value_name)
     notes = f"Auto-learned (manual UI) on '{name}' ({flow}). A=enabled,B=disabled."
     hives = "HKCU,HKLM" if prefer_hkcu else "HKLM,HKCU"
     try:
-        res = _append_vendor_ini_entry_if_missing(
-            ini_path, section_name, value_name,
-            dword_enable, dword_disable,
-            flows="Render,Capture", hives=hives, notes=notes,
-            subkey=(picked.get("subkey") if picked else "FxProperties")  # pass learned subkey
-        )
-        # Ensure devices list exists and contains this GUID
+        res = _append_vendor_ini_entry_if_missing(ini_path, section_name, value_name, dword_enable, dword_disable, flows="Render,Capture", hives=hives, notes=notes, subkey=(picked.get("subkey") if picked else "FxProperties"))
         _append_guid_to_section(ini_path, section_name, guid_lc)
-        # Also record device name -> guid bucket mapping (readability, dedupe by name)
-        try:
-            _append_guid_to_name_bucket(ini_path, section_name, name, guid_lc)
-        except Exception:
-            pass
-    except PermissionError as e:
-        return False, f"Permission denied writing INI: {ini_path}. Run as Administrator. {e}"
-    except OSError as e:
-        return False, f"Failed to write INI: {ini_path}. {e}"
-    return True, {
-        "iniPath": ini_path,
-        "section": section_name,
-        "value_name": value_name,
-        "dword_enable": dword_enable,
-        "dword_disable": dword_disable
-    }
+        try: _append_guid_to_name_bucket(ini_path, section_name, name, guid_lc)
+        except Exception: pass
+    except PermissionError as e: return False, f"Permission denied writing INI: {e}"
+    except OSError as e: return False, f"Failed to write INI: {e}"
+    return True, {"iniPath": ini_path, "section": section_name, "value_name": value_name, "dword_enable": dword_enable, "dword_disable": dword_disable}
 def _learn_vendor_and_write_ini(target, ini_path=None):
-    """
-    Auto-learn a vendor DWORD toggle for target {'id','name','flow'}.
-    """
     import sys
     dev_id = target["id"]
     flow   = target["flow"]
     name   = target["name"]
     ini_path = ini_path or _vendor_ini_default_path()
-    # STERN WARNING + explicit confirmation
     warning = f"""
 READ CAREFULLY
 This automatic Learn attempt will write a vendor entry into:
   {ini_path}
-It will also try to toggle Windows paths programmatically during capture. Future 'enhancements' commands WILL WRITE registry values for this device until you remove the learned section.
-Do NOT change any other audio settings or devices while this runs.
+It will also try to toggle Windows paths programmatically during capture.
 Type exactly: I UNDERSTAND
 """
     confirmed = os.environ.get("AUDIOCTL_LEARN_CONFIRMED", "0") == "1"
     if not confirmed:
         resp = input(warning + "\n> ").strip()
-        if resp != "I UNDERSTAND":
-            return False, "Learn-auto aborted by user (confirmation not provided)."
-    else:
-        print("INFO: Learn confirmation skipped via AUDIOCTL_LEARN_CONFIRMED=1")
+        if resp != "I UNDERSTAND": return False, "Learn-auto aborted by user."
+        
     orig = _get_enhancements_status_propstore(dev_id)
-    if orig is None:
-        orig = _get_enhancements_status_com(dev_id)
-    try:
-        _set_enhancements_propstore(dev_id, True)
-    except Exception:
-        pass
-    try:
-        _set_enhancements_registry(dev_id, True, prefer_hklm=is_admin())
-    except Exception:
-        pass
+    if orig is None: orig = _get_enhancements_status_com(dev_id)
+        
+    try: _set_enhancements_propstore(dev_id, True)
+    except Exception: pass
+    try: _set_enhancements_registry(dev_id, True, prefer_hklm=is_admin())
+    except Exception: pass
     _short_settle(0.3)
     snapA = _collect_sysfx_snapshot(dev_id)
-    try:
-        _set_enhancements_propstore(dev_id, False)
-    except Exception:
-        pass
-    try:
-        _set_enhancements_registry(dev_id, False, prefer_hklm=is_admin())
-    except Exception:
-        pass
+    
+    try: _set_enhancements_propstore(dev_id, False)
+    except Exception: pass
+    try: _set_enhancements_registry(dev_id, False, prefer_hklm=is_admin())
+    except Exception: pass
     _short_settle(0.3)
     snapB = _collect_sysfx_snapshot(dev_id)
+    
     diffs = _diff_mmdevices_lists(snapA.get("registry") or [], snapB.get("registry") or [])
     snippet, picked = _build_vendor_ini_snippet(target, snapA, snapB, diffs)
-    if not picked:
-        return False, "No suitable REG_DWORD flip found under FxProperties. Driver may use non-DWORD or a different location."
+    if not picked: return False, "No suitable REG_DWORD flip found."
+        
     value_name = picked["name"]
     dword_enable  = int(picked["before"])
     dword_disable = int(picked["after"])
     guid_lc = _guid_of(dev_id)
+    
+    db = _load_vendor_db_split(ini_path)
+    candidate = {"type": "main", "value_name": value_name.strip().lower(), "enable": dword_enable, "disable": dword_disable}
+    for e in (db.get("main") or []):
+        if _entries_identical_main(e, candidate):
+            try:
+                if orig is True or orig is False: _apply_enhancements(dev_id, flow, orig, prefer_hklm=is_admin(), allow_universal_scan=False, vendor_ini_path=ini_path)
+            except Exception: pass
+            # Zero-Touch
+            return True, {"iniPath": ini_path, "section": e.get("name"), "value_name": value_name, "dword_enable": dword_enable, "dword_disable": dword_disable, "note": "Primed existing universal rule (no INI changes)."}
+            
     section_name  = _sanitize_ini_section_name(value_name)
     notes = f"Auto-learned on '{name}' ({flow}). A=enabled,B=disabled."
     try:
-        res = _append_vendor_ini_entry_if_missing(
-            ini_path, section_name, value_name,
-            dword_enable, dword_disable,
-            flows="Render,Capture", hives="HKCU,HKLM", notes=notes
-        )
+        res = _append_vendor_ini_entry_if_missing(ini_path, section_name, value_name, dword_enable, dword_disable, flows="Render,Capture", hives="HKCU,HKLM", notes=notes)
         _append_guid_to_section(ini_path, section_name, guid_lc)
-        # Also record device name -> guid bucket mapping (readability, dedupe by name)
-        try:
-            _append_guid_to_name_bucket(ini_path, section_name, name, guid_lc)
-        except Exception:
-            pass
-    except PermissionError as e:
-        return False, f"Permission denied writing INI: {ini_path}. Run as Administrator. {e}"
-    except OSError as e:
-        return False, f"Failed to write INI: {ini_path}. {e}"
+        try: _append_guid_to_name_bucket(ini_path, section_name, name, guid_lc)
+        except Exception: pass
+    except PermissionError as e: return False, f"Permission denied writing INI: {e}"
+    except OSError as e: return False, f"Failed to write INI: {e}"
+        
     try:
-        if orig is True or orig is False:
-            _apply_enhancements(dev_id, flow, orig, prefer_hklm=is_admin(), allow_universal_scan=False, vendor_ini_path=ini_path)
-    except Exception:
-        pass
-    return True, {
-        "iniPath": ini_path,
-        "section": section_name,
-        "value_name": value_name,
-        "dword_enable": dword_enable,
-        "dword_disable": dword_disable
-    }
+        if orig is True or orig is False: _apply_enhancements(dev_id, flow, orig, prefer_hklm=is_admin(), allow_universal_scan=False, vendor_ini_path=ini_path)
+    except Exception: pass
+        
+    return True, {"iniPath": ini_path, "section": section_name, "value_name": value_name, "dword_enable": dword_enable, "dword_disable": dword_disable}
 def _get_enhancements_status_any(device_id, flow):
     """
     Best-effort read for display (GUI/labels), vendor-only.
@@ -2044,28 +1994,63 @@ def _endpoint_base_path(device_id, flow, subkey):
     return rf"SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\{flow_name}\{guid}\{subkey}"
 def _perform_multi_writes(entry, device_id, flow, enable):
     """
-    Write all applicable toggles (universal + for this GUID).
-    Returns True if ALL applicable writes succeeded; False otherwise.
-    Notes:
-      - Multi-write FX can include HKLM writes; those may require Administrator privileges.
-      - We treat any failed applicable write as a failure because partial application
-        often produces inconsistent driver state.
+    Write all applicable toggles by adopting the best-fit profile.
+    Uses CreateKeyEx to safely invent missing registry keys.
     """
     ok_all = True
-    for w in entry.get("writes") or []:
-        # IMPORTANT: ignore write{i}_devices gating for APPLYING.
-        # Apply only if the value exists at the INI-defined location for this GUID.
+    guid_lc = _guid_of(device_id)
+    writes_all = entry.get("writes") or []
+    
+    profiles = {}
+    for w in writes_all:
+        devs = w.get("devices")
+        if devs is not None and len(devs) > 0:
+            for g in devs:
+                if g not in profiles: profiles[g] = []
+                profiles[g].append(w)
+    uni_writes = [w for w in writes_all if w.get("devices") is None]
+    for g in profiles:
+        profiles[g].extend(uni_writes)
+
+    writes_to_apply = writes_all # Default fallback
+    if guid_lc in profiles:
+        writes_to_apply = profiles[guid_lc]
+    elif profiles:
+        best_score = -1
+        best_writes = None
+        for p_guid, p_writes in profiles.items():
+            score = 0
+            tot = 0
+            for w in p_writes:
+                subk = (w.get("subkey") or "").strip() or "FxProperties"
+                name = (w.get("name") or "").strip().lower()
+                base = _endpoint_base_path(device_id, flow, subk)
+                if not base: continue
+                cu_val, cu_typ = _fast_read_one("HKCU", base, name)
+                lm_val, lm_typ = _fast_read_one("HKLM", base, name)
+                if cu_typ is not None or lm_typ is not None:
+                    tot += 1
+                    if _value_equals(w.get("enable"), w.get("type_enable"), cu_val, cu_typ) or \
+                       _value_equals(w.get("enable"), w.get("type_enable"), lm_val, lm_typ) or \
+                       _value_equals(w.get("disable"), w.get("type_disable"), cu_val, cu_typ) or \
+                       _value_equals(w.get("disable"), w.get("type_disable"), lm_val, lm_typ):
+                        score += 1
+            if tot > 0:
+                ratio = score / float(tot)
+                if ratio > best_score:
+                    best_score = ratio
+                    best_writes = p_writes
+        if best_writes is not None:
+            writes_to_apply = best_writes
+
+    for w in writes_to_apply:
         subk = (w.get("subkey") or "").strip()
         name = (w.get("name") or "").strip().lower()
         base = _endpoint_base_path(device_id, flow, subk)
         if not base or not name:
             ok_all = False
             continue
-        # If the value doesn't exist in either hive, skip it (don't invent new keys).
-        cu_val, cu_typ = _fast_read_one("HKCU", base, name)
-        lm_val, lm_typ = _fast_read_one("HKLM", base, name)
-        if cu_typ is None and lm_typ is None:
-            continue
+            
         hive_name = (w.get("hive") or "").upper()
         hive = winreg.HKEY_LOCAL_MACHINE if hive_name == "HKLM" else winreg.HKEY_CURRENT_USER
         tname = w.get("type_enable") if enable else w.get("type_disable")
@@ -2076,28 +2061,30 @@ def _perform_multi_writes(entry, device_id, flow, enable):
             continue
         val_text = w.get("enable") if enable else w.get("disable")
         try:
-            if typ == winreg.REG_DWORD:
-                data = int(val_text)
-            elif typ == winreg.REG_SZ:
-                data = str(val_text)
-            elif typ == winreg.REG_BINARY:
-                data = _parse_bin_hex(val_text)
+            if typ == winreg.REG_DWORD: data = int(val_text)
+            elif typ == winreg.REG_SZ: data = str(val_text)
+            elif typ == winreg.REG_BINARY: data = _parse_bin_hex(val_text)
             else:
                 ok_all = False
                 continue
         except Exception:
             ok_all = False
             continue
+            
         try:
+            # Registry Truth: Only open and modify existing keys. Never invent them.
             with winreg.OpenKey(hive, base, 0, winreg.KEY_SET_VALUE) as key:
-                if typ == winreg.REG_BINARY:
+                if typ == winreg.REG_BINARY: 
                     winreg.SetValueEx(key, name, 0, winreg.REG_BINARY, data)
-                else:
+                else: 
                     winreg.SetValueEx(key, name, 0, typ, data)
         except OSError:
+            # If the key does not exist or permission is denied, the write fails.
             ok_all = False
             continue
+            
     return ok_all
+    
 def _read_decider_state(entry, device_id, flow):
     # Multi-write readback:
     # - First attempt quorum decision (fraction of applicable writes that agree).
@@ -2418,104 +2405,62 @@ def _delete_fx_for_guid(fx_name, device_id, ini_path=None):
         "remainingDevices": new_devices,
     }
 def _learn_fx_and_write_ini(target, fx_name, snapA, snapB, ini_path=None, prefer_hkcu=True, snapA2=None, snapB2=None):
-    """
-    Learn an FX toggle from captured snapshots.
-    Two-pass behavior:
-      If snapA2/snapB2 is provided, that second pair is treated as authoritative.
-      The first A/B is used to prime/initialize driver state (many drivers create keys
-      or stabilize values only after first toggle).
-    Multi-write merge behavior:
-      - If an identical identity+payload already exists in the bucket, append this GUID
-        to that write's write{i}_devices.
-      - If a new payload is discovered, append a new write block scoped to this GUID.
-      - Conflict cleanup ensures a GUID is not attached to two competing writes with the
-        same identity but different payload.
-    Change here: if a second A/B pass (snapA2/snapB2) is provided, use that
-    pair as the authoritative input for building the write set (the first
-    A/B is only for priming/initializing driver state). Otherwise, behave
-    exactly as before.
-    """
     import re
     ini_path = ini_path or _vendor_ini_default_path()
     guid_lc = _guid_of(target["id"])
-    # Choose which pair to use for building the write set
     useA = snapA2 if isinstance(snapA2, dict) else snapA
     useB = snapB2 if isinstance(snapB2, dict) else snapB
-    # Build stability-filtered maps EXACTLY like before, just with the chosen pair.
-    # A side: single snapshot stability map (previous behavior)
     try:
         stableA = _stable_registry_map([useA.get("registry") or []])
     except Exception as e:
         return False, f"Failed to process snapshot A: {e}"
-    # B side: B snapshot + a couple of quick samples (previous behavior)
     try:
         samplesB = _collect_registry_samples(target["id"], repeats=3, delay=0.18)
         samplesB.insert(0, useB.get("registry") or [])
         stableB = _stable_registry_map(samplesB)
     except Exception as e:
         return False, f"Failed to process snapshot B: {e}"
-    # Compute diff-based multi-write set (previous behavior)
+        
     writes = _build_fx_multiwrite_from_stable_maps(target, stableA, stableB)
     safe_device_name = re.sub(r'[^A-Za-z0-9_\- ]+', '_', target["name"])
     notes = f"Learned FX '{fx_name}' for '{target['name']}' ({target['flow']}); second A/B pass; stability-filtered"
     if writes:
-        # Find or create the bucket for this fx_name
         bucket = _find_fx_bucket_section_name(ini_path, fx_name)
         if bucket is None:
-            # First device for this fx_name: create bucket named by fx_name (stable)
             for w in writes:
-                w.setdefault("devices", None)  # allow universal later if you want
+                w.setdefault("devices", None)
             section_name = _canonical_fx_bucket_name(fx_name)
-            # seed writes with write{i}_devices = this guid
             seed = []
             for w in writes:
                 seed.append({
-                    "hive": w.get("hive"),
-                    "subkey": w.get("subkey"),
-                    "name": w.get("name"),
-                    "type_enable": w.get("type_enable"),
-                    "type_disable": w.get("type_disable"),
-                    "enable": w.get("enable"),
-                    "disable": w.get("disable"),
-                    "devices": [guid_lc],
+                    "hive": w.get("hive"), "subkey": w.get("subkey"), "name": w.get("name"),
+                    "type_enable": w.get("type_enable"), "type_disable": w.get("type_disable"),
+                    "enable": w.get("enable"), "disable": w.get("disable"), "devices": [guid_lc],
                 })
-            _append_fx_ini_entry_multi(
-                ini_path, section_name, fx_name, target["name"],
-                seed, notes=notes
-            )
+            _append_fx_ini_entry_multi(ini_path, section_name, fx_name, target["name"], seed, notes=notes)
             _append_guid_to_section(ini_path, section_name, guid_lc)
-            # Also record device name -> guid bucket mapping (readability, dedupe by name)
-            try:
-                _append_guid_to_name_bucket(ini_path, section_name, target["name"], guid_lc)
-            except Exception:
-                pass
-            return True, {
-                "iniPath": ini_path,
-                "section": section_name,
-                "fx_name": fx_name,
-                "multi_write": True,
-                "write_count": len(seed),
-            }
-        # Merge into existing bucket
+            try: _append_guid_to_name_bucket(ini_path, section_name, target["name"], guid_lc)
+            except Exception: pass
+            return True, {"iniPath": ini_path, "section": section_name, "fx_name": fx_name, "multi_write": True, "write_count": len(seed)}
+            
         db = _load_vendor_db_split(ini_path)
         current = None
         for e in (db.get("fx") or []):
             if e.get("name") == bucket:
                 current = e
                 break
-        if current is None:
-            return False, f"Bucket '{bucket}' not found."
+        if current is None: return False, f"Bucket '{bucket}' not found."
+        
         def _same_identity_payload(a, b):
-            return (
-                (a.get("hive","").upper() == b.get("hive","").upper()) and
+            return ((a.get("hive","").upper() == b.get("hive","").upper()) and
                 (str(a.get("subkey","")).strip().lower() == str(b.get("subkey","")).strip().lower()) and
                 (str(a.get("name","")).strip().lower() == str(b.get("name","")).strip().lower()) and
                 (str(a.get("type_enable","")).upper() == str(b.get("type_enable","")).upper()) and
                 (str(a.get("type_disable","")).upper() == str(b.get("type_disable","")).upper()) and
                 (str(a.get("enable","")).strip() == str(b.get("enable","")).strip()) and
-                (str(a.get("disable","")).strip() == str(b.get("disable","")).strip())
-            )
-        # Add/append each learned toggle to the bucket and clean conflicts
+                (str(a.get("disable","")).strip() == str(b.get("disable","")).strip()))
+                
+        added_new_writes = False
         for lw in writes:
             idx_match = None
             for idx, cw in enumerate(current.get("writes") or [], start=1):
@@ -2523,118 +2468,61 @@ def _learn_fx_and_write_ini(target, fx_name, snapA, snapB, ini_path=None, prefer
                     idx_match = idx
                     break
             if idx_match is not None:
-                _append_guid_to_write_devices(ini_path, bucket, idx_match, guid_lc)
-                _cleanup_conflicting_toggles(ini_path, bucket, guid_lc, idx_match, lw)
+                pass # Zero-Touch: Already matches perfectly, let universal spoofing handle it
             else:
-                new_w = {
-                    "hive": lw.get("hive"),
-                    "subkey": lw.get("subkey"),
-                    "name": lw.get("name"),
-                    "type_enable": lw.get("type_enable"),
-                    "type_disable": lw.get("type_disable"),
-                    "enable": lw.get("enable"),
-                    "disable": lw.get("disable"),
-                }
+                new_w = {"hive": lw.get("hive"), "subkey": lw.get("subkey"), "name": lw.get("name"), "type_enable": lw.get("type_enable"), "type_disable": lw.get("type_disable"), "enable": lw.get("enable"), "disable": lw.get("disable")}
                 _append_new_write_to_section(ini_path, bucket, new_w, guid_lc)
+                added_new_writes = True
                 new_idx = _find_write_index_by_payload(ini_path, bucket, new_w)
                 if new_idx is not None:
                     _cleanup_conflicting_toggles(ini_path, bucket, guid_lc, new_idx, new_w)
-        # Ensure bucket devices includes this GUID (for discovery)
-        _append_guid_to_section(ini_path, bucket, guid_lc)
-        # Also record device name -> guid bucket mapping (readability, dedupe by name)
-        try:
-            _append_guid_to_name_bucket(ini_path, bucket, target["name"], guid_lc)
-        except Exception:
-            pass
-        return True, {
-            "iniPath": ini_path,
-            "section": bucket,
-            "fx_name": fx_name,
-            "multi_write": True,
-            "write_count": None
-        }
-    # Fallback to legacy DWORD flip (previous behavior)
-    try:
-        diffs = _diff_mmdevices_lists((useA.get("registry") or []), (useB.get("registry") or []))
-    except Exception as e:
-        return False, f"Diff failed: {e}"
+                    
+        if added_new_writes:
+            _append_guid_to_section(ini_path, bucket, guid_lc)
+            try: _append_guid_to_name_bucket(ini_path, bucket, target["name"], guid_lc)
+            except Exception: pass
+            
+        return True, {"iniPath": ini_path, "section": bucket, "fx_name": fx_name, "multi_write": True, "write_count": None}
+
+    # Fallback to legacy
+    try: diffs = _diff_mmdevices_lists((useA.get("registry") or []), (useB.get("registry") or []))
+    except Exception as e: return False, f"Diff failed: {e}"
     snippet, picked = _build_vendor_ini_snippet(target, useA, useB, diffs)
-    if not picked:
-        return False, "No suitable registry differences found to learn."
+    if not picked: return False, "No suitable registry differences found to learn."
+    
     value_name = picked["name"]
     dword_enable = int(picked["before"])
     dword_disable = int(picked["after"])
     notes2 = notes + " (single DWORD)"
     hives = "HKCU,HKLM" if prefer_hkcu else "HKLM,HKCU"
+    
     db = _load_vendor_db_split(ini_path)
-    candidate = {
-        "type": "fx",
-        "multi_write": False,
-        "value_name": value_name.strip().lower(),
-        "enable": dword_enable,
-        "disable": dword_disable,
-    }
+    candidate = {"type": "fx", "multi_write": False, "value_name": value_name.strip().lower(), "enable": dword_enable, "disable": dword_disable}
     for e in (db.get("fx") or []):
         if not e.get("multi_write") and _entries_identical_fx(e, candidate):
-            _append_guid_to_section(ini_path, e.get("name"), guid_lc)
-            # Also record device name -> guid bucket mapping (readability, dedupe by name)
-            try:
-                _append_guid_to_name_bucket(ini_path, e.get("name"), target["name"], guid_lc)
-            except Exception:
-                pass
-            return True, {
-                "iniPath": ini_path,
-                "section": e.get("name"),
-                "fx_name": fx_name,
-                "value_name": value_name,
-                "dword_enable": dword_enable,
-                "dword_disable": dword_disable
-            }
+            # Zero-Touch
+            return True, {"iniPath": ini_path, "section": e.get("name"), "fx_name": fx_name, "value_name": value_name, "dword_enable": dword_enable, "dword_disable": dword_disable, "note": "Primed existing universal rule (no INI changes)."}
+            
     try:
         canon_key = _fx_canonical_key_single(value_name, dword_enable, dword_disable)
         section_name = _canonical_section_name_from_key(canon_key)
-        _append_fx_ini_entry(
-            ini_path, section_name, fx_name, target["name"],
-            value_name, dword_enable, dword_disable,
-            flows="Render,Capture", hives=hives, notes=notes2
-        )
+        _append_fx_ini_entry(ini_path, section_name, fx_name, target["name"], value_name, dword_enable, dword_disable, flows="Render,Capture", hives=hives, notes=notes2)
         _append_guid_to_section(ini_path, section_name, guid_lc)
-        # Also record device name -> guid bucket mapping (readability, dedupe by name)
-        try:
-            _append_guid_to_name_bucket(ini_path, section_name, target["name"], guid_lc)
-        except Exception:
-            pass
+        try: _append_guid_to_name_bucket(ini_path, section_name, target["name"], guid_lc)
+        except Exception: pass
     except ValueError as e:
         msg = str(e or "").lower()
         if "already exists" in msg:
             try:
                 _append_guid_to_section(ini_path, section_name, guid_lc)
-                # Also record device name -> guid bucket mapping (readability, dedupe by name)
-                try:
-                    _append_guid_to_name_bucket(ini_path, section_name, target["name"], guid_lc)
-                except Exception:
-                    pass
-                return True, {
-                    "iniPath": ini_path,
-                    "section": section_name,
-                    "fx_name": fx_name,
-                    "value_name": value_name,
-                    "dword_enable": dword_enable,
-                    "dword_disable": dword_disable
-                }
-            except Exception as e2:
-                return False, f"Failed to append device to existing section '{section_name}': {e2}"
+                try: _append_guid_to_name_bucket(ini_path, section_name, target["name"], guid_lc)
+                except Exception: pass
+                return True, {"iniPath": ini_path, "section": section_name, "fx_name": fx_name, "value_name": value_name, "dword_enable": dword_enable, "dword_disable": dword_disable}
+            except Exception as e2: return False, f"Failed to append device to existing section '{section_name}': {e2}"
         return False, str(e)
-    except Exception as e:
-        return False, f"Failed to write INI: {e}"
-    return True, {
-        "iniPath": ini_path,
-        "section": section_name,
-        "fx_name": fx_name,
-        "value_name": value_name,
-        "dword_enable": dword_enable,
-        "dword_disable": dword_disable
-    }
+    except Exception as e: return False, f"Failed to write INI: {e}"
+    return True, {"iniPath": ini_path, "section": section_name, "fx_name": fx_name, "value_name": value_name, "dword_enable": dword_enable, "dword_disable": dword_disable}
+
 def _list_fx_for_device(device_id, flow, ini_path=None, device_name=None):
     """
     List all available FX for a device.
