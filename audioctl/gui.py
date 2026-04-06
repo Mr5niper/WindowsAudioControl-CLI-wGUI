@@ -58,8 +58,10 @@ def _minimize_console_window_best_effort():
         user32 = ctypes.windll.user32
         hwnd = kernel32.GetConsoleWindow()
         if hwnd:
-            SW_MINIMIZE = 6
-            user32.ShowWindow(hwnd, SW_MINIMIZE)
+            # 0 = SW_HIDE. This completely hides the background console
+            # instead of leaving a floating minimized block on your desktop.
+            SW_HIDE = 0
+            user32.ShowWindow(hwnd, SW_HIDE)
     except Exception:
         pass
 
@@ -417,7 +419,7 @@ def run_audioctl_interactive(args_list, prompt_patterns, expect_ok=True):
 class AudioGUI:
     def __init__(self, root):
         self.root = root
-        self.root.title("Mr5niper's Audio Control  v1.5.2.0  04-01-2026")
+        self.root.title("Mr5niper's Audio Control  v1.5.3.0  04-05-2026")
         # Style and theme
         style = ttk.Style(self.root)
         try:
