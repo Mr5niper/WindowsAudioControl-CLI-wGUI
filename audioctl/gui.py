@@ -1315,10 +1315,16 @@ class AudioGUI:
         try:
             from .logging_setup import _log, _dbg
             _dbg(f"GUI: on_set_default for id={d['id']} flow={d['flow']}")
+            
             if d["flow"] == "Render":
                 args = ["set-default", "--playback-id", d["id"], "--playback-role", "all"]
+                # Create friendly version for display
+                display_args = ["set-default", "--playback-name", f'"{d["name"]}"', "--index", str(d["_index"]), "--playback-role", "all"]
             else:
                 args = ["set-default", "--recording-id", d["id"], "--recording-role", "all"]
+                # Create friendly version for display
+                display_args = ["set-default", "--recording-name", f'"{d["name"]}"', "--index", str(d["_index"]), "--playback-role", "all"]
+            
             if not is_admin():
                 if not messagebox.askyesno(
                     "Administrator recommended",
@@ -1326,12 +1332,18 @@ class AudioGUI:
                 ):
                     _log(f"GUI action: set-default cancelled id={d['id']} name={d['name']}")
                     return
+            
             _log(f"GUI action: set-default start via CLI id={d['id']} name={d['name']} flow={d['flow']} roles=all")
+            
+            # Use original args (ID) for the actual functional change
             data = run_audioctl(args, capture_json=True, expect_ok=True)
+            
+            # Use display_args (Name/Index) for the user-facing print
             cmd_str = format_audioctl_cmd_for_display(
-                args, frozen=getattr(sys, "frozen", False), cross_shell=True
+                display_args, frozen=getattr(sys, "frozen", False), cross_shell=True
             )
             self.maybe_print_cli(cmd_str)
+            
             self.set_status(f"Set default ({d['flow']}) device: {d['name']} (all roles)")
             self.refresh_devices()
             _log(f"GUI action: set-default success via CLI id={d['id']} name={d['name']} flow={d['flow']}")
@@ -1355,6 +1367,8 @@ class AudioGUI:
                 _log(f"GUI action: set-volume cancelled id={d['id']} name={d['name']}")
                 return
             _log(f"GUI action: set-volume start via CLI id={d['id']} name={d['name']} flow={d['flow']} level={level}")
+            
+            # Functional Command (ID)
             args = [
                 "set-volume",
                 "--id", d["id"],
@@ -1362,11 +1376,24 @@ class AudioGUI:
                 "--level", str(level),
                 "--json",
             ]
+
+            # Display Command (Name/Index)
+            display_args = [
+                "set-volume",
+                "--name", f'"{d["name"]}"',
+                "--flow", d["flow"],
+                "--index", str(d["_index"]),
+                "--level", str(level),
+            ]
+
             rc, out, err = run_audioctl(args, capture_json=False, expect_ok=False)
+
+            # Generate the string from display_args instead of args
             cmd_str = format_audioctl_cmd_for_display(
-                args, frozen=getattr(sys, "frozen", False), cross_shell=True
+                display_args, frozen=getattr(sys, "frozen", False), cross_shell=True
             )
             self.maybe_print_cli(cmd_str)
+
             if rc == 0:
                 try:
                     info = json.loads(out or "{}")
@@ -1410,8 +1437,11 @@ class AudioGUI:
                     muted = data.get("muted", None)
             except Exception:
                 muted = None
+            
             # Decide target action
             target_flag = "--unmute" if muted is True else "--mute"
+            
+            # Functional Command (ID)
             args = [
                 "set-volume",
                 "--id", d["id"],
@@ -1419,11 +1449,24 @@ class AudioGUI:
                 target_flag,
                 "--json",
             ]
+
+            # Display Command (Name/Index)
+            display_args = [
+                "set-volume",
+                "--name", f'"{d["name"]}"',
+                "--flow", d["flow"],
+                "--index", str(d["_index"]),
+                target_flag,
+            ]
+
             rc, out, err = run_audioctl(args, capture_json=False, expect_ok=False)
+
+            # Update Print CLI to use the Friendly version
             cmd_str = format_audioctl_cmd_for_display(
-                args, frozen=getattr(sys, "frozen", False), cross_shell=True
+                display_args, frozen=getattr(sys, "frozen", False), cross_shell=True
             )
             self.maybe_print_cli(cmd_str)
+
             if rc == 0:
                 try:
                     info = json.loads(out or "{}")
@@ -1485,12 +1528,21 @@ class AudioGUI:
                     "Yes = Enable\nNo = Disable"
                 )
                 enable = bool(choice)
+
+            # Functional Command (ID)
             args = ["listen", "--id", d["id"], "--enable" if enable else "--disable", "--json"]
+
+            # Display Command (Name/Index)
+            display_args = ["listen", "--name", f'"{d["name"]}"', "--index", str(d["_index"]), "--enable" if enable else "--disable"]
+
             rc, out, err = run_audioctl(args, capture_json=False, expect_ok=False)
-            cmd = format_audioctl_cmd_for_display(
-                args, frozen=getattr(sys, "frozen", False), cross_shell=True
+
+            # Update Print CLI to use the Friendly version
+            cmd_str = format_audioctl_cmd_for_display(
+                display_args, frozen=getattr(sys, "frozen", False), cross_shell=True
             )
-            self.maybe_print_cli(cmd)
+            self.maybe_print_cli(cmd_str)
+
             if rc == 0:
                 try:
                     info = json.loads(out or "{}")
@@ -1556,17 +1608,32 @@ class AudioGUI:
                     "Yes = Enable\nNo = Disable"
                 )
                 enable = bool(choice)
+
+            # Functional Command (ID)
             args = [
                 "enhancements",
                 "--id", d["id"],
                 "--flow", d["flow"],
                 "--enable" if enable else "--disable",
             ]
+
+            # Display Command (Name/Index)
+            display_args = [
+                "enhancements",
+                "--name", f'"{d["name"]}"',
+                "--flow", d["flow"],
+                "--index", str(d["_index"]),
+                "--enable" if enable else "--disable",
+            ]
+
             data = run_audioctl(args, capture_json=True, expect_ok=False)
+
+            # Generate string from display_args for the user-facing print
             cmd_str = format_audioctl_cmd_for_display(
-                args, frozen=getattr(sys, "frozen", False), cross_shell=True
+                display_args, frozen=getattr(sys, "frozen", False), cross_shell=True
             )
             self.maybe_print_cli(cmd_str)
+
             enh = data.get("enhancementsSet")
             if enh:
                 state = enh.get("enabled", enable)
@@ -2290,6 +2357,8 @@ class AudioGUI:
                 enable = False
             else:
                 enable = True
+            
+            # Functional Command (ID)
             args = [
                 "enhancements",
                 "--id", d["id"],
@@ -2297,11 +2366,25 @@ class AudioGUI:
                 "--enable-fx" if enable else "--disable-fx",
                 fx_name,
             ]
+
+            # Display Command (Name/Index)
+            display_args = [
+                "enhancements",
+                "--name", f'"{d["name"]}"',
+                "--flow", d["flow"],
+                "--index", str(d["_index"]),
+                "--enable-fx" if enable else "--disable-fx",
+                fx_name,
+            ]
+
             data = run_audioctl(args, capture_json=True, expect_ok=False)
+            
+            # Update Print CLI to use the Friendly version
             cmd_str = format_audioctl_cmd_for_display(
-                args, frozen=getattr(sys, "frozen", False), cross_shell=True
+                display_args, frozen=getattr(sys, "frozen", False), cross_shell=True
             )
             self.maybe_print_cli(cmd_str)
+
             fx_set = data.get("fxSet")
             if fx_set:
                 state = fx_set.get("enabled", enable)
