@@ -1322,8 +1322,8 @@ class AudioGUI:
                 display_args = ["set-default", "--playback-name", f'"{d["name"]}"', "--index", str(d["_index"]), "--playback-role", "all"]
             else:
                 args = ["set-default", "--recording-id", d["id"], "--recording-role", "all"]
-                # Create friendly version for display
-                display_args = ["set-default", "--recording-name", f'"{d["name"]}"', "--index", str(d["_index"]), "--playback-role", "all"]
+                # Verify this line uses --recording-name and --recording-role
+                display_args = ["set-default", "--recording-name", f'"{d["name"]}"', "--index", str(d["_index"]), "--recording-role", "all"]
             
             if not is_admin():
                 if not messagebox.askyesno(
