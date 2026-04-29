@@ -1319,11 +1319,11 @@ class AudioGUI:
             if d["flow"] == "Render":
                 args = ["set-default", "--playback-id", d["id"], "--playback-role", "all"]
                 # Create friendly version for display
-                display_args = ["set-default", "--playback-name", f'"{d["name"]}"', "--index", str(d["_index"]), "--playback-role", "all"]
+                display_args = ["set-default", "--playback-name", d["name"], "--index", str(d["_index"]), "--playback-role", "all"]
             else:
                 args = ["set-default", "--recording-id", d["id"], "--recording-role", "all"]
                 # Verify this line uses --recording-name and --recording-role
-                display_args = ["set-default", "--recording-name", f'"{d["name"]}"', "--index", str(d["_index"]), "--recording-role", "all"]
+                display_args = ["set-default", "--recording-name", d["name"], "--index", str(d["_index"]), "--recording-role", "all"]
             
             if not is_admin():
                 if not messagebox.askyesno(
@@ -1380,7 +1380,7 @@ class AudioGUI:
             # Display Command (Name/Index)
             display_args = [
                 "set-volume",
-                "--name", f'"{d["name"]}"',
+                "--name", d["name"],
                 "--flow", d["flow"],
                 "--index", str(d["_index"]),
                 "--level", str(level),
@@ -1453,7 +1453,7 @@ class AudioGUI:
             # Display Command (Name/Index)
             display_args = [
                 "set-volume",
-                "--name", f'"{d["name"]}"',
+                "--name", d["name"],
                 "--flow", d["flow"],
                 "--index", str(d["_index"]),
                 target_flag,
@@ -1533,7 +1533,7 @@ class AudioGUI:
             args = ["listen", "--id", d["id"], "--enable" if enable else "--disable", "--json"]
 
             # Display Command (Name/Index)
-            display_args = ["listen", "--name", f'"{d["name"]}"', "--index", str(d["_index"]), "--enable" if enable else "--disable"]
+            display_args = ["listen", "--name", d["name"], "--index", str(d["_index"]), "--enable" if enable else "--disable"]
 
             rc, out, err = run_audioctl(args, capture_json=False, expect_ok=False)
 
@@ -1620,7 +1620,7 @@ class AudioGUI:
             # Display Command (Name/Index)
             display_args = [
                 "enhancements",
-                "--name", f'"{d["name"]}"',
+                "--name", d["name"],
                 "--flow", d["flow"],
                 "--index", str(d["_index"]),
                 "--enable" if enable else "--disable",
@@ -2370,7 +2370,7 @@ class AudioGUI:
             # Display Command (Name/Index)
             display_args = [
                 "enhancements",
-                "--name", f'"{d["name"]}"',
+                "--name", d["name"],
                 "--flow", d["flow"],
                 "--index", str(d["_index"]),
                 "--enable-fx" if enable else "--disable-fx",
