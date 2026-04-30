@@ -1,8 +1,8 @@
-# ENGINEERING GUIDE (v1.5.3.0)
+# ENGINEERING GUIDE (v1.5.4.0)
 **audioctl - Windows Audio Control CLI + GUI (PyInstaller EXE)**
 **Audience:** Engineers debugging, maintaining, or extending the codebase  
 **Platforms:** Windows 10/11  
-**Version:** 1.5.3.0 
+**Version:** 1.5.4.0 
 **Build contract:** **Python 3.13.12 required**, **PyInstaller required**
 
 This document is intentionally **not** a usage manual. The README covers commands, examples, and screenshots.  
@@ -36,7 +36,7 @@ The *real* entrypoint is always:
 - `audioctl.cli.main()`
 
 ### 1.4 Build artifacts / metadata
-- Windows version info comes from `version.txt` (filevers/prodvers 1.5.3.0).
+- Windows version info comes from version.txt (filevers/prodvers 1.5.4.0).
 - Icon `audio.ico` is embedded and also shipped as data.
 
 ---
@@ -59,10 +59,11 @@ Logic is strictly partitioned to prevent COM threading deadlock and maintain JSO
 
 * **audioctl/cli.py**
     This module manages argument parsing, exit code logic, and JSON serialization. It is the "backend" for the GUI.
-    *   **New in v1.5.1.2:** Handles conditional JSON payload generation for `listen` commands to preserve backward compatibility while exposing routing info.
+    *   **New Starting in v1.5.1.2:** Handles conditional JSON payload generation for `listen` commands to preserve backward compatibility while exposing routing info.
 
 * **audioctl/gui.py**
-    This Tkinter interface operates as a pure client that executes the CLI via subprocess and parses JSON output.
+  This Tkinter interface operates as a pure client that executes the CLI via subprocess and parses JSON output.
+    *   **Update v1.5.4.0:** Updated "Print CLI commands" logic to use device Names and Indices for echoed text to improve human-readability.
     *   **Console Mirror:** Implements a `Tee` to redirect stdout/stderr into an embedded `ScrolledText` widget.
     *   **Window Logic:** Manages auto-minimization of the external console on launch to reduce clutter.
 
@@ -97,7 +98,7 @@ The GUI depends on these commands and expects these keys (minimum):
 - `list --json` → `{"devices":[...]}` and devices include `id,name,flow,state,isDefault` plus `guiIndex` tagging behavior.
 - `get-device-state` → includes `volume,muted,listenEnabled,enhancementsEnabled,availableFX`.
 - `enhancements --list-fx --json` shape (GUI uses it for menus in some paths).
-- `listen` payload contract (v1.5.1.2 update):
+- `listen` payload contract:
     - Standard keys: `id`, `name`, `enabled`.
     - **Conditional keys:** `playbackTargetId` and `playbackTargetName` are ONLY present if requested via arguments (`--playback-target-id` etc).
     - If you add keys unconditionally, you risk breaking parsers expecting the legacy shape.
@@ -289,7 +290,7 @@ Drivers may store toggles under either:
 - PROPERTYKEY fmtid `{E4870E26-3CC5-4CD2-BA46-CA0A9A70ED04}`, pid `2`
 - Semantics: 0 enhancements ON, 1 enhancements OFF
 
-In v1.5.x:
+In v1.5.x.x:
 - used for diagnostics/discovery/learn tooling
 - **not** used as runtime toggle mechanism (runtime is vendor-only)
 
