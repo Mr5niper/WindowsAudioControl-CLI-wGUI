@@ -1,6 +1,12 @@
 # AUDIOCTL.PY CHANGELOG
+## v1.5.4.0 - [current]
 
-## v1.5.3.0 - [current]
+### GUI & CLI Mirroring
+Friendly Command Echoing: Updated the "Print CLI commands" feature to use device Names and Indices (matching the GUI list order) instead of internal GUID strings. This ensures echoed commands are human-readable and can be copy-pasted directly into a terminal.
+
+---
+
+## v1.5.3.0
 
 ### Vendor Engine Upgrades
 - **Profile-Aware Universal Spoofing:** Upgraded the multi-write FX engine to intelligently group writes into distinct device "profiles". When a new device is discovered, the engine scores the live registry to find the best-fit profile and strictly applies only the relevant writes.
