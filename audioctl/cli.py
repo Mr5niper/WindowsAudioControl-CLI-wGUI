@@ -67,6 +67,106 @@ from .vendor_db import (
     _fast_read_vendor_entry_state,
 )
 
+class AudioCtlArgumentParser(argparse.ArgumentParser):
+    HIDDEN_COMMANDS = {"vendor-ini-append"}
+
+    def format_help(self):
+        lines = []
+
+        title = self.description or "Windows Audio Control CLI"
+        lines.append(title)
+        lines.append("")
+
+        positionals = []
+        options = []
+        subparsers_action = None
+
+        for action in self._actions:
+            if isinstance(action, argparse._SubParsersAction):
+                subparsers_action = action
+            elif action.option_strings:
+                if action.help is not argparse.SUPPRESS:
+                    options.append(action)
+            else:
+                if action.help is not argparse.SUPPRESS:
+                    positionals.append(action)
+
+        # positional arguments / commands
+        if subparsers_action or positionals:
+            lines.append("positional arguments:")
+
+            if subparsers_action:
+                lines.append("  COMMAND")
+
+                help_map = {}
+                for choice_action in getattr(subparsers_action, "_choices_actions", []):
+                    help_map[choice_action.dest] = choice_action.help or ""
+
+                visible = []
+                for name, _sp in subparsers_action.choices.items():
+                    if name in self.HIDDEN_COMMANDS:
+                        continue
+                    visible.append((name, help_map.get(name, "")))
+
+                cmd_col_width = 22
+                if visible:
+                    cmd_col_width = max(cmd_col_width, max(len(name) for name, _ in visible) + 2)
+
+                for name, help_text in visible:
+                    lines.append(f"    {name.ljust(cmd_col_width)} {help_text}")
+
+            for action in positionals:
+                label = action.metavar or action.dest.upper()
+                help_text = action.help or ""
+                lines.append(f"  {label}")
+                if help_text:
+                    lines.append(f"    {help_text}")
+
+            lines.append("")
+
+        # options
+        if options:
+            lines.append("options:")
+
+            rows = []
+            for action in options:
+                flags = ", ".join(action.option_strings)
+
+                metavar = ""
+                if action.nargs != 0:
+                    if action.metavar:
+                        metavar = str(action.metavar)
+                    elif action.dest != "help":
+                        metavar = str(action.dest).upper()
+
+                help_text = action.help or ""
+                rows.append((flags, metavar, help_text))
+
+            flag_col_width = 24
+            meta_col_width = 16
+
+            if rows:
+                flag_col_width = max(flag_col_width, max(len(flags) for flags, _, _ in rows) + 2)
+                meta_col_width = max(meta_col_width, max(len(meta) for _, meta, _ in rows) + 2)
+
+            for flags, metavar, help_text in rows:
+                if metavar:
+                    lines.append(
+                        f"  {flags.ljust(flag_col_width)}"
+                        f"{metavar.ljust(meta_col_width)}"
+                        f"{help_text}"
+                    )
+                else:
+                    lines.append(
+                        f"  {flags.ljust(flag_col_width)}"
+                        f"{''.ljust(meta_col_width)}"
+                        f"{help_text}"
+                    )
+
+            lines.append("")
+
+        return "\n".join(lines)
+
 def _resolve_standard_target(args, flow_forced=None):
     """
     Standard logic to find a SINGLE target device while respecting global GUI indices.
@@ -1202,64 +1302,83 @@ def build_parser():
     #   - Enhancements vendor control + FX subsystem (enhancements, get-enhancements, get-device-state)
     #   - diagnostics and discovery (diag-sysfx, diag-mmdevices, discover-enhancements)
     #   - internal helper for elevation (vendor-ini-append)
-    p = argparse.ArgumentParser(prog="audioctl", description="Windows audio control CLI (pycaw-based)")
-    sub = p.add_subparsers(dest="cmd", required=True)
+    p = AudioCtlArgumentParser(
+        prog="audioctl",
+        description="Windows Audio Control CLI"
+    )
+    sub = p.add_subparsers(
+        dest="cmd",
+        required=True,
+        metavar="COMMAND",
+        parser_class=AudioCtlArgumentParser
+    )
     # --- list ---
     p_list = sub.add_parser("list", help="List devices")
     p_list.add_argument("--all", action="store_true", help="Include disabled/disconnected")
-    p_list.add_argument("--json", action="store_true")
+    p_list.add_argument("--json", action="store_true", help="Output device list as JSON")
     p_list.set_defaults(func=cmd_list)
     # --- set-default ---
     p_sd = sub.add_parser("set-default", help="Set default playback/recording devices (Admin might be required)")
-    p_sd.add_argument("--playback-id")
-    p_sd.add_argument("--playback-name")
-    p_sd.add_argument("--playback-role", choices=list(ROLES.keys()), default="all")
+    p_sd.add_argument("--playback-id", help="Exact device ID for the playback device")
+    p_sd.add_argument("--playback-name", help="Substring or regex of the playback device name")
+    p_sd.add_argument(
+        "--playback-role",
+        choices=list(ROLES.keys()),
+        default="all",
+        help="Role to set for playback: console, multimedia, communications, or all"
+    )
     p_sd.add_argument("--playback-flow", choices=["Render"], help=argparse.SUPPRESS)
-    p_sd.add_argument("--recording-id")
-    p_sd.add_argument("--recording-name")
-    p_sd.add_argument("--recording-role", choices=list(ROLES.keys()), default="communications")
+    p_sd.add_argument("--recording-id", help="Exact device ID for the recording device")
+    p_sd.add_argument("--recording-name", help="Substring or regex of the recording device name")
+    p_sd.add_argument(
+        "--recording-role",
+        choices=list(ROLES.keys()),
+        default="communications",
+        help="Role to set for recording: console, multimedia, communications, or all"
+    )
     p_sd.add_argument("--recording-flow", choices=["Capture"], help=argparse.SUPPRESS)
-    p_sd.add_argument("--index", type=int)
-    p_sd.add_argument("--regex", action="store_true")
+    p_sd.add_argument("--index", type=int, help="GUI-order index among matches")
+    p_sd.add_argument("--regex", action="store_true", help="Treat name filters as regular expressions")
     p_sd.set_defaults(func=cmd_set_default)
     # --- volume/mute ---
     p_sv = sub.add_parser("set-volume", help="Set endpoint volume (render or capture) or mute/unmute")
-    p_sv.add_argument("--id")
-    p_sv.add_argument("--name")
+    p_sv.add_argument("--id", help="Exact device ID")
+    p_sv.add_argument("--name", help="Substring or regex of the device name")
     p_sv.add_argument("--flow", choices=["Render", "Capture"], help="Optional filter to disambiguate")
     p_sv.add_argument("--level", type=int, help="0-100 (for volume)")
     p_sv.add_argument("--mute", action="store_true", help="Mute the device")
     p_sv.add_argument("--unmute", action="store_true", help="Unmute the device")
-    p_sv.add_argument("--index", type=int)
-    p_sv.add_argument("--regex", action="store_true")
+    p_sv.add_argument("--index", type=int, help="GUI-order index among matches")
+    p_sv.add_argument("--regex", action="store_true", help="Treat name filters as regular expressions")
     p_sv.add_argument("--json", action="store_true", help="Output JSON on success (default) and minimized text on error")
     p_sv.set_defaults(func=cmd_set_volume)
     p_gv = sub.add_parser("get-volume", help="Get endpoint volume and mute state (render or capture)")
-    p_gv.add_argument("--id")
-    p_gv.add_argument("--name")
+    p_gv.add_argument("--id", help="Exact device ID")
+    p_gv.add_argument("--name", help="Substring or regex of the device name")
     p_gv.add_argument("--flow", choices=["Render", "Capture"], help="Optional filter to disambiguate")
-    p_gv.add_argument("--index", type=int)
-    p_gv.add_argument("--regex", action="store_true")
+    p_gv.add_argument("--index", type=int, help="GUI-order index among matches")
+    p_gv.add_argument("--regex", action="store_true", help="Treat name filters as regular expressions")
     p_gv.set_defaults(func=cmd_get_volume)
     # --- listen ---
     p_ls = sub.add_parser("listen", help="Enable/disable 'Listen to this device' (capture only)")
     p_ls.add_argument("--id", help="Device ID for the capture device.")
-    p_ls.add_argument("--name", help="Substring of the device name for the capture device.")
+    p_ls.add_argument("--name", help="Substring or regex of the capture device name")
     p_ls.add_argument("--enable", action="store_true", help="Enable 'Listen to this device'.")
     p_ls.add_argument("--disable", action="store_true", help="Disable 'Listen to this device'.")
     p_ls.add_argument("--playback-target-id", nargs='?', const='', default=None, help="Optional: Render endpoint ID to play through. Use without a value for 'Default Playback Device'.")
     p_ls.add_argument("--playback-target-name", nargs='?', const='', default=None, help="Optional: Render endpoint name to play through. Use without a value for 'Default Playback Device'.")
-    p_ls.add_argument("--index", type=int)
-    p_ls.add_argument("--regex", action="store_true")
-    p_ls.add_argument("--json", action="store_true", help="Output JSON on success (default) and minimized text on error")
+    p_ls.add_argument("--index", type=int, help="GUI-order index among matches")
+    p_ls.add_argument("--regex", action="store_true", help="Treat name filters as regular expressions")
+    p_ls.add_argument("--json", action="store_true", help="Output JSON on success (default) and minimized text on error")  
     p_ls.set_defaults(func=cmd_listen)
+    # --- get-listen ---  
     p_gl = sub.add_parser("get-listen", help="Get 'Listen to this device' enabled/disabled state for a capture device")
-    p_gl.add_argument("--id", help="Device ID for the capture device.")
-    p_gl.add_argument("--name", help="Substring or regex of the device name")
-    p_gl.add_argument("--index", type=int)
-    p_gl.add_argument("--regex", action="store_true")
-    p_gl.add_argument("--playback-target-id", nargs='?', const='', help="Request current playback routing target ID")
-    p_gl.add_argument("--playback-target-name", nargs='?', const='', help="Request current playback routing target name")
+    p_gl.add_argument("--id", help="Exact device ID for the capture device")
+    p_gl.add_argument("--name", help="Substring or regex of the capture device name")
+    p_gl.add_argument("--index", type=int, help="GUI-order index among matches")
+    p_gl.add_argument("--regex", action="store_true", help="Treat name filters as regular expressions")
+    p_gl.add_argument("--playback-target-id", nargs='?', const='', help="Also report the current playback routing target ID")
+    p_gl.add_argument("--playback-target-name", nargs='?', const='', help="Also report the current playback routing target name")
     p_gl.set_defaults(func=cmd_get_listen)
     # --- enhancements / FX subsystem ---
     p_fx = sub.add_parser("enhancements", help="Enable/disable 'Audio Enhancements' (SysFX) on a device")
@@ -1269,7 +1388,7 @@ def build_parser():
     p_fx.add_argument("--enable", action="store_true", help="Enable audio enhancements")
     p_fx.add_argument("--disable", action="store_true", help="Disable audio enhancements")
     p_fx.add_argument("--index", type=int, help="GUI-order index among matches")
-    p_fx.add_argument("--regex", action="store_true")
+    p_fx.add_argument("--regex", action="store_true", help="Treat name or FX filters as regular expressions")
     p_fx.add_argument("--prefer-hklm", action="store_true",
                       help="For learned INI toggles that write registry values, prefer HKLM ordering (Admin typically required).")
     p_fx.add_argument("--vendor-ini", help="Path to vendor_toggles.ini (default: next to the EXE).")
@@ -1294,21 +1413,21 @@ def build_parser():
         "get-enhancements",
         help="Get current enhancements enabled/disabled state for a device (vendor-only)"
     )
-    p_ge.add_argument("--id")
-    p_ge.add_argument("--name")
-    p_ge.add_argument("--flow", choices=["Render", "Capture"])
-    p_ge.add_argument("--index", type=int)
-    p_ge.add_argument("--regex", action="store_true")
+    p_ge.add_argument("--id", help="Exact device ID")
+    p_ge.add_argument("--name", help="Substring or regex of the device name")
+    p_ge.add_argument("--flow", choices=["Render", "Capture"], help="Optional filter to disambiguate")
+    p_ge.add_argument("--index", type=int, help="GUI-order index among matches")
+    p_ge.add_argument("--regex", action="store_true", help="Treat name filters as regular expressions")
     p_ge.set_defaults(func=cmd_get_enhancements)
     p_gds = sub.add_parser(
         "get-device-state",
         help="Get current state for a device (volume, mute, listen, enhancements, FX) for GUI"
     )
-    p_gds.add_argument("--id")
-    p_gds.add_argument("--name")
-    p_gds.add_argument("--flow", choices=["Render", "Capture"])
-    p_gds.add_argument("--index", type=int)
-    p_gds.add_argument("--regex", action="store_true")
+    p_gds.add_argument("--id", help="Exact device ID")
+    p_gds.add_argument("--name", help="Substring or regex of the device name")
+    p_gds.add_argument("--flow", choices=["Render", "Capture"], help="Optional filter to disambiguate")
+    p_gds.add_argument("--index", type=int, help="GUI-order index among matches")
+    p_gds.add_argument("--regex", action="store_true", help="Treat name filters as regular expressions")
     p_gds.add_argument("--vendor-ini", help="Optional vendor INI path for FX lookup")
     p_gds.set_defaults(func=cmd_get_device_state)
     # --- diagnostics ---
@@ -1316,37 +1435,37 @@ def build_parser():
         "diag-sysfx",
         help="Dump live Enhancements state (COM, PropertyStore, vendor toggles)"
     )
-    p_dx.add_argument("--id")
-    p_dx.add_argument("--name")
-    p_dx.add_argument("--flow", choices=["Render", "Capture"])
-    p_dx.add_argument("--index", type=int)
-    p_dx.add_argument("--regex", action="store_true")
+    p_dx.add_argument("--id", help="Exact device ID")
+    p_dx.add_argument("--name", help="Substring or regex of the device name")
+    p_dx.add_argument("--flow", choices=["Render", "Capture"], help="Optional filter to disambiguate")
+    p_dx.add_argument("--index", type=int, help="GUI-order index among matches")
+    p_dx.add_argument("--regex", action="store_true", help="Treat name filters as regular expressions")
     p_dx.set_defaults(func=cmd_diag_sysfx)
     p_dm = sub.add_parser("diag-mmdevices", help="Dump all MMDevices values for an endpoint (debug)")
-    p_dm.add_argument("--id")
-    p_dm.add_argument("--name")
-    p_dm.add_argument("--flow", choices=["Render", "Capture"])
-    p_dm.add_argument("--index", type=int)
-    p_dm.add_argument("--regex", action="store_true")
+    p_dm.add_argument("--id", help="Exact device ID")
+    p_dm.add_argument("--name", help="Substring or regex of the device name")
+    p_dm.add_argument("--flow", choices=["Render", "Capture"], help="Optional filter to disambiguate")
+    p_dm.add_argument("--index", type=int, help="GUI-order index among matches")
+    p_dm.add_argument("--regex", action="store_true", help="Treat name filters as regular expressions")
     p_dm.set_defaults(func=cmd_diag_mmdevices)
     # --- discovery (interactive report generation) ---
     p_learn = sub.add_parser("discover-enhancements", help="Interactively learn how Enhancements toggles for a device")
-    p_learn.add_argument("--id")
-    p_learn.add_argument("--name")
-    p_learn.add_argument("--flow", choices=["Render", "Capture"])
-    p_learn.add_argument("--index", type=int)
-    p_learn.add_argument("--regex", action="store_true")
+    p_learn.add_argument("--id", help="Exact device ID")
+    p_learn.add_argument("--name", help="Substring or regex of the device name")
+    p_learn.add_argument("--flow", choices=["Render", "Capture"], help="Optional filter to disambiguate")
+    p_learn.add_argument("--index", type=int, help="GUI-order index among matches")
+    p_learn.add_argument("--regex", action="store_true", help="Treat name filters as regular expressions")
     p_learn.add_argument("--output-dir", help="Where to write the TXT/JSON report (default: current directory)")
     p_learn.add_argument("--ini-snippet", help="Write a suggested vendor INI section to this path (append).")
     p_learn.set_defaults(func=cmd_discover_enhancements)
     # --- wait ---
     p_w = sub.add_parser("wait", help="Wait for device to appear")
-    p_w.add_argument("--id")
-    p_w.add_argument("--name")
-    p_w.add_argument("--flow", choices=["Render", "Capture"])
-    p_w.add_argument("--timeout", type=int, default=30)
-    p_w.add_argument("--index", type=int)
-    p_w.add_argument("--regex", action="store_true")
+    p_w.add_argument("--id", help="Exact device ID")
+    p_w.add_argument("--name", help="Substring or regex of the device name")
+    p_w.add_argument("--flow", choices=["Render", "Capture"], help="Optional filter to disambiguate")
+    p_w.add_argument("--timeout", type=int, default=30, help="Seconds to wait before timing out")
+    p_w.add_argument("--index", type=int, help="GUI-order index among matches")
+    p_w.add_argument("--regex", action="store_true", help="Treat name filters as regular expressions")
     p_w.set_defaults(func=cmd_wait)
     # Hidden helper: elevated INI append (used by GUI to write into Program Files)
     # The GUI can write a "work order" JSON file and then run this subcommand via
