@@ -1,5 +1,23 @@
 # AUDIOCTL.PY CHANGELOG
-## v1.5.4.0 - [current]
+## v1.5.4.1 - [current]
+### CLI Help & UX
+- **Unified Help Formatting:** Reworked CLI help output to use a cleaner, more readable layout across the root command and all subcommands.
+  - Replaced the default argparse `{cmd1,cmd2,...}` display with a simplified `COMMAND` listing.
+  - Standardized section spacing and alignment for improved readability.
+  - Widened the first column so command names and option flags line up more cleanly.
+
+- **Hidden Internal Helper Command:** Removed the internal `vendor-ini-append` helper from user-facing help output.
+  - This command remains available internally for GUI/elevated workflows.
+  - Prevents the helper from appearing as if it were a supported public command.
+
+### Fixes
+- **Ghost Command Help Output:** Fixed the issue where `audioctl -h` displayed the internal `vendor-ini-append` helper in the public subcommand list.
+- **Argparse Suppression Artifact:** Eliminated the confusing `==SUPPRESS==` text that appeared beside the hidden internal helper in help output.
+- **Consistent Help Presentation:** Help output now uses the same cleaner listing style and spacing throughout the CLI.
+
+---
+
+## v1.5.4.0
 
 ### GUI & CLI Mirroring
 Friendly Command Echoing: Updated the "Print CLI commands" feature to use device Names and Indices (matching the GUI list order) instead of internal GUID strings. This ensures echoed commands are human-readable and can be copy-pasted directly into a terminal.
