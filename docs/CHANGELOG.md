@@ -1,12 +1,4 @@
 # AUDIOCTL.PY CHANGELOG
-## v1.5.4.1 - [current]
-
-### CLI Improvements & Bug Fixes
-* **Resolved "Ghost" Subcommand in Help Output:** Fixed an issue where the internal `vendor-ini-append` helper appeared in the `audioctl -h` list as `==SUPPRESS==`.
-* **Subcommand Invisibility:** Switched from `argparse.SUPPRESS` to `add_help=False` for internal worker commands. This ensures that background tasks used by the "Learn" function remain functional but are completely hidden from the user-facing help menu.
-
----
-
 ## v1.5.4.0
 
 ### GUI & CLI Mirroring
