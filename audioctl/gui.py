@@ -419,7 +419,7 @@ def run_audioctl_interactive(args_list, prompt_patterns, expect_ok=True):
 class AudioGUI:
     def __init__(self, root):
         self.root = root
-        self.root.title("Mr5niper's Audio Control  v1.5.4.0  04-29-2026")
+        self.root.title("Mr5niper's Audio Control  v1.5.4.1  05-09-2026")
         # Style and theme
         style = ttk.Style(self.root)
         try:
