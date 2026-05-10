@@ -67,6 +67,90 @@ from .vendor_db import (
     _fast_read_vendor_entry_state,
 )
 
+class AudioCtlArgumentParser(argparse.ArgumentParser):
+    HIDDEN_COMMANDS = {"vendor-ini-append"}
+
+    def format_help(self):
+        lines = []
+
+        title = self.description or "Windows Audio Control CLI"
+        lines.append(title)
+        lines.append("")
+
+        positionals = []
+        options = []
+        subparsers_action = None
+
+        for action in self._actions:
+            if isinstance(action, argparse._SubParsersAction):
+                subparsers_action = action
+            elif action.option_strings:
+                if action.help is not argparse.SUPPRESS:
+                    options.append(action)
+            else:
+                if action.help is not argparse.SUPPRESS:
+                    positionals.append(action)
+
+        # Positional arguments / subcommands
+        if subparsers_action or positionals:
+            lines.append("positional arguments:")
+
+            if subparsers_action:
+                lines.append("  COMMAND")
+
+                help_map = {}
+                for choice_action in getattr(subparsers_action, "_choices_actions", []):
+                    help_map[choice_action.dest] = choice_action.help or ""
+
+                visible = []
+                for name, sp in subparsers_action.choices.items():
+                    if name in self.HIDDEN_COMMANDS:
+                        continue
+                    visible.append((name, help_map.get(name, "")))
+
+                col_width = 22
+                if visible:
+                    col_width = max(col_width, max(len(name) for name, _ in visible) + 2)
+
+                for name, help_text in visible:
+                    lines.append(f"    {name.ljust(col_width)} {help_text}")
+
+            for action in positionals:
+                label = action.metavar or action.dest.upper()
+                help_text = action.help or ""
+                lines.append(f"  {label}")
+                if help_text:
+                    lines.append(f"    {help_text}")
+
+            lines.append("")
+
+        # Options
+        if options:
+            lines.append("options:")
+
+            rows = []
+            for action in options:
+                left = ", ".join(action.option_strings)
+
+                if action.nargs != 0:
+                    if action.metavar:
+                        left += f" {action.metavar}"
+                    elif action.dest != "help":
+                        left += f" {action.dest.upper()}"
+
+                rows.append((left, action.help or ""))
+
+            col_width = 26
+            if rows:
+                col_width = max(col_width, max(len(left) for left, _ in rows) + 2)
+
+            for left, right in rows:
+                lines.append(f"  {left.ljust(col_width)} {right}")
+
+            lines.append("")
+
+        return "\n".join(lines)
+
 def _resolve_standard_target(args, flow_forced=None):
     """
     Standard logic to find a SINGLE target device while respecting global GUI indices.
@@ -1202,8 +1286,16 @@ def build_parser():
     #   - Enhancements vendor control + FX subsystem (enhancements, get-enhancements, get-device-state)
     #   - diagnostics and discovery (diag-sysfx, diag-mmdevices, discover-enhancements)
     #   - internal helper for elevation (vendor-ini-append)
-    p = argparse.ArgumentParser(prog="audioctl", description="Windows audio control CLI (pycaw-based)")
-    sub = p.add_subparsers(dest="cmd", required=True)
+    p = AudioCtlArgumentParser(
+        prog="audioctl",
+        description="Windows Audio Control CLI"
+    )
+    sub = p.add_subparsers(
+        dest="cmd",
+        required=True,
+        metavar="COMMAND",
+        parser_class=AudioCtlArgumentParser
+    )
     # --- list ---
     p_list = sub.add_parser("list", help="List devices")
     p_list.add_argument("--all", action="store_true", help="Include disabled/disconnected")
