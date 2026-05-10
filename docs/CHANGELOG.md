@@ -4,16 +4,25 @@
 - **Unified Help Formatting:** Reworked CLI help output to use a cleaner, more readable layout across the root command and all subcommands.
   - Replaced the default argparse `{cmd1,cmd2,...}` display with a simplified `COMMAND` listing.
   - Standardized section spacing and alignment for improved readability.
-  - Widened the first column so command names and option flags line up more cleanly.
+  - Applied the same custom help style to both the root parser and all subcommands [1].
+
+- **Aligned Multi-Column Help Output:** Improved option formatting so help output is easier to scan.
+  - Split option help into aligned columns for flags, metavar/example values, and descriptions.
+  - Widened help columns so command names, option flags, and metavars line up more cleanly.
+
+- **Complete Public Argument Descriptions:** Added missing help text for public CLI arguments so help sections no longer show blank description fields.
+  - Improved consistency across subcommand help screens.
+  - Keeps public command help self-documenting and easier to understand [1].
 
 - **Hidden Internal Helper Command:** Removed the internal `vendor-ini-append` helper from user-facing help output.
   - This command remains available internally for GUI/elevated workflows.
-  - Prevents the helper from appearing as if it were a supported public command.
+  - Prevents the helper from appearing as if it were a supported public command [1][2].
 
 ### Fixes
-- **Ghost Command Help Output:** Fixed the issue where `audioctl -h` displayed the internal `vendor-ini-append` helper in the public subcommand list.
-- **Argparse Suppression Artifact:** Eliminated the confusing `==SUPPRESS==` text that appeared beside the hidden internal helper in help output.
-- **Consistent Help Presentation:** Help output now uses the same cleaner listing style and spacing throughout the CLI.
+- **Ghost Command Help Output:** Fixed the issue where `audioctl -h` displayed the internal `vendor-ini-append` helper in the public subcommand list [1].
+- **Argparse Suppression Artifact:** Eliminated the confusing `==SUPPRESS==` text that appeared beside the hidden internal helper in help output [1].
+- **Blank Help Descriptions:** Fixed missing parser help text that caused some public options to render with empty description columns in subcommand help [1].
+- **Consistent Help Presentation:** Help output now uses the same cleaner listing style, spacing, and alignment throughout the CLI [1].
 
 ---
 
