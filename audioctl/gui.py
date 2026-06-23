@@ -27,7 +27,7 @@ import re
 import subprocess
 import json
 import os
-from .logging_setup import resource_path, _log, _log_exc, _log_path
+from .logging_setup import resource_path, _log, _log_exc, _log_path, read_log_config, write_log_config
 from .compat import is_admin
 # GUI uses only CLI commands; it does not import low-level device helpers directly.
 # This keeps COM usage and raw registry/vtable interactions confined to the CLI layer.
@@ -419,9 +419,10 @@ def run_audioctl_interactive(args_list, prompt_patterns, expect_ok=True):
 class AudioGUI:
     def __init__(self, root):
         self.root = root
-        self.root.title("Mr5niper's Audio Control  v1.5.4.1  05-09-2026")
+        self.root.title("Mr5niper's Audio Control  v1.5.5.0  06-04-2026")
         # Style and theme
         style = ttk.Style(self.root)
+        self.style = style
         try:
             for theme in ("vista", "xpnative", "clam", "default"):
                 if theme in style.theme_names():
@@ -477,6 +478,61 @@ class AudioGUI:
             variable=self.print_cmd
         )
         self.chk_print_cmd.pack(side="left", padx=(10, 0))
+
+        # --- Theme selector (top-right empty space in the top bar) ---
+        # Looks-only feature: lets the user choose Dark / Light / System. The
+        # actual theming is applied by _apply_theme/_apply_widget_theme below and
+        # changes ONLY colors and styles, never behavior. The chosen value is
+        # persisted on the first line of the log file (see logging_setup).
+        self._theme_colors = {}
+        self._tooltip_bg = "#ffffe1"
+        self._tooltip_fg = "#111111"
+        self._tooltip_bd = "#a0a0a0"
+        # Load saved preference; default to System (the original look) if absent.
+        saved = ""
+        try:
+            saved = (read_log_config() or {}).get("theme", "")
+        except Exception:
+            saved = ""
+        if saved not in ("Dark", "Light", "System"):
+            saved = "System"
+        self.theme = saved
+        self.theme_var = tk.StringVar(value=self.theme)
+        self.theme_combo = ttk.Combobox(
+            self.topbar,
+            textvariable=self.theme_var,
+            values=["Dark", "Light", "System"],
+            state="readonly",
+            width=8,
+            takefocus=0,  # never acquire focus via tab or mouse click
+        )
+        self.theme_combo.pack(side="right")
+        self.theme_lbl = ttk.Label(self.topbar, text="Theme:")
+        self.theme_lbl.pack(side="right", padx=(0, 6))
+
+        # Safety net: if the combobox ever does acquire focus (which is what makes
+        # its field show a blue highlight block in System mode), immediately bounce
+        # focus to the device list. This only affects the widget frame, not the
+        # dropdown listbox popup, so the dropdown still opens and selects normally.
+        def _combo_focus_in(e):
+            try:
+                self.theme_combo.selection_clear()
+            except Exception:
+                pass
+            try:
+                self.tree.focus_set()
+            except Exception:
+                pass
+        self.theme_combo.bind("<FocusIn>", _combo_focus_in, add="+")
+
+        def _on_theme_selected(e):
+            self._set_theme(self.theme_var.get())
+            try:
+                self.theme_combo.selection_clear()
+            except Exception:
+                pass
+
+        self.theme_combo.bind("<<ComboboxSelected>>", _on_theme_selected)
         # Hard runtime suppression flag used during learn flows to keep console output clean.
         self._suppress_cli_prints = False
         # Treeview
@@ -516,6 +572,29 @@ class AudioGUI:
         self.console_txt.configure(selectbackground=bg_color, selectforeground="black")
 
         self.console_txt.pack(fill="both", expand=True, pady=(10, 0))
+
+        # Replace the classic tk.Scrollbar that ScrolledText created (Windows draws
+        # it natively and it cannot be themed dark) with a ttk.Scrollbar, which
+        # honors our Vertical.TScrollbar style. Functionally identical: it is wired
+        # to the same yview/yscrollcommand, just themeable.
+        try:
+            old_vbar = self.console_txt.vbar
+            ttk_vbar = ttk.Scrollbar(
+                self.console_txt.frame,
+                orient="vertical",
+                command=self.console_txt.yview,
+            )
+            self.console_txt.configure(yscrollcommand=ttk_vbar.set)
+            try:
+                old_vbar.pack_forget()
+                old_vbar.destroy()
+            except Exception:
+                pass
+            ttk_vbar.pack(side="right", fill="y")
+            # Keep ScrolledText's reference pointing at the live scrollbar.
+            self.console_txt.vbar = ttk_vbar
+        except Exception:
+            _log_exc("console scrollbar swap failed")
         # 2. Config tags to apply Blue highlight to text only
         # "cli_cmd" = Blue text (for CLI commands)
         self.console_txt.tag_config("cli_cmd", foreground="blue", selectforeground="white", selectbackground="#0078D7")
@@ -530,6 +609,7 @@ class AudioGUI:
         def show_console_menu(event):
             # Only show if there is a 'sel' (selection) tag present in the text box
             if self.console_txt.tag_ranges("sel"):
+                self._recolor_menu_entries(self.console_menu)
                 self.console_menu.tk_popup(event.x_root, event.y_root)
 
         self.console_txt.bind("<Button-3>", show_console_menu)
@@ -603,12 +683,549 @@ class AudioGUI:
         self.tree.bind("<<TreeviewSelect>>", self.on_select_change)
         # Optional: auto-refresh when window regains focus
         # self.root.bind("<FocusIn>", self.on_focus_in)
+        # Apply the selected theme now that every widget exists. This only
+        # changes colors/styles; it never alters behavior.
+        try:
+            self._apply_theme(self.theme)
+        except Exception:
+            _log_exc("initial theme apply failed")
         # Initial load
         self.refresh_devices()
+        # Recompute the window size AFTER the theme is applied and the widgets are
+        # fully realized, so the bottom status bar is never clipped. adjust_layout
+        # sizes from the live required heights, so running it post-theme captures
+        # the final top-bar/control metrics on every platform.
         self.root.after_idle(self.adjust_layout_to_content)
 
     def is_group_row(self, iid):
         return iid not in self.item_to_device
+
+    # ======================================================================
+    # Theming (looks only; no behavior changes)
+    # ----------------------------------------------------------------------
+    # Dark / Light / System support, ported from the approach used in the
+    # Pyicon Editor. The key lessons carried over from that project:
+    #   * Dark and Light both use the "clam" ttk theme, which lets us fully
+    #     control every color (the native themes ignore many color options).
+    #   * System resets to the platform native theme AND rewrites the same
+    #     neutral palette as Light, so no dark values linger as artifacts.
+    #   * ttk styling alone is not enough: classic tk widgets (the Treeview
+    #     body colors via style.map, the tk.Text console and its tags, native
+    #     tk.Menu popups, and Toplevel dialog backgrounds) must each be
+    #     re-themed explicitly, then the widgets nudged with update_idletasks
+    #     so nothing repaints with stale colors.
+    # All of this changes ONLY colors/styles. No command, subprocess call,
+    # data flow, or control logic is altered by any method here.
+    # ======================================================================
+    def _palette(self, mode_l):
+        """Return the color dict for a given lowercased mode ('dark'/'light'/'system')."""
+        if mode_l == "dark":
+            return {
+                "bg": "#2f3136",
+                "panel": "#3a3d41",
+                "control": "#44484d",
+                "hover": "#4b5157",
+                "pressed": "#58606a",
+                "text": "#f1f1f1",
+                "muted_text": "#cfcfcf",
+                "border": "#5a5f66",
+                "accent": "#6aa2ff",
+                "field": "#40444b",
+                "menu_bg": "#f0f0f0",
+                "menu_fg": "#111111",
+                "menu_active_bg": "#4a6a94",
+                "menu_active_fg": "#ffffff",
+                "menu_disabled_fg": "#9a9a9a",
+                "tree_bg": "#2b2d31",
+                "tree_field": "#2b2d31",
+                "tree_sel_bg": "#3d5a80",
+                "tree_sel_fg": "#ffffff",
+                "heading_bg": "#3a3d41",
+                "heading_fg": "#f1f1f1",
+                "console_bg": "#1e1f22",
+                "console_fg": "#e6e6e6",
+                "console_cli": "#6aa2ff",
+                "console_sel_bg": "#3d5a80",
+                "console_sel_fg": "#ffffff",
+                "status_bg": "#2b2d31",
+                "tooltip_bg": "#3a3d41",
+                "tooltip_fg": "#f1f1f1",
+                "tooltip_bd": "#5a5f66",
+                "scale_trough": "#40444b",
+                "scale_bg": "#2f3136",
+            }
+        if mode_l == "light":
+            # Light mode: neutral light surfaces, but with GREY highlights instead
+            # of the Windows blue, so Light is visually distinct from System.
+            return {
+                "bg": "#f0f0f0",
+                "panel": "#f6f6f6",
+                "control": "#ffffff",
+                "hover": "#e3e3e3",
+                "pressed": "#d2d2d2",
+                "text": "#111111",
+                "muted_text": "#333333",
+                "border": "#b8b8b8",
+                "accent": "#7a7a7a",
+                "field": "#ffffff",
+                "menu_bg": "#f0f0f0",
+                "menu_fg": "#111111",
+                "menu_active_bg": "#dfe8f7",
+                "menu_active_fg": "#111111",
+                "menu_disabled_fg": "#9a9a9a",
+                "tree_bg": "#ffffff",
+                "tree_field": "#ffffff",
+                "tree_sel_bg": "#dfe8f7",
+                "tree_sel_fg": "#111111",
+                "heading_bg": "#f0f0f0",
+                "heading_fg": "#111111",
+                "console_bg": "#ffffff",
+                "console_fg": "#000000",
+                "console_cli": "#1a4faa",
+                "console_sel_bg": "#c2c2c2",
+                "console_sel_fg": "#111111",
+                "status_bg": "#f0f0f0",
+                "tooltip_bg": "#ffffe1",
+                "tooltip_fg": "#111111",
+                "tooltip_bd": "#a0a0a0",
+                "scale_trough": "#ffffff",
+                "scale_bg": "#f0f0f0",
+            }
+        # System: the original neutral palette using Windows blue highlights, i.e.
+        # the look the app had before the theme feature existed.
+        return {
+            "bg": "#f0f0f0",
+            "panel": "#f6f6f6",
+            "control": "#ffffff",
+            "hover": "#e8e8e8",
+            "pressed": "#dcdcdc",
+            "text": "#111111",
+            "muted_text": "#333333",
+            "border": "#b8b8b8",
+            "accent": "#4a90ff",
+            "field": "#ffffff",
+            "menu_bg": "#f0f0f0",
+            "menu_fg": "#111111",
+            "menu_active_bg": "#0078d7",
+            "menu_active_fg": "#ffffff",
+            "tree_bg": "#ffffff",
+            "tree_field": "#ffffff",
+            "tree_sel_bg": "#0078d7",
+            "tree_sel_fg": "#ffffff",
+            "heading_bg": "#f0f0f0",
+            "heading_fg": "#111111",
+            "console_bg": "#ffffff",
+            "console_fg": "#000000",
+            "console_cli": "blue",
+            "console_sel_bg": "#0078D7",
+            "console_sel_fg": "white",
+            "status_bg": "#f0f0f0",
+            "tooltip_bg": "#ffffe1",
+            "tooltip_fg": "#111111",
+            "tooltip_bd": "#a0a0a0",
+            "scale_trough": "#ffffff",
+            "scale_bg": "#f0f0f0",
+        }
+
+    def _apply_theme(self, mode: str):
+        """Apply ttk styles for the chosen mode, then re-theme classic widgets."""
+        try:
+            mode_l = (mode or "System").lower()
+            style = self.style
+            colors = self._palette(mode_l)
+            self._theme_colors = colors
+            self._tooltip_bg = colors["tooltip_bg"]
+            self._tooltip_fg = colors["tooltip_fg"]
+            self._tooltip_bd = colors["tooltip_bd"]
+
+            if mode_l in ("dark", "light"):
+                # clam gives us full control of colors for both light and dark.
+                try:
+                    style.theme_use("clam")
+                except Exception:
+                    pass
+            else:
+                # System: native theme if available, else clam. We still rewrite
+                # the neutral palette afterwards so no dark values can linger.
+                try:
+                    if sys.platform.startswith("win"):
+                        used = False
+                        for native in ("vista", "xpnative"):
+                            if native in style.theme_names():
+                                style.theme_use(native)
+                                used = True
+                                break
+                        if not used:
+                            style.theme_use("default")
+                    else:
+                        style.theme_use("default")
+                except Exception:
+                    try:
+                        style.theme_use("clam")
+                    except Exception:
+                        pass
+
+            # --- ttk widget classes ---
+            try:
+                self.root.configure(bg=colors["bg"])
+            except Exception:
+                pass
+
+            style.configure(".", background=colors["bg"], foreground=colors["text"])
+            style.configure("TFrame", background=colors["bg"])
+            style.configure("TLabel", background=colors["bg"], foreground=colors["text"])
+            style.configure("TLabelframe", background=colors["bg"], foreground=colors["text"])
+            style.configure("TLabelframe.Label", background=colors["bg"], foreground=colors["text"])
+            style.configure("TCheckbutton", background=colors["bg"], foreground=colors["text"])
+            style.map(
+                "TCheckbutton",
+                background=[("active", colors["bg"])],
+                foreground=[("active", colors["text"])],
+            )
+
+            # Radiobuttons (Learn Enhancements dialog). Without an explicit style
+            # the indicator/label hover used the theme default (white block).
+            style.configure("TRadiobutton", background=colors["bg"], foreground=colors["text"])
+            style.map(
+                "TRadiobutton",
+                background=[("active", colors["bg"]), ("selected", colors["bg"])],
+                foreground=[("active", colors["text"]), ("selected", colors["text"])],
+                indicatorcolor=[("selected", colors["text"]), ("!selected", colors["field"])],
+            )
+
+            style.configure(
+                "TButton",
+                background=colors["control"],
+                foreground=colors["text"],
+                bordercolor=colors["border"],
+                lightcolor=colors["control"],
+                darkcolor=colors["control"],
+            )
+            style.map(
+                "TButton",
+                background=[("active", colors["hover"]), ("pressed", colors["pressed"])],
+                foreground=[("active", colors["text"]), ("pressed", colors["text"])],
+            )
+
+            style.configure(
+                "TEntry",
+                fieldbackground=colors["field"],
+                foreground=colors["text"],
+                insertcolor=colors["text"],
+            )
+
+            # Combobox (theme selector + the learn-flow effect picker).
+            style.configure(
+                "TCombobox",
+                fieldbackground=colors["field"],
+                background=colors["control"],
+                foreground=colors["text"],
+                arrowcolor=colors["text"],
+                bordercolor=colors["border"],
+                lightcolor=colors["control"],
+                darkcolor=colors["control"],
+            )
+            style.map(
+                "TCombobox",
+                fieldbackground=[("readonly", colors["field"]), ("disabled", colors["field"])],
+                foreground=[("readonly", colors["text"]), ("disabled", colors["muted_text"])],
+                selectbackground=[("readonly", colors["field"])],
+                selectforeground=[("readonly", colors["text"])],
+                background=[
+                    ("active", colors["control"]),
+                    ("pressed", colors["control"]),
+                    ("hover", colors["control"]),
+                    ("readonly", colors["control"]),
+                ],
+                arrowcolor=[
+                    ("active", colors["text"]),
+                    ("pressed", colors["text"]),
+                    ("hover", colors["text"]),
+                    ("disabled", colors["muted_text"]),
+                ],
+            )
+            # The Combobox dropdown list is a separate classic Listbox. option_add
+            # only affects widgets created AFTER it is set, and the popdown listbox
+            # is created once and cached, so option_add alone leaves an already-made
+            # dropdown stuck on its original colors. We set the option DB (for any
+            # future comboboxes) AND directly recolor the live popdown listbox of
+            # our theme combobox so it updates immediately.
+            try:
+                self.root.option_add("*TCombobox*Listbox.background", colors["field"])
+                self.root.option_add("*TCombobox*Listbox.foreground", colors["text"])
+                self.root.option_add("*TCombobox*Listbox.selectBackground", colors["tree_sel_bg"])
+                self.root.option_add("*TCombobox*Listbox.selectForeground", colors["tree_sel_fg"])
+            except Exception:
+                pass
+            try:
+                self._recolor_combobox_popdown(getattr(self, "theme_combo", None), colors)
+            except Exception:
+                pass
+
+            # Scales (volume dialog).
+            style.configure(
+                "Horizontal.TScale",
+                background=colors["scale_bg"],
+                troughcolor=colors["scale_trough"],
+                bordercolor=colors["border"],
+                lightcolor=colors["scale_trough"],
+                darkcolor=colors["scale_trough"],
+            )
+            style.map(
+                "Horizontal.TScale",
+                background=[("active", colors["scale_bg"])],
+                troughcolor=[("active", colors["scale_trough"])],
+            )
+
+            # Scrollbars (console scrolledtext).
+            for orient in ("Vertical.TScrollbar", "Horizontal.TScrollbar"):
+                style.configure(
+                    orient,
+                    background=colors["control"],
+                    troughcolor=colors["bg"],
+                    bordercolor=colors["border"],
+                    arrowcolor=colors["text"],
+                    lightcolor=colors["control"],
+                    darkcolor=colors["control"],
+                )
+                style.map(
+                    orient,
+                    background=[("active", colors["hover"]), ("pressed", colors["pressed"])],
+                )
+
+            style.configure("TSeparator", background=colors["border"])
+
+            # Treeview body + headings.
+            style.configure(
+                "Treeview",
+                background=colors["tree_bg"],
+                fieldbackground=colors["tree_field"],
+                foreground=colors["text"],
+                bordercolor=colors["border"],
+                lightcolor=colors["border"],
+                darkcolor=colors["border"],
+            )
+            style.map(
+                "Treeview",
+                background=[("selected", colors["tree_sel_bg"])],
+                foreground=[("selected", colors["tree_sel_fg"])],
+                bordercolor=[("focus", colors["border"]), ("!focus", colors["border"])],
+                lightcolor=[("focus", colors["border"]), ("!focus", colors["border"])],
+                darkcolor=[("focus", colors["border"]), ("!focus", colors["border"])],
+            )
+            style.configure(
+                "Treeview.Heading",
+                background=colors["heading_bg"],
+                foreground=colors["heading_fg"],
+                relief="flat",
+            )
+            style.map(
+                "Treeview.Heading",
+                background=[("active", colors["hover"])],
+                foreground=[("active", colors["heading_fg"])],
+            )
+
+            # Re-theme the classic (non-ttk) widgets and force a clean repaint.
+            self._apply_widget_theme()
+            self._force_full_theme_refresh()
+        except Exception:
+            _log_exc("Theme apply failed")
+
+    def _apply_widget_theme(self):
+        """Re-theme classic tk widgets that ttk styling does not reach."""
+        colors = self._theme_colors or {}
+
+        # Console (tk.Text inside scrolledtext) + its tags.
+        try:
+            if getattr(self, "console_txt", None) is not None and self.console_txt.winfo_exists():
+                self.console_txt.configure(
+                    background=colors["console_bg"],
+                    foreground=colors["console_fg"],
+                    insertbackground=colors["console_fg"],
+                )
+                # The original hid the selection block by matching it to the bg
+                # color; preserve that exact behavior with the themed bg.
+                self.console_txt.configure(
+                    selectbackground=colors["console_bg"],
+                    selectforeground=colors["console_fg"],
+                )
+                # Tags: keep the same roles (cli command vs stdout), themed colors.
+                self.console_txt.tag_config(
+                    "cli_cmd",
+                    foreground=colors["console_cli"],
+                    selectforeground=colors["console_sel_fg"],
+                    selectbackground=colors["console_sel_bg"],
+                )
+                self.console_txt.tag_config(
+                    "std_out",
+                    foreground=colors["console_fg"],
+                    selectforeground=colors["console_sel_fg"],
+                    selectbackground=colors["console_sel_bg"],
+                )
+        except Exception:
+            pass
+
+        # Native tk.Menu popups (context menu, fx submenu, console copy menu).
+        # We theme every color option tk.Menu exposes. Notably:
+        #  - disabledforeground: the greyed-out item text. Its default (#a3a3a3)
+        #    is a light grey that looked almost white on the dark menu; we set it
+        #    to a theme-appropriate muted color.
+        #  - activeborderwidth/borderwidth/relief: control the 1px highlight/frame
+        #    that tk draws around the menu and the hovered item.
+        # (On Windows the OS may still paint a thin outer system frame on the
+        # popup itself; that part is not controllable from tk.)
+        for menu_attr in ("menu", "fx_menu", "console_menu"):
+            m = getattr(self, menu_attr, None)
+            if m is not None:
+                try:
+                    m.configure(
+                        background=colors["menu_bg"],
+                        foreground=colors["menu_fg"],
+                        activebackground=colors["menu_active_bg"],
+                        activeforeground=colors["menu_active_fg"],
+                        disabledforeground=colors.get("menu_disabled_fg", colors["muted_text"]),
+                        bd=0,
+                        borderwidth=0,
+                        activeborderwidth=0,
+                        relief="flat",
+                        selectcolor=colors["menu_bg"],
+                    )
+                except Exception:
+                    pass
+
+        # Status label color follows the theme text.
+        try:
+            if getattr(self, "statusbar", None) is not None:
+                self.statusbar.configure(background=colors["status_bg"], foreground=colors["text"])
+        except Exception:
+            pass
+
+        # Console scrollbar: it is now a ttk.Scrollbar (swapped in at construction
+        # from the classic one ScrolledText creates). Its colors come from the
+        # Vertical.TScrollbar style configured in _apply_theme, so nothing extra
+        # is needed here.
+
+    def _force_full_theme_refresh(self):
+        """Nudge containers to repaint so no widget keeps stale colors."""
+        try:
+            for attr in ("container", "topbar", "bottombar"):
+                w = getattr(self, attr, None)
+                if w is not None:
+                    try:
+                        w.update_idletasks()
+                    except Exception:
+                        pass
+            self.root.update_idletasks()
+        except Exception:
+            pass
+
+    def _set_theme(self, theme: str):
+        """User picked a theme from the dropdown. Apply it and persist it."""
+        if theme not in ("Dark", "Light", "System"):
+            theme = "System"
+        self.theme = theme
+        try:
+            self.theme_var.set(theme)
+        except Exception:
+            pass
+        self._apply_theme(theme)
+        # Re-fit the window after a live theme change: switching ttk themes can
+        # change control metrics, so recompute the size the same way startup does.
+        try:
+            self.root.after_idle(self.adjust_layout_to_content)
+        except Exception:
+            pass
+        # Persist on the top line of the log (best-effort; never blocks the UI).
+        try:
+            write_log_config({"theme": theme})
+        except Exception:
+            pass
+
+
+    def _recolor_combobox_popdown(self, combo, colors):
+        """
+        Directly recolor a ttk.Combobox's dropdown (popdown) Listbox so it updates
+        live. The popdown is a cached Tk widget that ignores option_add changes
+        made after it was created, so we reach the actual listbox via Tcl
+        (ttk::combobox::PopdownWindow) and configure it in place.
+        """
+        if combo is None:
+            return
+        try:
+            popdown = combo.tk.call("ttk::combobox::PopdownWindow", combo)
+        except Exception:
+            return
+        listbox = str(popdown) + ".f.l"
+        for opt, val in (
+            ("-background", colors["field"]),
+            ("-foreground", colors["text"]),
+            ("-selectbackground", colors["tree_sel_bg"]),
+            ("-selectforeground", colors["tree_sel_fg"]),
+        ):
+            try:
+                combo.tk.call(listbox, "configure", opt, val)
+            except Exception:
+                pass
+        # Also theme the popdown frame border so it does not flash a light edge.
+        try:
+            combo.tk.call(str(popdown) + ".f", "configure", "-background", colors["border"])
+        except Exception:
+            pass
+
+    def _recolor_menu_entries(self, menu):
+        """
+        Give each menu entry an explicit per-entry foreground so DISABLED items
+        render flat instead of with Tk's classic engraved white shadow. Enabled
+        items get the normal menu text color; disabled items get a dim grey, and
+        that dim grey is also used as their per-entry activeforeground so a
+        disabled item stays grey (not white) when the mouse hovers over it.
+        This is looks-only: it does not change any item's enabled/disabled state,
+        so click behavior is identical. Call right before showing the menu.
+        """
+        colors = self._theme_colors or {}
+        fg = colors.get("menu_fg", "#111111")
+        dim = colors.get("menu_disabled_fg", "#888888")
+        active_fg = colors.get("menu_active_fg", "#ffffff")
+        try:
+            end = menu.index("end")
+        except Exception:
+            end = None
+        if end is None:
+            return
+        for i in range(end + 1):
+            try:
+                if menu.type(i) in ("separator", "tearoff"):
+                    continue
+                state = menu.entrycget(i, "state")
+                if state == "disabled":
+                    # Stay grey both normally and when highlighted.
+                    menu.entryconfig(i, foreground=dim, activeforeground=dim)
+                else:
+                    menu.entryconfig(i, foreground=fg, activeforeground=active_fg)
+            except Exception:
+                pass
+
+    def _theme_toplevel(self, top):
+        """Apply the current theme background to an on-demand dialog window."""
+        colors = self._theme_colors or {}
+        try:
+            top.configure(bg=colors.get("bg", "#f0f0f0"))
+        except Exception:
+            pass
+
+    def _theme_text(self, txt):
+        """Apply the current theme colors to a classic tk.Text widget."""
+        colors = self._theme_colors or {}
+        try:
+            txt.configure(
+                background=colors.get("console_bg", "#ffffff"),
+                foreground=colors.get("console_fg", "#000000"),
+                insertbackground=colors.get("console_fg", "#000000"),
+                selectbackground=colors.get("console_sel_bg", "#0078D7"),
+                selectforeground=colors.get("console_sel_fg", "white"),
+            )
+        except Exception:
+            pass
 
     def on_left_click(self, event):
         # Prevent selecting group header rows and prevent header-click behaviors.
@@ -1104,6 +1721,7 @@ class AudioGUI:
                     etype = self.menu.type(i)
                     if etype in ("command", "cascade", "checkbutton", "radiobutton"):
                         self.menu.entryconfig(i, state="disabled")
+                self._recolor_menu_entries(self.menu)
                 self.menu.tk_popup(event.x_root, event.y_root)
                 return
             # Enable all standard menu items
@@ -1253,6 +1871,7 @@ class AudioGUI:
                             self.menu.entryconfig(self.fx_cascade_index, state="disabled")
             except Exception:
                 pass
+            self._recolor_menu_entries(self.menu)
             self.menu.tk_popup(event.x_root, event.y_root)
         except Exception as e:
             try:
@@ -1678,6 +2297,7 @@ class AudioGUI:
             # Choice Dialog
             choice_dialog = tk.Toplevel(self.root)
             choice_dialog.title("Learn Enhancements")
+            self._theme_toplevel(choice_dialog)
             choice_dialog.transient(self.root)
             choice_dialog.grab_set()
             choice_dialog.resizable(False, False)
@@ -1787,6 +2407,7 @@ class AudioGUI:
         # Toplevel controller
         top = tk.Toplevel(self.root)
         top.title("Learn Enhancements (Non-blocking)")
+        self._theme_toplevel(top)
         top.transient(self.root)
         top.grab_set()
         top.resizable(True, True)
@@ -1799,6 +2420,7 @@ class AudioGUI:
         frm.pack(fill="both", expand=True)
         # Log area
         txt = tk.Text(frm, height=18, width=100, wrap="word")
+        self._theme_text(txt)
         txt.grid(row=0, column=0, columnspan=4, sticky="nsew", pady=(0, 8))
         frm.rowconfigure(0, weight=1)
         frm.columnconfigure(0, weight=1)
@@ -2224,6 +2846,7 @@ class AudioGUI:
 
     def open_volume_dialog(self, device_id, device_name):
         top = tk.Toplevel(self.root)
+        self._theme_toplevel(top)
         try:
             if sys.platform.startswith("win"):
                 top.iconbitmap(resource_path("audio.ico"))
@@ -2235,7 +2858,7 @@ class AudioGUI:
         top.resizable(False, False)
         frm = ttk.Frame(top, padding=12)
         frm.pack(fill="both", expand=True)
-        ttk.Label(frm, text=device_name, anchor="w").grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 8))
+        ttk.Label(frm, text=device_name, anchor="center").grid(row=0, column=0, columnspan=3, sticky="we", pady=(0, 8))
         # Query current volume via CLI so the dialog starts at the real device level.
         initial = 50
         try:
@@ -2336,6 +2959,26 @@ class AudioGUI:
         top.bind("<Return>", lambda e: ok())
         top.bind("<Escape>", lambda e: cancel())
         entry.focus_set()
+        # Make every Set Volume dialog at least as wide as the longest device name
+        # we have seen so far (this size becomes the floor). Shorter names will not
+        # shrink the dialog below this; a longer name can still make it grow.
+        try:
+            top.update_idletasks()
+            # The natural size the dialog wants for THIS device name/content.
+            natural_w = top.winfo_reqwidth()
+            natural_h = top.winfo_reqheight()
+            # Minimum floor width (pixels). Sized to comfortably fit a long name
+            # like "Koorui Monitor (no speakers currently) (AMD High Definition
+            # Audio Device)". The dialog grows past this only for an even longer
+            # name (natural_w larger than the floor).
+            MIN_W = 470
+            target_w = max(MIN_W, natural_w)
+            top.minsize(target_w, natural_h)
+            # Apply the floor immediately so short names also open at MIN_W.
+            if natural_w < target_w:
+                top.geometry(f"{target_w}x{natural_h}")
+        except Exception:
+            pass
         top.wait_window()
         return result["value"]
 
@@ -2554,5 +3197,3 @@ def launch_gui():
         _log_exc("MAINLOOP EXCEPTION")
     _log("launch_gui: mainloop exited")
     return 0
-
-

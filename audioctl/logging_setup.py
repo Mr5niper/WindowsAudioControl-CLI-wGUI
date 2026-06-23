@@ -414,3 +414,135 @@ def init_logging_runtime(enable_faulthandler=True):
     # Historically this module exposed an "init" call; we now keep it as a
     # compatibility shim and simply force lazy init.
     _ensure_init()
+
+
+# ---------------------------------------------------------------------------
+# Lightweight persisted config, stored as a single "#CONFIG ..." line kept at
+# the very top of the log file.
+#
+# Why store it in the log:
+# - The GUI already creates/appends to this log on every run, so the value
+#   survives across launches and only resets if the user clears or deletes the
+#   log. No extra config file to manage.
+# - The config lives on ONE line at the very top, so reading it is cheap: we
+#   only need the first line, never the (potentially large) log body.
+#
+# Format (single line, first line of file):
+#   #CONFIG key1=value1; key2=value2
+#
+# These helpers are best-effort and never raise: a logging/config read or write
+# failure must never break the application.
+# ---------------------------------------------------------------------------
+_CONFIG_PREFIX = "#CONFIG "
+
+
+def _parse_config_line(line: str) -> dict:
+    """Parse a '#CONFIG k=v; k=v' line into a dict. Returns {} if not a config line."""
+    out = {}
+    try:
+        if not line:
+            return out
+        s = line.lstrip("\ufeff").strip()
+        if not s.startswith(_CONFIG_PREFIX.strip()):
+            return out
+        body = s[len(_CONFIG_PREFIX.strip()):].strip()
+        for pair in body.split(";"):
+            pair = pair.strip()
+            if not pair or "=" not in pair:
+                continue
+            k, v = pair.split("=", 1)
+            out[k.strip()] = v.strip()
+    except Exception:
+        return {}
+    return out
+
+
+def _format_config_line(cfg: dict) -> str:
+    """Render a config dict back into a single '#CONFIG k=v; k=v' line (no newline)."""
+    parts = []
+    for k, v in cfg.items():
+        ks = str(k).strip()
+        vs = str(v).strip()
+        # Keep values single-line and free of our separators so the line stays parseable.
+        vs = vs.replace("\r", " ").replace("\n", " ").replace(";", ",")
+        if ks:
+            parts.append(f"{ks}={vs}")
+    return _CONFIG_PREFIX + "; ".join(parts)
+
+
+def read_log_config() -> dict:
+    """
+    Read the persisted config dict from the top of the log file.
+
+    Reads only the first line, so this is cheap regardless of log size. Returns
+    an empty dict if there is no log, no config line, or any error occurs.
+    """
+    try:
+        path = _log_path()  # resolves path without forcing creation
+        if not path or not os.path.exists(path):
+            return {}
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            first = f.readline()
+        return _parse_config_line(first)
+    except Exception:
+        return {}
+
+
+def write_log_config(updates: dict) -> None:
+    """
+    Merge `updates` into the persisted config and rewrite the single '#CONFIG'
+    line at the very top of the log file, preserving all existing log history.
+
+    Implementation note (Windows): the logging layer may hold an OPEN append
+    handle on this file (faulthandler). On Windows you cannot os.replace() a file
+    that has an open handle, so we must NOT swap the file out. Instead we rewrite
+    the SAME file in place (open 'r+', rewrite from offset 0, truncate). Writing
+    through the existing path does not conflict with a separate append handle.
+
+    Best-effort: on any failure this silently does nothing. It never raises and
+    never disturbs normal log appending.
+    """
+    if not updates:
+        return
+    try:
+        _ensure_resolved()
+        path = _LOG_PATH
+        if not path:
+            return
+
+        # Read current contents (if any).
+        body_lines = []
+        cfg = {}
+        if os.path.exists(path):
+            try:
+                with open(path, "r", encoding="utf-8", errors="replace") as f:
+                    existing = f.readlines()
+            except Exception:
+                existing = []
+            if existing:
+                first = existing[0]
+                if first.lstrip("\ufeff").strip().startswith(_CONFIG_PREFIX.strip()):
+                    cfg = _parse_config_line(first)
+                    body_lines = existing[1:]
+                else:
+                    body_lines = existing
+
+        cfg.update({str(k): str(v) for k, v in updates.items()})
+        new_first = _format_config_line(cfg) + "\n"
+        new_text = new_first + "".join(body_lines)
+
+        # Rewrite in place: open for read+write, overwrite from the start, then
+        # truncate any leftover tail. This keeps the same file (and inode/handle
+        # on POSIX, same file object on Windows) so a concurrently-open append
+        # handle is not invalidated and no os.replace is needed.
+        try:
+            with open(path, "r+", encoding="utf-8", errors="replace") as f:
+                f.seek(0)
+                f.write(new_text)
+                f.truncate()
+        except FileNotFoundError:
+            # No file yet: create it with just the config line on top.
+            with open(path, "w", encoding="utf-8", errors="replace") as f:
+                f.write(new_text)
+    except Exception:
+        return
