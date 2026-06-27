@@ -6,29 +6,44 @@ setlocal enabledelayedexpansion
 :: ==========================================================================
 set "REQUIRED_PYTHON_VERSION=3.13.12"
 set "PYTHON_DOWNLOAD_URL=https://www.python.org/downloads/release/python-31312/"
+set "PY=py -3.13"
 
 :: ==========================================================================
-:: Pre-flight Check: Verify Python Version
+:: Pre-flight Check: Verify Python Version (via py launcher, not PATH)
 :: ==========================================================================
 echo [INFO] Checking Python version...
 
-:: Get the current Python version output (e.g., "Python 3.13.12")
-for /f "tokens=2 delims= " %%v in ('python --version 2^>^&1') do set "CURRENT_PYTHON_VERSION=%%v"
-
-echo [INFO] Current Python version: !CURRENT_PYTHON_VERSION!
-echo [INFO] Required Python version: %REQUIRED_PYTHON_VERSION%
-
-if "!CURRENT_PYTHON_VERSION!" neq "%REQUIRED_PYTHON_VERSION%" (
+:: The py launcher lives in C:\Windows and is reachable even when the
+:: 'python' command on PATH is a different version (e.g. Python 2.7).
+%PY% --version >nul 2>&1
+if errorlevel 1 (
     echo.
-    echo [ERROR] Incorrect Python version detected.
-    echo.
+    echo [ERROR] Python 3.13 was not found via the py launcher.
     echo This build script requires Python %REQUIRED_PYTHON_VERSION%.
-    echo You are currently using version !CURRENT_PYTHON_VERSION!.
+    echo Tried: %PY%
     echo.
     echo Please install the correct version from:
     echo %PYTHON_DOWNLOAD_URL%
     echo.
-    echo [NOTE] Ensure you add Python to your PATH during installation.
+    echo [NOTE] During installation, enable the py launcher option.
+    goto :error
+)
+
+:: Capture the resolved version (e.g. "Python 3.13.12")
+for /f "tokens=2 delims= " %%v in ('%PY% --version 2^>^&1') do set "CURRENT_PYTHON_VERSION=%%v"
+
+echo [INFO] Current Python version: !CURRENT_PYTHON_VERSION!
+echo [INFO] Required Python version: %REQUIRED_PYTHON_VERSION%
+
+if not "!CURRENT_PYTHON_VERSION!"=="%REQUIRED_PYTHON_VERSION%" (
+    echo.
+    echo [ERROR] Incorrect Python version detected.
+    echo This build script requires Python %REQUIRED_PYTHON_VERSION%.
+    echo The py launcher resolved version !CURRENT_PYTHON_VERSION! instead.
+    echo.
+    echo Please install the correct version from:
+    echo %PYTHON_DOWNLOAD_URL%
+    echo.
     goto :error
 )
 
@@ -44,8 +59,8 @@ echo [INFO] Python version matches. Starting build process...
 echo [STEP 1/4] Creating virtual environment in '.\venv'...
 
 if not exist .\venv (
-    :: Use 'python' here since we just verified it is the correct version
-    python -m venv .\venv
+    :: Build the venv with the verified py-launcher 3.13, not bare 'python'.
+    %PY% -m venv .\venv
     if errorlevel 1 (
         echo [ERROR] Failed to create virtual environment.
         goto :error
