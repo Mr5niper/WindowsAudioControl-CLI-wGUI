@@ -3,12 +3,12 @@ This method uses the included batch script to automate environment creation, dep
 
 **Prerequisite:** Install Python 3.13.12  
 Download: https://www.python.org/downloads/release/python-31312/  
-*(Ensure you check "Add Python to environment variables" during installation or manually add them before build)*
+*(Enable the "py launcher" option during installation. The build resolves Python through the launcher, so Python does not need to be on PATH.)*
 
 1.  Navigate to the project folder.
 2.  Double-click **`BUILD_EXE.bat`**.
-    *   The script will verify your Python version matches `3.13.12`.
-    *   If the version is incorrect, it will pause and provide the download link.
+    *   The script resolves Python 3.13 through the `py -3.13` launcher and verifies it matches `3.13.12`. This works even when a different Python version (e.g. 2.7) owns PATH.
+    *   If the correct version is not found, it will pause and provide the download link.
 3.  Wait for the process to complete.
     *   It will automatically create a temporary virtual environment (`venv`), install `requirements.txt`, and run PyInstaller.
 4.  Locate your new executable in the **`dist`** folder.

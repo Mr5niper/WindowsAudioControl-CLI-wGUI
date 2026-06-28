@@ -1,5 +1,36 @@
 # AUDIOCTL.PY CHANGELOG
-## v1.5.4.1 - [current]
+## v1.5.5.0 - [current]
+### GUI Themes
+- **Dark / Light / System theme system:** Added a theme selector in the GUI top bar that restyles the entire interface. Dark and Light use the `clam` ttk theme for full color control; System follows the native Windows theme.
+  - Theming covers ttk widgets plus the classic widgets ttk cannot normally reach: the console text widget and its tags, native menus, and Toplevel dialogs.
+  - The window is re-fit after applying a theme so the status bar is never clipped.
+  - The selected theme is saved and restored on the next launch.
+
+### Theme Persistence
+- **Config line in the log:** The chosen theme is stored on the first line of the existing log file (`read_log_config` / `write_log_config`).
+  - Written via an in-place rewrite (`r+`, seek/write/truncate) rather than `os.replace()`, because the logger holds an open handle on the log on Windows and `os.replace()` cannot swap a file that has an open handle. Existing log history is preserved.
+
+### GUI Polish
+- Console scrollbar now follows the active theme instead of always rendering light on Windows (swapped the classic `tk.Scrollbar` for a themed `ttk.Scrollbar` on the same yview wiring).
+- Light mode uses grey selection/hover accents to stay visually distinct from System's native blue.
+- Combobox dropdown list recolored via Tcl so it follows theme switches.
+- Fixed stray white hover/select blocks on radio buttons (Learn Enhancements dialog), the combobox arrow hover, and the Treeview focus border.
+- Right-click, FX, and console context menus themed per mode with disabled items dimmed.
+- Theme combobox set `takefocus=0` with a FocusIn safety net so it never shows a stray highlight, while still opening and selecting normally.
+
+### Set Volume Dialog
+- Added a minimum width floor so the slider is the same size across short and long device names.
+- Centered the device name label above the slider.
+
+### Build
+- **BUILD_EXE.bat now resolves Python via the `py -3.13` launcher** instead of the bare `python` command on PATH, so the build works on machines where a different Python version owns PATH. The required patch version is still enforced, and the venv is created with the launcher's interpreter.
+
+### Compatibility
+- Looks-only release. No CLI commands, behavior, output, or device operations changed. Existing scripts and integrations are unaffected.
+
+---
+
+## v1.5.4.1
 ### CLI Help & UX
 - **Unified Help Formatting:** Reworked CLI help output to use a cleaner, more readable layout across the root command and all subcommands.
   - Replaced the default argparse `{cmd1,cmd2,...}` display with a simplified `COMMAND` listing.
